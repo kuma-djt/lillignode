@@ -1,0 +1,22 @@
+[package]
+name = "lillignode"
+version = "0.1.0"
+edition = "2021"
+description = "Run several AI coding agents in one terminal window, each in its own folder, and see what each is doing."
+license = "AGPL-3.0-only"
+authors = ["Turnbow Analytics LLC"]
+repository = "https://github.com/kuma-djt/lillignode"
+readme = "README.md"
+publish = false
+
+[dependencies]
+crossterm = "0.29"
+portable-pty = "0.9"
+ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+uuid = { version = "1.29.2", features = ["v4"] }
+vt100 = "0.18"
+
+[profile.release]
+lto = "thin"

@@ -1,0 +1,37 @@
+name: Feature request
+description: Something you want Lillignode to do
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Not sure yet, or want to talk it through first? Start a thread in Discussions instead.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+      description: The task, not the solution. What were you doing when you wanted this?
+    validations:
+      required: true
+  - type: textarea
+    id: today
+    attributes:
+      label: What do you do today instead?
+  - type: textarea
+    id: idea
+    attributes:
+      label: What you would like Lillignode to do
+    validations:
+      required: true
+  - type: textarea
+    id: failure
+    attributes:
+      label: What should happen when it cannot?
+      description: Every feature here ships with its failure path. If you have thought about what the user should see when this goes wrong, say so.
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Before you send
+      options:
+        - label: This does not need Lillignode to ask for, read, or store API keys.
+        - label: This does not need Lillignode to send anything off the machine.

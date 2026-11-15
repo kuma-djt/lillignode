@@ -1,0 +1,177 @@
+//! Agents as child processes of this window, each in its own pseudo-terminal.
+
+use std::collections::HashMap;
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
+use std::sync::mpsc::Sender;
+use std::thread;
+
+use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
+
+use crate::agent::{AgentBackend, AgentEvent, AgentId, AgentSpec, Exit, Size, StartError};
+
+struct Running {
+    master: Box<dyn MasterPty + Send>,
+    writer: Box<dyn Write + Send>,
+    killer: Box<dyn ChildKiller + Send + Sync>,
+}
+
+pub struct LocalAgents<E> {
+    next_id: u32,
+    running: HashMap<AgentId, Running>,
+    events: Sender<E>,
+}
+
+impl<E: From<AgentEvent> + Send + 'static> LocalAgents<E> {
+    pub fn new(events: Sender<E>) -> Self {
+        Self { next_id: 1, running: HashMap::new(), events }
+    }
+}
+
+fn pty_size(size: Size) -> PtySize {
+    PtySize { rows: size.rows.max(1), cols: size.cols.max(1), pixel_width: 0, pixel_height: 0 }
+}
+
+/// Find the file the operating system should run for `command`.
+///
+/// On Windows this must not be left to the pseudo-terminal library: tools
+/// installed through npm (Claude Code among them) put an extensionless Unix
+/// shell script next to the real `.cmd` launcher, and a lookup that tries the
+/// bare name first picks the script and fails with "not a valid Win32
+/// application". So extensions from PATHEXT are tried first, and a bare name
+/// is never accepted on Windows.
+pub fn resolve_command(command: &str) -> Option<PathBuf> {
+    let exts: Vec<String> = if cfg!(windows) {
+        std::env::var("PATHEXT")
+            .unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into())
+            .split(';')
+            .filter(|e| !e.is_empty())
+            .map(str::to_owned)
+            .collect()
+    } else {
+        vec![String::new()]
+    };
+    let candidates = |base: &Path| -> Option<PathBuf> {
+        if cfg!(windows) && base.extension().is_some() && base.is_file() {
+            return Some(base.to_path_buf());
+        }
+        exts.iter()
+            .map(|ext| {
+                let mut name = base.as_os_str().to_owned();
+                name.push(ext);
+                PathBuf::from(name)
+            })
+            .find(|p| p.is_file())
+    };
+
+    let given = Path::new(command);
+    if given.components().count() > 1 {
+        return candidates(given);
+    }
+    let paths = std::env::var_os("PATH")?;
+    std::env::split_paths(&paths).find_map(|dir| candidates(&dir.join(command)))
+}
+
+/// Build the process to launch. Windows batch launchers (`.cmd`, `.bat`)
+/// cannot be started directly and go through the command interpreter.
+fn command_for(program: &Path, args: &[String]) -> CommandBuilder {
+    let is_batch = program
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("cmd") || e.eq_ignore_ascii_case("bat"));
+    let mut cmd = if cfg!(windows) && is_batch {
+        let mut c = CommandBuilder::new("cmd.exe");
+        c.args(["/d", "/c"]);
+        c.arg(program);
+        c
+    } else {
+        CommandBuilder::new(program)
+    };
+    cmd.args(args);
+    cmd
+}
+
+impl<E: From<AgentEvent> + Send + 'static> AgentBackend for LocalAgents<E> {
+    fn start(&mut self, spec: &AgentSpec, size: Size) -> Result<AgentId, StartError> {
+        if !spec.folder.is_dir() {
+            return Err(StartError::FolderMissing(spec.folder.clone()));
+        }
+        let Some(program) = resolve_command(&spec.command) else {
+            return Err(StartError::CommandNotFound(spec.command.clone()));
+        };
+
+        let failed = |e: &dyn std::fmt::Display| StartError::Failed(e.to_string());
+        let pair = native_pty_system().openpty(pty_size(size)).map_err(|e| failed(&e))?;
+
+        let mut cmd = command_for(&program, &spec.args);
+        cmd.cwd(&spec.folder);
+        let mut child = pair.slave.spawn_command(cmd).map_err(|e| failed(&e))?;
+        // The agent holds its own end now; keeping ours open would stop the
+        // reader below from ever seeing end-of-output.
+        drop(pair.slave);
+
+        let mut reader = pair.master.try_clone_reader().map_err(|e| failed(&e))?;
+        let writer = pair.master.take_writer().map_err(|e| failed(&e))?;
+        let killer = child.clone_killer();
+
+        let id = AgentId(self.next_id);
+        self.next_id += 1;
+
+        let out = self.events.clone();
+        thread::spawn(move || {
+            let mut buf = [0u8; 8192];
+            loop {
+                match reader.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        if out.send(AgentEvent::Output(id, buf[..n].to_vec()).into()).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+
+        let done = self.events.clone();
+        thread::spawn(move || {
+            // If waiting itself fails we cannot know the exit code. Report a
+            // non-zero one so it is never shown as a clean exit.
+            let code = child.wait().map(|s| s.exit_code()).unwrap_or(u32::MAX);
+            let _ = done.send(AgentEvent::Exited(id, Exit { code }).into());
+        });
+
+        self.running.insert(id, Running { master: pair.master, writer, killer });
+        Ok(id)
+    }
+
+    fn send(&mut self, id: AgentId, bytes: &[u8]) -> std::io::Result<()> {
+        match self.running.get_mut(&id) {
+            Some(r) => {
+                r.writer.write_all(bytes)?;
+                r.writer.flush()
+            }
+            None => Err(std::io::Error::new(std::io::ErrorKind::NotFound, "agent is not running")),
+        }
+    }
+
+    fn resize(&mut self, id: AgentId, size: Size) {
+        if let Some(r) = self.running.get(&id) {
+            let _ = r.master.resize(pty_size(size));
+        }
+    }
+
+    fn close(&mut self, id: AgentId) {
+        if let Some(mut r) = self.running.remove(&id) {
+            // Killing an agent that already exited fails, and that is fine.
+            let _ = r.killer.kill();
+        }
+    }
+}
+
+impl<E> Drop for LocalAgents<E> {
+    fn drop(&mut self) {
+        for (_, mut r) in self.running.drain() {
+            let _ = r.killer.kill();
+        }
+    }
+}

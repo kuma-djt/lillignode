@@ -1,0 +1,64 @@
+name: Bug report
+description: Something Lillignode did wrong, or did not do
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. Lillignode is v0.1 and rough, so this helps.
+
+        **Security problems do not go here.** Use the Security tab, "Report a vulnerability".
+        **Leave out anything secret:** no API keys, and no conversation contents you would not post in public.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, step by step, and what Lillignode did.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected instead
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Lillignode version
+      description: The output of `lillignode --version`, or the commit you built from.
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: Operating system and terminal
+      placeholder: Windows 11, Windows Terminal 1.25
+    validations:
+      required: true
+  - type: input
+    id: agent
+    attributes:
+      label: Agent and its version
+      placeholder: Claude Code 2.1.325
+  - type: dropdown
+    id: pty
+    attributes:
+      label: "Windows only: are conpty.dll and OpenConsole.exe beside lillignode.exe?"
+      options:
+        - "Yes"
+        - "No"
+        - Not sure
+        - Not on Windows
+  - type: textarea
+    id: status-report
+    attributes:
+      label: Status and cost report, if this is about a wrong status or cost
+      description: Press the menu key (Ctrl+Q or F12), then `s`, and paste the text. Check it holds nothing private first.
+      render: text
+  - type: textarea
+    id: notice
+    attributes:
+      label: Any message Lillignode showed
+      description: The yellow notice lines, or anything printed after it closed.
+      render: text

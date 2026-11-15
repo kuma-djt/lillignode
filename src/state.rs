@@ -1,0 +1,325 @@
+//! The saved workspace: one plain JSON file on local disk.
+//!
+//! What is saved: which agents are open, in which folders, and which one was
+//! in front. What is never saved: anything an agent printed, and any key or
+//! token. Nothing here leaves the machine.
+//!
+//! Failure rules:
+//! - Saving never leaves a half-written file. The new file is written beside
+//!   the old one and swapped in; the old one is kept as the previous copy.
+//! - A file that cannot be read is never deleted or overwritten. It is moved
+//!   aside under a new name and the user is told where it is.
+//! - Loading always produces a workspace (possibly empty) plus a notice saying
+//!   exactly which of the cases below happened.
+
+use std::fs;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::time::SystemTime;
+
+use serde::{Deserialize, Serialize};
+
+/// Bumped only when an older Lillignode could misread the file.
+pub const VERSION: u32 = 1;
+
+const FILE: &str = "workspace.json";
+const PREVIOUS: &str = "workspace.previous.json";
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedAgent {
+    /// What the user sees in the sidebar, for example "Claude Code".
+    pub name: String,
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    pub folder: PathBuf,
+    /// The id of the agent's conversation, for agents Lillignode knows how to
+    /// resume. It identifies a conversation the agent itself stores; it is
+    /// not a key and grants nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedWorkspace {
+    pub version: u32,
+    pub agents: Vec<SavedAgent>,
+    /// Index into `agents` of the one in front. Absent when there are none.
+    #[serde(default)]
+    pub focused: Option<usize>,
+}
+
+impl Default for SavedWorkspace {
+    fn default() -> Self {
+        Self { version: VERSION, agents: Vec::new(), focused: None }
+    }
+}
+
+/// What happened when loading. Each case reads differently to the user.
+#[derive(Debug, PartialEq, Eq)]
+pub enum LoadOutcome {
+    /// No saved workspace: first run, or the user closed everything.
+    Nothing,
+    /// The saved workspace was read.
+    Loaded,
+    /// The saved workspace was unreadable; the previous copy was used.
+    UsedPrevious { unreadable_kept_as: PathBuf, previous_saved: Option<SystemTime>, why: String },
+    /// The saved workspace was unreadable and there was no usable previous copy.
+    Lost { unreadable_kept_as: PathBuf, why: String },
+}
+
+pub struct Loaded {
+    pub workspace: SavedWorkspace,
+    pub outcome: LoadOutcome,
+}
+
+/// Where the workspace is saved. `LILLIGNODE_STATE_DIR` overrides the default.
+pub fn default_dir() -> Result<PathBuf, String> {
+    if let Some(dir) = std::env::var_os("LILLIGNODE_STATE_DIR").filter(|d| !d.is_empty()) {
+        return Ok(PathBuf::from(dir));
+    }
+    let var = |name: &str| std::env::var_os(name).filter(|v| !v.is_empty()).map(PathBuf::from);
+    if cfg!(windows) {
+        var("APPDATA").map(|d| d.join("Lillignode")).ok_or_else(|| "APPDATA is not set".to_string())
+    } else if let Some(dir) = var("XDG_STATE_HOME") {
+        Ok(dir.join("lillignode"))
+    } else {
+        var("HOME")
+            .map(|d| d.join(".local").join("state").join("lillignode"))
+            .ok_or_else(|| "HOME is not set".to_string())
+    }
+}
+
+/// Why the workspace could not be claimed for this window.
+#[derive(Debug)]
+pub enum ClaimError {
+    /// Another Lillignode window already has it.
+    InUse,
+    Other(String),
+}
+
+/// Claim the saved workspace for this window, for as long as the returned
+/// file is kept. Two windows sharing one workspace would each reopen the same
+/// agents in the same folders and then overwrite each other's saves, so the
+/// second one is refused. The operating system releases the claim when the
+/// process ends, however it ends, so a crash cannot leave it stuck.
+pub fn claim(dir: &Path) -> Result<fs::File, ClaimError> {
+    fs::create_dir_all(dir)
+        .map_err(|e| ClaimError::Other(format!("could not create {}: {e}", dir.display())))?;
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(dir.join("in-use.lock"))
+        .map_err(|e| ClaimError::Other(e.to_string()))?;
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(fs::TryLockError::WouldBlock) => Err(ClaimError::InUse),
+        Err(fs::TryLockError::Error(e)) => Err(ClaimError::Other(e.to_string())),
+    }
+}
+
+pub fn file_in(dir: &Path) -> PathBuf {
+    dir.join(FILE)
+}
+
+fn read(path: &Path) -> Result<SavedWorkspace, String> {
+    let text = fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let ws: SavedWorkspace = serde_json::from_str(&text).map_err(|e| format!("it is not valid ({e})"))?;
+    if ws.version > VERSION {
+        return Err(format!(
+            "it was saved by a newer Lillignode (format {}, this one reads up to {VERSION})",
+            ws.version
+        ));
+    }
+    Ok(ws)
+}
+
+/// Move an unreadable file out of the way without losing it.
+fn set_aside(path: &Path) -> PathBuf {
+    let stamp = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let kept = path.with_file_name(format!("workspace.unreadable-{stamp}.json"));
+    // If the move fails the file stays where it is, which is also not lost.
+    // The next save will then keep it as the previous copy.
+    match fs::rename(path, &kept) {
+        Ok(()) => kept,
+        Err(_) => path.to_path_buf(),
+    }
+}
+
+pub fn load(dir: &Path) -> Loaded {
+    let path = dir.join(FILE);
+    let previous = dir.join(PREVIOUS);
+    let current_exists = path.exists();
+
+    if current_exists {
+        match read(&path) {
+            Ok(workspace) => return Loaded { workspace, outcome: LoadOutcome::Loaded },
+            Err(why) => {
+                let unreadable_kept_as = set_aside(&path);
+                return match read(&previous) {
+                    Ok(workspace) => {
+                        let previous_saved = fs::metadata(&previous).and_then(|m| m.modified()).ok();
+                        Loaded {
+                            workspace,
+                            outcome: LoadOutcome::UsedPrevious { unreadable_kept_as, previous_saved, why },
+                        }
+                    }
+                    Err(_) => Loaded {
+                        workspace: SavedWorkspace::default(),
+                        outcome: LoadOutcome::Lost { unreadable_kept_as, why },
+                    },
+                };
+            }
+        }
+    }
+    // No current file. A previous copy on its own means a save was interrupted
+    // between its two steps; the previous copy is the newest complete one.
+    match read(&previous) {
+        Ok(workspace) => Loaded { workspace, outcome: LoadOutcome::Loaded },
+        Err(_) => Loaded { workspace: SavedWorkspace::default(), outcome: LoadOutcome::Nothing },
+    }
+}
+
+pub fn save(dir: &Path, workspace: &SavedWorkspace) -> Result<(), String> {
+    let fail = |what: &str, e: std::io::Error| format!("{what}: {e}");
+    fs::create_dir_all(dir).map_err(|e| fail("could not create the folder", e))?;
+    let path = dir.join(FILE);
+    let previous = dir.join(PREVIOUS);
+    let fresh = dir.join("workspace.writing.json");
+
+    let json = serde_json::to_string_pretty(workspace).map_err(|e| e.to_string())?;
+    {
+        let mut f = fs::File::create(&fresh).map_err(|e| fail("could not write", e))?;
+        f.write_all(json.as_bytes()).map_err(|e| fail("could not write", e))?;
+        f.write_all(b"\n").map_err(|e| fail("could not write", e))?;
+        f.sync_all().map_err(|e| fail("could not write", e))?;
+    }
+    // Keep the last good file as the previous copy, then swap the new one in.
+    // If we stop between the two steps, `load` falls back to the previous copy.
+    if path.exists() {
+        fs::rename(&path, &previous).map_err(|e| fail("could not keep the previous copy", e))?;
+    }
+    fs::rename(&fresh, &path).map_err(|e| fail("could not replace the saved workspace", e))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("lillignode-test-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn one(name: &str) -> SavedWorkspace {
+        SavedWorkspace {
+            version: VERSION,
+            agents: vec![SavedAgent {
+                name: name.into(),
+                command: "claude".into(),
+                args: vec![],
+                folder: PathBuf::from("C:/work"),
+                conversation: Some("0b0e7f0a-0000-4000-8000-000000000001".into()),
+            }],
+            focused: Some(0),
+        }
+    }
+
+    #[test]
+    fn first_run_is_nothing_not_an_error() {
+        let dir = temp_dir("first");
+        let l = load(&dir.join("does-not-exist"));
+        assert_eq!(l.outcome, LoadOutcome::Nothing);
+        assert!(l.workspace.agents.is_empty());
+    }
+
+    #[test]
+    fn saves_and_loads_back_the_same() {
+        let dir = temp_dir("roundtrip");
+        save(&dir, &one("a")).unwrap();
+        let l = load(&dir);
+        assert_eq!(l.outcome, LoadOutcome::Loaded);
+        assert_eq!(l.workspace, one("a"));
+    }
+
+    #[test]
+    fn corrupt_file_falls_back_to_previous_and_is_kept() {
+        let dir = temp_dir("corrupt");
+        save(&dir, &one("older")).unwrap();
+        save(&dir, &one("newer")).unwrap();
+        fs::write(dir.join(FILE), "{ this is not json").unwrap();
+
+        let l = load(&dir);
+        assert_eq!(l.workspace, one("older"));
+        let LoadOutcome::UsedPrevious { unreadable_kept_as, .. } = l.outcome else {
+            panic!("expected UsedPrevious, got {:?}", l.outcome)
+        };
+        assert_eq!(fs::read_to_string(unreadable_kept_as).unwrap(), "{ this is not json");
+    }
+
+    #[test]
+    fn corrupt_file_with_no_previous_starts_empty_and_is_kept() {
+        let dir = temp_dir("lost");
+        fs::write(dir.join(FILE), "").unwrap();
+        let l = load(&dir);
+        assert!(l.workspace.agents.is_empty());
+        let LoadOutcome::Lost { unreadable_kept_as, .. } = l.outcome else {
+            panic!("expected Lost, got {:?}", l.outcome)
+        };
+        assert!(unreadable_kept_as.exists());
+        // Saving afterwards must not destroy the file that was set aside.
+        save(&dir, &one("after")).unwrap();
+        assert!(unreadable_kept_as.exists());
+    }
+
+    #[test]
+    fn file_from_a_newer_version_is_not_loaded_or_overwritten() {
+        let dir = temp_dir("newer");
+        let text = r#"{"version": 999, "agents": [], "future_field": true}"#;
+        fs::write(dir.join(FILE), text).unwrap();
+        let l = load(&dir);
+        let LoadOutcome::Lost { unreadable_kept_as, why } = l.outcome else {
+            panic!("expected Lost, got {:?}", l.outcome)
+        };
+        assert!(why.contains("newer Lillignode"), "{why}");
+        save(&dir, &one("mine")).unwrap();
+        assert_eq!(fs::read_to_string(unreadable_kept_as).unwrap(), text);
+    }
+
+    #[test]
+    fn interrupted_save_loads_the_previous_copy() {
+        let dir = temp_dir("interrupted");
+        save(&dir, &one("a")).unwrap();
+        // Simulate stopping after the current file was renamed away.
+        fs::rename(dir.join(FILE), dir.join(PREVIOUS)).unwrap();
+        fs::write(dir.join("workspace.writing.json"), "{ half").unwrap();
+        let l = load(&dir);
+        assert_eq!(l.outcome, LoadOutcome::Loaded);
+        assert_eq!(l.workspace, one("a"));
+    }
+
+    #[test]
+    fn missing_fields_are_an_error_not_a_silent_default() {
+        let dir = temp_dir("fields");
+        fs::write(dir.join(FILE), r#"{"version": 1, "agents": [{"name": "x"}]}"#).unwrap();
+        assert!(matches!(load(&dir).outcome, LoadOutcome::Lost { .. }));
+    }
+}
+
+#[cfg(test)]
+mod claim_tests {
+    use super::*;
+
+    #[test]
+    fn a_second_claim_is_refused_until_the_first_is_released() {
+        let dir = std::env::temp_dir().join(format!("lillignode-test-claim-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let first = claim(&dir).unwrap();
+        assert!(matches!(claim(&dir), Err(ClaimError::InUse)));
+        drop(first);
+        assert!(claim(&dir).is_ok());
+    }
+}

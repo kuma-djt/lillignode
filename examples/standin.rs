@@ -1,0 +1,379 @@
+//! Development tool, not part of the product.
+//!
+//! A stand-in for an agent, so tests never run against a real one. It reads
+//! its input the way Claude Code does (raw, with pastes arriving as one
+//! marked block) and reports exactly what it received.
+//!
+//!   standin echo            accept pastes as one block; report input
+//!   standin echo-plain      do not ask for pastes as one block
+//!   standin stream <n>      print n numbered lines quickly, then echo
+//!   standin fullscreen      switch to a full-screen mode with no history
+//!   standin claude ...      behave like Claude Code for conversation ids:
+//!                             --session-id <id>   new conversation
+//!                             --resume <id>       continue one, or fail
+//!                           Conversations are files in $STANDIN_HOME.
+//!                           Each thing said is also recorded, with token
+//!                           counts, the way Claude Code is described as
+//!                           recording a conversation, under
+//!                           $CLAUDE_CONFIG_DIR (see `record_reply`). Saying
+//!                           "garble" records a reply with no counts, and
+//!                           "newmodel" one from a model with no price.
+//!   standin status          report status the way Claude Code 2.1.325 does:
+//!                           ask the status question, then report on keys
+//!                           (see `status_mode`)
+//!   standin status-silent   never ask, never report
+//!   standin status-echo     ask the status question the way Claude Code
+//!                           does, then take pastes and report input as
+//!                           `echo` does
+//!
+//! Ctrl+D ends it. What it prints:
+//!   ENTER                    an Enter press that was not inside a paste
+//!   PASTE <n> lines: <text>  a paste that arrived as one block
+//!   STATUS enters=<a> pastes=<b> typed=<text>
+
+use std::io::{Read, Write};
+use std::path::PathBuf;
+
+#[cfg(windows)]
+mod console {
+    use std::ffi::c_void;
+    extern "system" {
+        fn GetStdHandle(which: u32) -> *mut c_void;
+        fn GetConsoleMode(handle: *mut c_void, mode: *mut u32) -> i32;
+        fn SetConsoleMode(handle: *mut c_void, mode: u32) -> i32;
+    }
+    const STDIN: u32 = -10i32 as u32;
+    const STDOUT: u32 = -11i32 as u32;
+
+    /// Raw input with terminal sequences passed through untouched, which is
+    /// what a Node program such as Claude Code asks Windows for.
+    pub fn raw() {
+        // SAFETY: plain calls into the Windows console API with handles the
+        // system gave us and a pointer to a local.
+        unsafe {
+            let input = GetStdHandle(STDIN);
+            let mut mode = 0u32;
+            if GetConsoleMode(input, &mut mode) != 0 {
+                // Clear line input, echo, and Ctrl+C handling; ask for raw sequences.
+                SetConsoleMode(input, (mode & !0x0007) | 0x0200);
+            }
+            let output = GetStdHandle(STDOUT);
+            if GetConsoleMode(output, &mut mode) != 0 {
+                SetConsoleMode(output, mode | 0x0004);
+            }
+        }
+    }
+}
+
+#[cfg(not(windows))]
+mod console {
+    pub fn raw() {
+        let _ = std::process::Command::new("stty").args(["raw", "-echo"]).status();
+    }
+}
+
+const PASTE_START: &str = "\x1b[200~";
+const PASTE_END: &str = "\x1b[201~";
+
+fn say(text: &str) {
+    let mut out = std::io::stdout();
+    let _ = write!(out, "{text}\r\n");
+    let _ = out.flush();
+    // For checks in a real terminal window, where the screen cannot be read.
+    if let Some(log) = std::env::var_os("STANDIN_LOG") {
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(log) {
+            let _ = writeln!(f, "{text}");
+        }
+    }
+}
+
+fn shown(text: &str) -> String {
+    text.escape_debug().to_string()
+}
+
+/// Read input until Ctrl+D, reporting what arrives. `on_message` is called
+/// with the typed text each time Enter is pressed outside a paste.
+fn echo(mut on_message: impl FnMut(&str)) {
+    let (mut enters, mut pastes) = (0u32, 0u32);
+    let mut typed = String::new();
+    let mut pending = String::new();
+    let mut stdin = std::io::stdin();
+    let mut buf = [0u8; 4096];
+    loop {
+        let n = match stdin.read(&mut buf) {
+            Ok(0) | Err(_) => return,
+            Ok(n) => n,
+        };
+        pending.push_str(&String::from_utf8_lossy(&buf[..n]));
+        loop {
+            if let Some(rest) = pending.strip_prefix(PASTE_START) {
+                let Some(end) = rest.find(PASTE_END) else { break };
+                let body = rest[..end].to_string();
+                pending = rest[end + PASTE_END.len()..].to_string();
+                pastes += 1;
+                let lines = body.split(['\r', '\n']).count();
+                say(&format!("PASTE {lines} lines: {}", shown(&body)));
+                typed.push_str(&body);
+                continue;
+            }
+            // Part of a paste marker may have arrived; wait for the rest.
+            if !pending.is_empty() && PASTE_START.starts_with(pending.as_str()) && pending.len() > 1 {
+                break;
+            }
+            let Some(c) = pending.chars().next() else { break };
+            pending.drain(..c.len_utf8());
+            match c {
+                '\u{4}' => return,
+                '\r' => {
+                    enters += 1;
+                    say("ENTER");
+                    on_message(&typed);
+                    typed.clear();
+                }
+                '\u{7f}' | '\u{8}' => {
+                    typed.pop();
+                }
+                c => typed.push(c),
+            }
+        }
+        say(&format!("STATUS enters={enters} pastes={pastes} typed={}", shown(&typed)));
+    }
+}
+
+fn base64(text: &str) -> String {
+    const A: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for chunk in text.as_bytes().chunks(3) {
+        let n = chunk.iter().enumerate().fold(0u32, |n, (i, &b)| n | (b as u32) << (16 - 8 * i));
+        for i in 0..=chunk.len() {
+            out.push(A[(n >> (18 - 6 * i) & 63) as usize] as char);
+        }
+    }
+    while !out.len().is_multiple_of(4) {
+        out.push('=');
+    }
+    out
+}
+
+/// Record one request and its reply for conversation `id`, the way Claude
+/// Code is described as doing: a file of one JSON object per line, named for
+/// the conversation, in a folder per project. Each reply counts 32,000
+/// tokens. Nothing is written unless CLAUDE_CONFIG_DIR names a folder, so
+/// this can never land in a real Claude Code folder by default.
+fn record_reply(id: &str, nth: usize, said: &str) {
+    let Some(config) = std::env::var_os("CLAUDE_CONFIG_DIR").filter(|d| !d.is_empty()) else { return };
+    let dir = PathBuf::from(config).join("projects").join("standin-project");
+    let _ = std::fs::create_dir_all(&dir);
+    let Ok(mut file) =
+        std::fs::OpenOptions::new().create(true).append(true).open(dir.join(format!("{id}.jsonl")))
+    else {
+        return;
+    };
+    let model = if said == "newmodel" { "claude-new-9" } else { "claude-opus-5-5" };
+    let reply = |output: u32| {
+        format!(
+            "{{\"type\":\"assistant\",\"sessionId\":\"{id}\",\"message\":{{\"id\":\"msg_{nth}\",\"model\":\"{model}\",\
+             \"role\":\"assistant\",\"content\":[],\"usage\":{{\"input_tokens\":1000,\"output_tokens\":{output},\
+             \"cache_creation_input_tokens\":10000,\"cache_read_input_tokens\":20500}}}}}}\n"
+        )
+    };
+    let mut lines = format!(
+        "{{\"type\":\"user\",\"sessionId\":\"{id}\",\"message\":{{\"role\":\"user\",\"content\":\"...\"}}}}\n"
+    );
+    if said == "garble" {
+        lines += &format!(
+            "{{\"type\":\"assistant\",\"message\":{{\"id\":\"msg_{nth}\",\"model\":\"{model}\",\"content\":[]}}}}\n"
+        );
+    } else {
+        // A reply is written more than once as it arrives; the last stands.
+        lines += &reply(1);
+        lines += &reply(500);
+    }
+    let _ = file.write_all(lines.as_bytes());
+}
+
+fn report(body: &str) {
+    let mut out = std::io::stdout();
+    let _ = write!(out, "\x1b]7501;{body}\x07");
+    let _ = out.flush();
+}
+
+/// Ask the status question the way Claude Code does: the question, then
+/// "what kind of terminal are you?". Claude Code takes the question as
+/// answered only if its answer comes before the second one. Says which;
+/// None if input ended first.
+fn ask_status() -> Option<bool> {
+    let mut out = std::io::stdout();
+    let _ = write!(out, "\x1b]7501;?\x07\x1b[c");
+    let _ = out.flush();
+    let mut stdin = std::io::stdin();
+    let mut got: Vec<u8> = Vec::new();
+    let mut buf = [0u8; 256];
+    let find = |hay: &[u8], needle: &[u8]| hay.windows(needle.len()).position(|w| w == needle);
+    // Wait for the reply to the second question, which every terminal gives.
+    let kind_reply = loop {
+        if let Some(at) = find(&got, b"\x1b[?") {
+            if got[at..].contains(&b'c') {
+                break at;
+            }
+        }
+        match stdin.read(&mut buf) {
+            Ok(0) | Err(_) => return None,
+            Ok(n) => got.extend_from_slice(&buf[..n]),
+        }
+    };
+    let answered = find(&got, b"\x1b]7501;?").is_some_and(|at| at < kind_reply);
+    if answered {
+        say("STATUS QUESTION ANSWERED");
+    } else {
+        say(&format!("STATUS QUESTION NOT ANSWERED got={}", shown(&String::from_utf8_lossy(&got))));
+    }
+    Some(answered)
+}
+
+fn status_mode() {
+    let Some(answered) = ask_status() else { return };
+    // Claude Code would stop here and never report if it was not answered.
+    // The stand-in goes on reporting when asked to, so Lillignode's half can
+    // still be tested.
+    if answered {
+        report("state=idle:app=claude-code");
+    }
+    let mut stdin = std::io::stdin();
+    let mut buf = [0u8; 256];
+    // One key, one report, the same parts Claude Code sends.
+    loop {
+        let n = match stdin.read(&mut buf) {
+            Ok(0) | Err(_) => return,
+            Ok(n) => n,
+        };
+        for &key in &buf[..n] {
+            let body = match key {
+                b'w' => format!("state=working:app=claude-code:progress=30:msg={}", base64("Reading files")),
+                b'p' => format!("state=blocked:app=claude-code:kind=permission:msg={}", base64("Bash: ls")),
+                b'q' => "state=blocked:app=claude-code:kind=question".to_string(),
+                b'a' => "state=blocked:app=claude-code:kind=auth".to_string(),
+                b'k' => "state=blocked:app=claude-code".to_string(),
+                b'd' => "state=done:app=claude-code".to_string(),
+                b'i' => "state=idle:app=claude-code".to_string(),
+                b'e' => {
+                    format!("state=error:app=claude-code:msg={}", base64("rate limited,\r\n\x1b[2J wait"))
+                }
+                b'u' => "state=pondering:app=claude-code".to_string(),
+                b'n' => "state=working:app=claude-code:mood=fine".to_string(),
+                b't' => "state=working:app=claude-code:id=task-1".to_string(),
+                b'c' => "state=clear".to_string(),
+                b'l' => format!("state=working:app=claude-code:msg={}", base64(&"long ".repeat(600))),
+                0x04 => return,
+                _ => continue,
+            };
+            report(&body);
+            say(&format!("SENT {}", key as char));
+        }
+    }
+}
+
+fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mode = args.first().map(String::as_str).unwrap_or("echo");
+    console::raw();
+    match mode {
+        "echo" => {
+            print!("\x1b[?2004h");
+            say("STANDIN READY echo");
+            echo(|_| {});
+        }
+        "echo-plain" => {
+            say("STANDIN READY echo-plain");
+            echo(|_| {});
+        }
+        "stream" => {
+            let n: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(1000);
+            let mut out = std::io::stdout().lock();
+            for i in 1..=n {
+                let colour = if i % 10 == 0 { "\x1b[32m" } else { "" };
+                let filler = if i % 25 == 0 { "wrap ".repeat(50) } else { String::new() };
+                let _ = write!(out, "{colour}stream line {i:05} of {n:05} {filler}\x1b[m\r\n");
+                if i % 100 == 0 {
+                    let _ = out.flush();
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+            }
+            let _ = out.flush();
+            drop(out);
+            print!("\x1b[?2004h");
+            say(&format!("STREAM DONE {n}"));
+            echo(|_| {});
+        }
+        "fullscreen" => {
+            print!("\x1b[?1049h\x1b[2J\x1b[H\x1b[?2004h");
+            say("FULLSCREEN STANDIN");
+            echo(|_| {});
+            print!("\x1b[?1049l");
+        }
+        "claude" => {
+            let home = PathBuf::from(std::env::var("STANDIN_HOME").expect("STANDIN_HOME must be set"));
+            let _ = std::fs::create_dir_all(&home);
+            let value =
+                |flag: &str| args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned();
+            let (id, resumed) = match (value("--resume"), value("--session-id")) {
+                (Some(id), _) => (id, true),
+                (None, Some(id)) => (id, false),
+                (None, None) => ("no-id".to_string(), false),
+            };
+            let file = home.join(format!("{id}.txt"));
+            if resumed {
+                let Ok(earlier) = std::fs::read_to_string(&file) else {
+                    println!("No conversation found with session ID: {id}");
+                    std::process::exit(1);
+                };
+                print!("\x1b[?2004h");
+                say(&format!("STANDIN CLAUDE resumed {id}"));
+                for line in earlier.lines() {
+                    say(&format!("EARLIER {line}"));
+                }
+            } else {
+                if file.exists() {
+                    println!("Error: Session ID {id} is already in use.");
+                    std::process::exit(1);
+                }
+                print!("\x1b[?2004h");
+                say(&format!("STANDIN CLAUDE new {id}"));
+            }
+            // Like the real thing, a conversation exists only once something was said.
+            echo(|message| {
+                if !message.trim().is_empty() {
+                    let mut all = std::fs::read_to_string(&file).unwrap_or_default();
+                    record_reply(&id, all.lines().count() + 1, message.trim());
+                    all.push_str(message.trim());
+                    all.push('\n');
+                    let _ = std::fs::write(&file, all);
+                    say(&format!("SAID {}", message.trim()));
+                }
+            });
+        }
+        "status" => {
+            say("STANDIN READY status");
+            status_mode();
+        }
+        "status-echo" => {
+            say("STANDIN READY status-echo");
+            if ask_status().is_none() {
+                return;
+            }
+            print!("\x1b[?2004h");
+            say("STANDIN TAKES PASTES");
+            echo(|_| {});
+        }
+        "status-silent" => {
+            say("STANDIN READY status-silent");
+            echo(|_| {});
+        }
+        other => {
+            println!("standin: unknown mode {other}");
+            std::process::exit(2);
+        }
+    }
+    print!("\x1b[?2004l");
+    say("STANDIN BYE");
+}

@@ -1,0 +1,38 @@
+# Rust
+/target/
+**/*.rs.bk
+
+# Editors and OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Local Claude Code settings
+.claude/settings.local.json
+
+# Secrets must never be committed
+.env
+.env.*
+*.pem
+*.key
+
+# Lillignode local state written during development
+/.lillignode/
+
+# Lillignode's workspace and settings, if LILLIGNODE_STATE_DIR points inside
+# the repo (by default they live outside it)
+workspace.json
+workspace.*.json
+in-use.lock
+/config.json
+
+# Microsoft's pseudo-terminal files: placed by the packaging step,
+# never committed
+conpty.dll
+OpenConsole.exe
+
+# Release folders built by scripts/package-windows.ps1
+/dist/

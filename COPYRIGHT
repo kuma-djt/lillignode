@@ -1,0 +1,22 @@
+Lillignode
+Copyright (C) 2026 Turnbow Analytics LLC
+
+This program is free software: you can redistribute it and/or modify it
+under the terms of the GNU Affero General Public License, version 3, as
+published by the Free Software Foundation.
+
+This program is distributed in the hope that it will be useful, but WITHOUT
+ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License
+for more details.
+
+You should have received a copy of the GNU Affero General Public License
+along with this program, in the file LICENSE. If not, see
+<https://www.gnu.org/licenses/>.
+
+Commercial licences are available from Turnbow Analytics LLC.
+
+Third-party files: the Windows packaging script downloads conpty.dll and
+OpenConsole.exe from Microsoft. They are Microsoft's, under the MIT licence
+in packaging/windows/LICENSE-Microsoft-ConPTY.txt, and are not part of this
+repository.
