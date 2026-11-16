@@ -146,6 +146,26 @@ impl Terminal {
 mod tests {
     use super::*;
 
+    /// What a narrower size costs, written down so nobody has to guess:
+    /// what is on screen beyond the new width is gone until the agent draws
+    /// it again, and making the terminal wide again does not bring it back.
+    /// Lines that had already scrolled into history keep their full width.
+    #[test]
+    fn narrowing_cuts_what_is_on_screen_and_history_keeps_its_lines_whole() {
+        let mut t = Terminal::new(3, 20);
+        for i in 1..=6 {
+            let _ = t.feed(format!("line {i} abcdefghijklm\r\n").as_bytes());
+        }
+        let _ = t.feed(b"on screen 0123456789");
+        t.resize(3, 10);
+        t.resize(3, 20);
+        let screen: Vec<String> = t.screen().rows(0, 20).collect();
+        assert_eq!(screen, ["line 5 abc", "line 6 abc", "on screen "]);
+        t.scroll_to_oldest();
+        let oldest: Vec<String> = t.screen().rows(0, 20).collect();
+        assert_eq!(oldest[0], "line 1 abcdefghijklm");
+    }
+
     #[test]
     fn answers_the_cursor_position_question() {
         let mut t = Terminal::new(24, 80);

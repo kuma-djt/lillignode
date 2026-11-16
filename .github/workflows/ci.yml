@@ -1,0 +1,51 @@
+# Builds Lillignode, runs its unit tests, and runs the lint, on Windows and
+# Linux on every push. The format check runs once, on Linux.
+#
+# What this does not do: it does not run the end-to-end check and it does not
+# run on macOS. docs/ci-coverage.md lists what has to run before any system is
+# called supported.
+#
+# Nothing here starts a real agent or reads a real Claude Code setup: unit
+# tests use fakes and throwaway folders only.
+
+name: CI
+
+on:
+  push:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Build, unit tests and lint (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      # One system failing must not hide what the other does.
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    steps:
+      # Pinned to a commit, not a tag, so the code that runs cannot change
+      # under the same name. This is actions/checkout v4.4.0.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Use the current stable Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy,rustfmt --no-self-update
+          rustup default stable
+          rustc --version
+          cargo --version
+      - name: Build everything
+        run: cargo build --all-targets --locked
+      - name: Unit tests
+        run: cargo test --locked
+      - name: Lint
+        run: cargo clippy --all-targets --locked -- -D warnings
+      - name: Format
+        if: runner.os == 'Linux'
+        run: cargo fmt --check

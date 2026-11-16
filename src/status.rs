@@ -104,7 +104,21 @@ pub enum AgentStatus {
 }
 
 impl AgentStatus {
-    /// The words shown in the sidebar.
+    /// The words shown in the sidebar: the status alone, short enough not
+    /// to be cut. The reason (what an agent needs, why status is unknown,
+    /// an error's own words) is in the notice and the status report, where
+    /// it is written in full (`text`, `why_long`).
+    pub fn short(&self) -> String {
+        match self {
+            AgentStatus::NeedsYou(_) => "Needs you".into(),
+            AgentStatus::Error(_) => "Error".into(),
+            AgentStatus::Unknown(_) => "Unknown".into(),
+            other => other.text(),
+        }
+    }
+
+    /// The status in full, with its reason: the notice and the status
+    /// report say this.
     pub fn text(&self) -> String {
         match self {
             AgentStatus::Starting => "Starting".into(),

@@ -73,6 +73,24 @@ impl Tokens {
             .saturating_add(self.cache_read)
     }
 
+    /// The count shown at a glance: everything but tokens read from cache.
+    /// Those are most of a long conversation's count and the cheapest part
+    /// of it, so a figure that includes them says little about the work
+    /// done. They are kept, and shown in the breakdown.
+    pub fn headline(&self) -> u64 {
+        self.input.saturating_add(self.output).saturating_add(self.cache_write)
+    }
+
+    /// What was used after `earlier`, kind by kind. Never below zero.
+    fn less(&self, earlier: &Tokens) -> Tokens {
+        Tokens {
+            input: self.input.saturating_sub(earlier.input),
+            output: self.output.saturating_sub(earlier.output),
+            cache_write: self.cache_write.saturating_sub(earlier.cache_write),
+            cache_read: self.cache_read.saturating_sub(earlier.cache_read),
+        }
+    }
+
     fn add(&mut self, other: &Tokens) {
         self.input = self.input.saturating_add(other.input);
         self.output = self.output.saturating_add(other.output);
@@ -94,6 +112,29 @@ impl Usage {
             all.add(tokens);
         }
         all
+    }
+
+    /// Add another conversation's use to this one, model by model.
+    pub fn add(&mut self, other: &Usage) {
+        for (model, tokens) in &other.by_model {
+            self.by_model.entry(model.clone()).or_default().add(tokens);
+        }
+    }
+
+    /// What was used after `earlier`: this, less what was already there.
+    /// Models nothing was used of since are left out.
+    pub fn since(&self, earlier: &Usage) -> Usage {
+        let mut used = Usage::default();
+        for (model, tokens) in &self.by_model {
+            let more = match earlier.by_model.get(model) {
+                Some(before) => tokens.less(before),
+                None => *tokens,
+            };
+            if more != Tokens::default() {
+                used.by_model.insert(model.clone(), more);
+            }
+        }
+        used
     }
 
     /// An estimate in dollars at the list prices built into this Lillignode.
@@ -190,6 +231,54 @@ pub enum Cost {
     Unknown(WhyNot),
 }
 
+/// The count that is compared with the user's warning threshold, when a
+/// cost is known and has reached it. The threshold is on the same count the
+/// sidebar shows, so the mark on a row can be checked against its number.
+/// Pending and unknown are never over: nothing is known to compare.
+pub fn over(cost: &Cost, warn_at: Option<u64>) -> Option<u64> {
+    let (Cost::Known(usage), Some(limit)) = (cost, warn_at) else { return None };
+    let count = usage.total().headline();
+    (count >= limit).then_some(count)
+}
+
+/// Every open agent's cost, added up.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Summary {
+    /// The use of every agent whose cost is known, whole conversations.
+    pub usage: Usage,
+    /// The part of `usage` that came after Lillignode was started. None
+    /// when that cannot be told for one of the agents counted.
+    pub since_started: Option<Usage>,
+    pub known: usize,
+    pub pending: usize,
+    pub unknown: usize,
+}
+
+impl Summary {
+    pub fn new() -> Self {
+        Summary { since_started: Some(Usage::default()), ..Summary::default() }
+    }
+
+    /// Count one agent. `since` is what it used after Lillignode started.
+    pub fn count(&mut self, cost: &Cost, since: Option<Usage>) {
+        match cost {
+            Cost::Known(usage) => {
+                self.known += 1;
+                self.usage.add(usage);
+                self.since_started = match (self.since_started.take(), since) {
+                    (Some(mut sum), Some(more)) => {
+                        sum.add(&more);
+                        Some(sum)
+                    }
+                    _ => None,
+                };
+            }
+            Cost::Pending(_) => self.pending += 1,
+            Cost::Unknown(_) => self.unknown += 1,
+        }
+    }
+}
+
 /// One reply's counts, read exactly. Ok(None) for a line that is not a
 /// reply from a model. Err says what was wrong, and never quotes the line.
 fn read_line(line: &[u8]) -> Result<Option<(String, String, Tokens)>, String> {
@@ -245,6 +334,18 @@ pub struct Reader {
     /// it arrives, each with the counts so far; the last one read stands.
     replies: HashMap<String, (String, Tokens)>,
     state: Cost,
+    /// What the conversation had already used when Lillignode first read
+    /// its record in full: the starting point for "since started". Empty
+    /// for a conversation with nothing in it then.
+    baseline: Option<Usage>,
+    /// There is no honest starting point: the record was taken away or
+    /// swapped for another while Lillignode was open, or could not be read
+    /// when Lillignode first looked.
+    replaced: bool,
+    /// A line of this record that was not understood. It stays not
+    /// understood for as long as the record is the same one, whatever
+    /// happens on later looks: no partial sum is ever shown.
+    bad: Option<WhyNot>,
     /// When the record last changed, by the file's own date.
     pub last_grew: Option<SystemTime>,
     next_look: Option<Instant>,
@@ -263,8 +364,21 @@ impl Reader {
             lines: 0,
             replies: HashMap::new(),
             state: Cost::Pending(Waiting::NotLooked),
+            baseline: None,
+            replaced: false,
+            bad: None,
             last_grew: None,
             next_look: None,
+        }
+    }
+
+    /// What the conversation has used since Lillignode was started. None
+    /// while the cost is not known, and when the record was replaced while
+    /// Lillignode was open: then there is no honest starting point.
+    pub fn since_started(&self) -> Option<Usage> {
+        match (&self.state, &self.baseline, self.replaced) {
+            (Cost::Known(usage), Some(baseline), false) => Some(usage.since(baseline)),
+            _ => None,
         }
     }
 
@@ -292,6 +406,22 @@ impl Reader {
             LOOK_EVERY
         };
         self.next_look = Some(now + wait);
+        if self.baseline.is_none() {
+            // The first full reading is where "since started" counts from.
+            // A record still being caught up with is not a full reading.
+            self.baseline = match &self.state {
+                Cost::Known(usage) => Some(usage.clone()),
+                Cost::Pending(Waiting::NoRecord { .. } | Waiting::NoReplies) => Some(Usage::default()),
+                Cost::Pending(Waiting::NotLooked) => None,
+                Cost::Unknown(why) => {
+                    // A record that could not be read: what is used before
+                    // it can be is not counted, so a later reading is not a
+                    // starting point.
+                    self.replaced |= matches!(why, WhyNot::CannotRead(_));
+                    None
+                }
+            };
+        }
         self.state != before
     }
 
@@ -305,8 +435,14 @@ impl Reader {
         }
         let projects = claude_folder.join("projects");
         if self.file.as_ref().is_none_or(|f| !f.is_file()) {
+            // A record that was there and is gone is not one that grew.
+            self.replaced |= self.file.is_some();
             self.start_over();
-            self.file = find_record(&projects, &self.conversation);
+            self.file = match find_record(&projects, &self.conversation) {
+                Ok(found) => found,
+                // Not being able to look is not the same as nothing there.
+                Err(why) => return Cost::Unknown(WhyNot::CannotRead(why)),
+            };
             self.searches = if self.file.is_some() { 0 } else { self.searches.saturating_add(1) };
         }
         let Some(path) = self.file.clone() else {
@@ -346,6 +482,7 @@ impl Reader {
         self.partial.clear();
         self.lines = 0;
         self.replies.clear();
+        self.bad = None;
         self.last_grew = None;
     }
 
@@ -364,7 +501,8 @@ impl Reader {
             let path = self.file.take();
             self.start_over();
             self.file = path;
-        } else if let Cost::Unknown(bad @ WhyNot::NotUnderstood { .. }) = &self.state {
+            self.replaced = true;
+        } else if let Some(bad) = &self.bad {
             // Still the same record, with the same line in it.
             return Ok(Some(bad.clone()));
         }
@@ -397,15 +535,21 @@ impl Reader {
                 // Nothing more is read from this record after this, so what
                 // is left of `rest` is not kept: the cost stays unknown until
                 // the record is replaced, and then reading starts over.
-                Err(why) => return Ok(Some(WhyNot::NotUnderstood { line: self.lines, why })),
+                Err(why) => {
+                    let bad = WhyNot::NotUnderstood { line: self.lines, why };
+                    self.bad = Some(bad.clone());
+                    return Ok(Some(bad));
+                }
             }
         }
         rest.drain(..start);
         if rest.len() > LONGEST_LINE {
-            return Ok(Some(WhyNot::NotUnderstood {
+            let bad = WhyNot::NotUnderstood {
                 line: self.lines + 1,
                 why: "it is far longer than Claude Code writes".into(),
-            }));
+            };
+            self.bad = Some(bad.clone());
+            return Ok(Some(bad));
         }
         self.partial = rest;
         Ok(None)
@@ -424,9 +568,17 @@ impl Reader {
 /// The record of `conversation`, in whichever of Claude Code's project
 /// folders holds it. Found by its name, so Lillignode does not depend on how
 /// Claude Code names those folders.
-fn find_record(projects: &Path, conversation: &str) -> Option<PathBuf> {
+///
+/// Ok(None) when it is not there, which includes Claude Code having no
+/// projects folder yet. Err when the folder is there and cannot be listed.
+fn find_record(projects: &Path, conversation: &str) -> Result<Option<PathBuf>, String> {
     let name = format!("{conversation}.jsonl");
-    std::fs::read_dir(projects).ok()?.flatten().map(|dir| dir.path().join(&name)).find(|file| file.is_file())
+    let folders = match std::fs::read_dir(projects) {
+        Ok(folders) => folders,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.to_string()),
+    };
+    Ok(folders.flatten().map(|dir| dir.path().join(&name)).find(|file| file.is_file()))
 }
 
 /// Where Claude Code keeps its files, by its own rule: `CLAUDE_CONFIG_DIR`

@@ -8,6 +8,8 @@
 //!   standin echo-plain      do not ask for pastes as one block
 //!   standin stream <n>      print n numbered lines quickly, then echo
 //!   standin fullscreen      switch to a full-screen mode with no history
+//!   standin size            on each Enter, say what was typed and the size
+//!                           the terminal says it is: `SIZE <typed> is <c> by <r>`
 //!   standin claude ...      behave like Claude Code for conversation ids:
 //!                             --session-id <id>   new conversation
 //!                             --resume <id>       continue one, or fail
@@ -62,6 +64,43 @@ mod console {
                 SetConsoleMode(output, mode | 0x0004);
             }
         }
+    }
+}
+
+#[cfg(windows)]
+mod console_size {
+    use std::ffi::c_void;
+    extern "system" {
+        fn GetStdHandle(which: u32) -> *mut c_void;
+        fn GetConsoleScreenBufferInfo(handle: *mut c_void, info: *mut [i16; 11]) -> i32;
+    }
+
+    /// The size the terminal says it is, as (columns, rows).
+    pub fn now() -> Option<(u16, u16)> {
+        // The console's description of its screen: eleven 16-bit numbers,
+        // of which the sixth to ninth are the window's left, top, right
+        // and bottom.
+        let mut info = [0i16; 11];
+        // SAFETY: a plain call into the Windows console API with the handle
+        // the system gave us and a pointer to a local of the right size.
+        let ok = unsafe { GetConsoleScreenBufferInfo(GetStdHandle(-11i32 as u32), &mut info) };
+        (ok != 0).then(|| ((info[7] - info[5] + 1) as u16, (info[8] - info[6] + 1) as u16))
+    }
+}
+
+#[cfg(not(windows))]
+mod console_size {
+    /// The size the terminal says it is, as (columns, rows).
+    pub fn now() -> Option<(u16, u16)> {
+        let out = std::process::Command::new("stty")
+            .arg("size")
+            .stdin(std::process::Stdio::inherit())
+            .output()
+            .ok()?;
+        let text = String::from_utf8_lossy(&out.stdout);
+        let mut parts = text.split_whitespace().map(|n| n.parse::<u16>().ok());
+        let (rows, cols) = (parts.next()??, parts.next()??);
+        Some((cols, rows))
     }
 }
 
@@ -304,6 +343,16 @@ fn main() {
             print!("\x1b[?2004h");
             say(&format!("STREAM DONE {n}"));
             echo(|_| {});
+        }
+        "size" => {
+            print!("\x1b[?2004h");
+            say("STANDIN READY size");
+            // Each Enter reports the size the terminal says it is now, with
+            // what was typed, so two of these on screen can be told apart.
+            echo(|typed| match console_size::now() {
+                Some((cols, rows)) => say(&format!("SIZE {} is {cols} by {rows}", typed.trim())),
+                None => say(&format!("SIZE {} is not known", typed.trim())),
+            });
         }
         "fullscreen" => {
             print!("\x1b[?1049h\x1b[2J\x1b[H\x1b[?2004h");

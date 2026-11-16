@@ -154,6 +154,21 @@ impl Session {
         self.rows().iter().map(|r| format!("{r:<cols$}")).collect()
     }
 
+    /// True when the screen shows `needle`: across a line's end as the screen
+    /// lays it out, or across a break Lillignode made at a space when it
+    /// wrapped a notice.
+    fn shows(&self, needle: &str) -> bool {
+        let rows = self.rows();
+        let joined = rows.iter().map(|r| r.trim_end().to_string()).collect::<Vec<_>>().join(" ");
+        // The status report panel wraps its own lines, beside the sidebar.
+        let right = rows
+            .iter()
+            .map(|r| r.split_once('│').map_or(r.as_str(), |(_, right)| right).trim().to_string())
+            .collect::<Vec<_>>()
+            .join(" ");
+        self.flat().contains(needle) || joined.contains(needle) || right.contains(needle)
+    }
+
     fn fail(&self, step: &str, detail: &str) -> ! {
         println!("  FAIL  {step}\n        {detail}\n--- screen ---\n{}\n--------------", self.screen());
         std::process::exit(1);
@@ -162,7 +177,7 @@ impl Session {
     fn expect(&mut self, step: &str, needle: &str) {
         let end = Instant::now() + Duration::from_secs(20);
         while Instant::now() < end {
-            if self.flat().contains(needle) {
+            if self.shows(needle) {
                 println!("  ok    {step}");
                 return;
             }
@@ -174,7 +189,7 @@ impl Session {
     fn expect_gone(&mut self, step: &str, needle: &str) {
         let end = Instant::now() + Duration::from_secs(10);
         while Instant::now() < end {
-            if !self.flat().contains(needle) {
+            if !self.shows(needle) {
                 println!("  ok    {step}");
                 return;
             }
@@ -186,7 +201,7 @@ impl Session {
     /// Wait, then check the text is absent: for things that must not happen.
     fn never(&mut self, step: &str, needle: &str) {
         self.pump_for(Duration::from_millis(700));
-        if self.flat().contains(needle) {
+        if self.shows(needle) {
             self.fail(step, &format!("must not show: {needle}"));
         }
         println!("  ok    {step}");
@@ -319,33 +334,77 @@ fn cost(sb: &Sandbox) {
     println!("N. Cost, read from the record the agent keeps (stand-in for Claude Code)");
     let shell = if cfg!(windows) { "cmd" } else { "sh" };
     let state = sb.root.join("state-cost");
+    // Off unless asked for: nothing about cost is drawn, and the status
+    // report says how to switch it on.
     let mut s = Session::start_in(sb, &state);
     s.keys(b"n");
     s.keys(b"\r");
     s.keys(b"\r");
     s.expect("a new Claude Code agent", "STANDIN CLAUDE new ");
+    s.keys(b"early");
+    s.keys(b"\r");
+    s.expect("something is said before cost is switched on", "SAID early");
+    s.never("with no setting, no cost is shown", "tokens");
+    s.never("and no total", "ALL AGENTS");
+    s.raw(CTRL_Q);
+    s.keys(b"s");
+    s.expect("the status report says it is off and how to switch it on", "Cost: off.");
+    s.expect("naming the setting", "add \"cost\": true to the settings file");
+    s.keys(b"z");
+    s.raw(CTRL_Q);
+    s.keys(b"x");
+    s.keys(b"y");
+    s.expect("the agent is closed", "Closed Claude Code (work)");
+    drop(s.quit("quit", false));
+
+    std::fs::write(state.join("config.json"), r#"{ "cost": true, "cost_warning_tokens": 30000 }"#).unwrap();
+    let mut s = Session::start_in(sb, &state);
+    s.keys(b"n");
+    s.keys(b"\r");
+    s.keys(b"\r");
+    s.expect("a new Claude Code agent, with cost switched on", "STANDIN CLAUDE new ");
     s.expect("before anything is said its cost is pending, not zero", "cost pending");
     s.expect("and so is the total", " ALL AGENTS  cost pending");
     s.raw(CTRL_Q);
     s.keys(b"s");
-    s.expect("the status report says why", "Cost: pending. Nothing to read yet");
+    s.expect("the status report says why", "Cost (experimental): pending. Nothing to read yet");
     s.keys(b"z");
     s.keys(b"hello");
     s.keys(b"\r");
     s.expect("something is said", "SAID hello");
-    s.expect("its tokens show beside its folder", "32.0k tokens");
-    s.expect("and in the total", " ALL AGENTS  32.0k tokens");
+    s.expect("its tokens show beside its folder, without those read from cache", "11.5k tokens");
+    s.expect("and in the total", " ALL AGENTS  11.5k tokens");
+    s.never("under the warning, the row is not marked", "PAST WARNING");
     s.keys(b"again");
     s.keys(b"\r");
-    s.expect("the number grows with the record", " ALL AGENTS  64.0k tokens");
+    s.expect("the number grows with the record", " ALL AGENTS  23.0k tokens");
+    s.keys(b"more");
+    s.keys(b"\r");
+    s.expect("past the warning, the row says PAST WARNING", "PAST WARNING 34.5k tokens");
+    s.expect(
+        "one notice names the agent and both counts",
+        "Claude Code (work) is past your cost warning (34.5k tokens; warning at 30.0k a conversation).",
+    );
+    s.expect("and says first that nothing was stopped", "Warning only, nothing stopped: Claude Code (work)");
+    s.never("no question is asked", "? y / n");
+    s.keys(b"still");
+    s.keys(b"\r");
+    s.expect("typing still reaches the agent: nothing was held", "SAID still");
+    s.expect("and the count goes on", "PAST WARNING 46.0k tokens");
     s.raw(CTRL_Q);
     s.keys(b"s");
     s.expect(
-        "the status report gives the exact count",
-        "Cost of this conversation so far, including before today: 64,000 tokens.",
+        "the status report gives the exact count, and the cache reads apart",
+        "Cost (experimental) of this conversation so far, including before today: 46,000 tokens, not counting 82,000 read from cache.",
     );
-    s.expect("by kind", "input 2,000, output 1,000, written to cache 20,000, read from cache 41,000");
-    s.expect("an estimate in dollars, said to be one", "about $0.14 (est.: Lillignode's price list of");
+    s.expect("by kind", "input 4,000, output 2,000, written to cache 40,000, read from cache 82,000");
+    s.expect(
+        "what was used since Lillignode was started",
+        "Since Lillignode was started: 46,000 tokens, not counting 82,000 read from cache.",
+    );
+    s.expect("for all agents too", "All agents open now, since Lillignode was started: 46,000 tokens");
+    s.expect("and that it is past the warning", "Past your cost warning of 30,000 tokens");
+    s.expect("an estimate in dollars, said to be one", "about $0.27 (est.: Lillignode's price list of");
     s.expect("and who it does not apply to", "you are not billed this.");
     s.expect("limits are Unknown, not left out", "Limits: Unknown.");
     s.keys(b"z");
@@ -355,24 +414,41 @@ fn cost(sb: &Sandbox) {
     s.expect("the total says it leaves one out", "not counted: 1 agent");
     s.raw(CTRL_Q);
     s.keys(b"s");
-    s.expect("and the status report says why", "Cost: unknown. Lillignode reads cost only for Claude Code.");
+    s.expect(
+        "and the status report says why",
+        "Cost (experimental): unknown. Lillignode reads cost only for Claude Code.",
+    );
     s.keys(b"z");
     drop(s.quit("quit", true));
 
     // The user says they pay by key: dollars, as an estimate. The agent
     // continues its conversation, so the cost is the whole conversation's.
-    std::fs::write(state.join("config.json"), r#"{ "billing": "key" }"#).unwrap();
+    std::fs::write(state.join("config.json"), r#"{ "cost": true, "billing": "key" }"#).unwrap();
     let mut s = Session::start_in(sb, &state);
     s.expect("restored, continuing its conversation", "Claude Code (work) (continuing its conversation)");
-    s.expect("the conversation's cost is back, in dollars for a key user", "est. $0.14");
-    s.expect("the total too", " ALL AGENTS  est. $0.14");
+    s.expect("the conversation's cost is back, in dollars for a key user", "est. $0.27");
+    s.expect("the total too", " ALL AGENTS  est. $0.27");
     s.raw(CTRL_Q);
     s.keys(b"\t");
     s.keys(ESC);
     s.expect("Claude Code is in front", "Typing goes to Claude Code (work)");
+    s.raw(CTRL_Q);
+    s.keys(b"s");
+    s.expect(
+        "what was said before this start is not counted as since started",
+        "Since Lillignode was started: 0 tokens, not counting 0 read from cache.",
+    );
+    s.keys(b"z");
     s.keys(b"newmodel");
     s.keys(b"\r");
-    s.expect("a model with no price: tokens, never dollars that leave it out", "96.0k tokens");
+    s.expect("a model with no price: tokens, never dollars that leave it out", "57.5k tokens");
+    s.raw(CTRL_Q);
+    s.keys(b"s");
+    s.expect(
+        "since started now counts the one new reply",
+        "Since Lillignode was started: 11,500 tokens, not counting 20,500 read from cache.",
+    );
+    s.keys(b"z");
     s.raw(CTRL_Q);
     s.keys(b"s");
     s.expect("the status report names the model", "has no price for claude-new-9");
@@ -380,7 +456,7 @@ fn cost(sb: &Sandbox) {
     s.keys(b"garble");
     s.keys(b"\r");
     s.expect("a reply that cannot be read makes the total unknown", " ALL AGENTS  cost unknown");
-    s.never("and no number is left standing", "96.0k tokens");
+    s.never("and no number is left standing", "57.5k tokens");
     s.expect("a notice says so once, and where the reason is", "Cost shows unknown for Claude Code (work)");
     s.expect("and that nothing was changed", "nothing was changed. Ctrl+Q then s says why.");
     s.raw(CTRL_Q);
@@ -391,6 +467,104 @@ fn cost(sb: &Sandbox) {
     );
     s.expect("and that nothing was changed there either", "Nothing was changed.");
     s.keys(b"z");
+    drop(s.quit("quit", true));
+}
+
+fn side_by_side(sb: &Sandbox, standin: &Path) {
+    println!("O. Two agents side by side (stand-ins that say what size they are)");
+    launcher(&sb.launchers, standin, "sizer", "size");
+    let dir = sb.root.join("status-pair");
+    std::fs::create_dir_all(&dir).unwrap();
+    launcher(&dir, standin, "claude", "status");
+    let mut s = Session::start_in(sb, &sb.root.join("state-pair"));
+    s.new_agent("sizer");
+    s.expect("an agent that reports its size", "STANDIN READY size");
+    s.keys(b"one\r");
+    s.expect("one agent on screen has the whole agent area", "SIZE one is 122 by 37");
+    s.raw(CTRL_Q);
+    s.never("with one agent the menu does not offer two side by side", "v two side by side");
+    s.keys(b"v");
+    s.expect(
+        "v with one agent is refused, with the reason",
+        "Two agents side by side takes two agents, and one is open. Nothing was changed.",
+    );
+    s.new_agent("sizer");
+    s.expect("a second agent", "Started sizer 2 in");
+    s.keys(b"two\r");
+    s.expect("it has the whole area too", "SIZE two is 122 by 37");
+    s.raw(CTRL_Q);
+    s.expect("now the menu offers it", "v two side by side");
+    s.keys(b"v");
+    s.expect("v says which two", "sizer 2 (work) and sizer (work) are side by side");
+    s.expect("and where typing goes", "typing goes to the one on the left");
+    s.expect("and the way back", "If one draws badly, Ctrl+Q then v goes back to one.");
+    s.expect("the agent in front has a heading that says so", " > TYPING GOES HERE  sizer 2 (work)");
+    s.expect("the bar names the side", "Typing goes to sizer 2 (work), on the left.");
+    s.keys(b"left\r");
+    s.expect("the agent on the left is sized to its half", "SIZE left is 60 by 36");
+    s.raw(CTRL_Q);
+    s.keys(b"\t");
+    s.keys(ESC);
+    s.expect("Tab moves the keyboard to the one beside it", "Typing goes to sizer (work), on the right.");
+    s.keys(b"right\r");
+    s.expect("the agent on the right is sized to its half too", "SIZE right is 60 by 36");
+    s.expect("and both are on screen at once", "SIZE left is 60 by 36");
+
+    s.resize(100, ROWS);
+    s.expect(
+        "a window made too narrow shows one agent and says why",
+        "Too narrow for two agents now, so only sizer (work) is shown",
+    );
+    s.expect("and that the other was left alone", "sizer 2 (work) was not stopped or closed.");
+    s.expect("and the way to stay with one", "or Ctrl+Q then v to stay with one.");
+    s.keys(b"alone\r");
+    s.expect("the one shown has the whole area again", "SIZE alone is 72 by 37");
+    s.resize(COLS, ROWS);
+    s.expect("widened again, both come back", "There is room again: two agents are side by side.");
+    s.keys(b"again\r");
+    s.expect("at half the width each", "SIZE again is 60 by 36");
+    s.raw(CTRL_Q);
+    s.expect("the menu offers the way back", "v one agent");
+    s.keys(b"v");
+    s.expect("v again goes back to one", "One agent on screen: sizer (work).");
+    s.keys(b"whole\r");
+    s.expect("with the whole area", "SIZE whole is 122 by 37");
+
+    // An agent that is waiting for the user, and the view.
+    s.new_agent(&dir.join("claude").display().to_string());
+    s.expect("a stand-in for Claude Code that reports status", "STANDIN READY status");
+    s.keys(b"p");
+    s.expect("it needs you", " Lillignode  1 NEEDS YOU");
+    s.raw(CTRL_Q);
+    s.keys(b"v");
+    s.expect(
+        "changing the view while an agent needs you asks first",
+        "Resize every agent now? y / n   Waiting for you: Claude Code (work).",
+    );
+    s.keys(b"n");
+    s.expect("n leaves everything as it was", "The view was left as it was. No agent was resized.");
+    s.raw(CTRL_Q);
+    s.keys(b"v");
+    s.keys(b"y");
+    s.expect("y puts two side by side", "Claude Code (work) and sizer (work) are side by side");
+    s.expect(
+        "in front and needing you: its heading says typing goes here",
+        " > NEEDS YOU - you are typing here  Claude Code (work)",
+    );
+    s.raw(CTRL_Q);
+    s.keys(b"\t");
+    s.keys(ESC);
+    s.expect(
+        "beside the one in front and needing you: its heading says typing is not going there",
+        " ! NEEDS YOU - you are NOT typing here  Claude Code (work)",
+    );
+    s.expect("and the bar says where it is going", "Typing goes to sizer (work), on the right.");
+    s.keys(b"other\r");
+    s.expect("typing goes to the agent in front, not the one waiting", "SIZE other is 60 by 36");
+    s.expect(
+        "the notice still names the one waiting and how to reach it",
+        "Claude Code (work) needs you: permission. Ctrl+Q then Tab",
+    );
     drop(s.quit("quit", true));
 }
 
@@ -442,7 +616,7 @@ fn main() {
     s.expect("unknown program: says nothing was started", "Nothing was started");
     s.keys(ESC);
     s.expect("Esc cancels", "Cancelled. Nothing was started.");
-    s.expect("failed start added nothing", "None yet. Press n.");
+    s.expect("failed start added nothing", "No agents yet. Press n.");
 
     s.keys(b"n");
     s.keys(format!("{shell}\r").as_bytes());
@@ -451,7 +625,8 @@ fn main() {
     s.keys(&[0x7f; 14]);
     s.keys(b"\r");
     s.expect("corrected folder: agent starts", &format!("Started {shell} in"));
-    s.expect("sidebar shows it running, status Unknown: it is not Claude Code", "Unknown: not Claude Code");
+    s.expect("sidebar shows it running, status Unknown", "work  Unknown   ");
+    s.expect("under a hat, with the sign for Unknown", ">/\\? ");
     s.expect("bar says where typing goes", &format!("Typing goes to {shell} (work)"));
 
     s.raw(CTRL_Q);
@@ -467,12 +642,15 @@ fn main() {
     s.expect("sidebar marks it", "Exited (error 3)");
     s.expect("bar offers what to do", "r start again");
     s.keys(b"r");
+    s.expect("a bare key at a stopped agent is not a command", "has stopped, so typing goes nowhere");
+    s.raw(CTRL_Q);
+    s.keys(b"r");
     s.expect("r starts it again", &format!("Started {shell} 2 (work) again."));
     s.expect_gone("sidebar no longer shows the error", "Exited (error 3)");
 
     println!("C. Resize and quit");
     s.resize(100, 30);
-    s.expect("still drawn after shrinking", "AGENTS");
+    s.expect("still drawn after shrinking", " Lillignode ");
     s.resize(60, 20);
     s.expect("too small: says so", "This window is too small for Lillignode (60 by 20).");
     s.expect("too small: says what size is needed", "least 80 columns by 12 rows.");
@@ -502,7 +680,7 @@ fn main() {
             "Restored 2 agents: {shell} (work) (new conversation), {shell} 2 (work) (new conversation)."
         ),
     );
-    s.expect("agents are running", "Unknown: not Claude Code");
+    s.expect("agents are running", "work  Unknown   ");
     drop(s.quit("quit", true));
 
     println!("E. Agents that cannot be restored");
@@ -533,7 +711,7 @@ fn main() {
         "its own screen gives the reason",
         "nosuchagent (work) was not started: \"nosuchagent\" is not installed or not on PATH.",
     );
-    s.expect("and what to do", "press r to try again. Or press x to remove it.");
+    s.expect("and what to do", "then r to try again. Or the menu key, then x to remove it.");
     s.keys(b"\t");
     s.expect("missing folder gets its own reason", "does not exist");
     std::fs::create_dir_all(&gone).unwrap();
@@ -543,10 +721,9 @@ fn main() {
     s.keys(b"\t\t");
     s.expect("Tab keeps the menu open, so two Tabs move two agents", "nosuchagent (work) was not started");
     s.keys(b"x");
-    s.expect(
-        "x removes it without asking, since nothing is running",
-        "Closed nosuchagent (work) and removed it",
-    );
+    s.expect("x asks first, even though nothing is running", "Remove nosuchagent (work)? y / n");
+    s.keys(b"y");
+    s.expect("y removes it", "Closed nosuchagent (work) and removed it");
     drop(s.quit("quit", true));
     let saved = std::fs::read_to_string(&file).unwrap();
     check("removed agent is gone from the saved file", !saved.contains("nosuchagent"), &saved);
@@ -556,7 +733,7 @@ fn main() {
     let mut s = Session::start(&sb);
     s.expect("says it could not be read", "Your saved workspace could not be read");
     s.expect("says it used the previous copy", "Loaded the previous copy, saved less than a minute ago");
-    s.expect("previous copy's agents are back", "Unknown: not Claude Code");
+    s.expect("previous copy's agents are back", "work  Unknown   ");
     let tail = s.quit("quit", true);
     check(
         "problem is repeated after closing",
@@ -626,14 +803,14 @@ fn main() {
     std::fs::write(sb.state.join("config.json"), r#"{ "menu_keys": ["ctrl+c"] }"#).unwrap();
     let mut s = Session::start(&sb);
     s.expect(
-        "unusable settings: says so",
-        "was not used: \"ctrl+c\" cannot be a menu key because agents need it",
+        "unusable settings: says so, leading with the fix",
+        "To fix your settings file: pick another menu key than \"ctrl+c\"; agents need it.",
     );
     s.expect("unusable settings: falls back to keys that work", "Ctrl+Q or F12: Lillignode menu");
     let tail = s.quit("quit", true);
     check(
         "settings problem is repeated after closing",
-        tail.contains("Earlier, on starting: Your settings file"),
+        tail.contains("Earlier, on starting: To fix your settings file"),
         "not repeated",
     );
     std::fs::remove_file(sb.state.join("config.json")).unwrap();
@@ -642,7 +819,7 @@ fn main() {
     let mut s = Session::start_with(&sb, &sb.root.join("state-vscode"), &[("TERM_PROGRAM", "vscode")]);
     s.expect("F12 is named first", "F12 or Ctrl+Q opens Lillignode's menu");
     s.raw(F12);
-    s.expect("and opens the menu", "MENU  Tab next");
+    s.expect("and opens the menu", "MENU Esc back  q quit");
     s.keys(ESC);
     drop(s.quit("quit", false));
 
@@ -742,7 +919,7 @@ fn main() {
     s.keys(b"\r");
     s.keys(b"\r");
     s.expect("a new Claude Code agent starts a new conversation", "STANDIN CLAUDE new ");
-    s.expect("sidebar uses its name", "> Claude Code");
+    s.expect("sidebar uses its name, under a hat, and marks it as in front", ">/\\. Claude Code");
     s.keys(b"remember-this");
     s.keys(b"\r");
     s.expect("something is said in it", "SAID remember-this");
@@ -806,16 +983,16 @@ fn main() {
             "KNOWN FAILURE on Windows: Lillignode's answer does not reach the agent",
             "STATUS QUESTION NOT ANSWERED got=\\u{1b}[?61;",
         );
-        s.expect("so the sidebar stays at Starting, not a guess", "  Starting ");
+        s.expect("so the sidebar stays at Starting, not a guess", "work  Starting ");
         s.pump_for(status_deadline());
-        s.expect("and is Unknown once the deadline passes, never Starting for ever", "  Unknown: no report ");
+        s.expect("and is Unknown once the deadline passes, never Starting for ever", "work  Unknown   ");
         s.expect(
             "a notice says why, naming the missing files",
             "Status shows Unknown: conpty.dll and OpenConsole.exe are not beside lillignode.exe.",
         );
         s.expect(
             "and that nothing was changed, ending with what to do",
-            "nothing was changed. Reinstall Lillignode to fix it.",
+            r"Nothing was changed. Run scripts\package-windows.ps1 -BesideBuild.",
         );
         s.raw(CTRL_Q);
         s.keys(b"s");
@@ -826,24 +1003,55 @@ fn main() {
     } else {
         s.expect("Lillignode's answer reaches it, before any other answer", "STATUS QUESTION ANSWERED");
     }
-    s.expect("a report shows in the sidebar", "  Idle ");
+    s.expect("a report shows in the sidebar", "work  Idle ");
     s.never("no heading count while nobody needs you", "NEEDS YOU");
     let bells_before = bells(&s);
     let steps: [(&[u8], &str, &str); 8] = [
-        (b"w", "working", "  Working "),
-        (b"p", "needs permission: the yellow block", " ! NEEDS YOU: permission "),
-        (b"q", "has a question", " ! NEEDS YOU: question "),
-        (b"a", "needs signing in", " ! NEEDS YOU: sign in "),
-        (b"k", "is waiting with no kind given", " ! NEEDS YOU   "),
-        (b"d", "is done", "  Done "),
-        (b"e", "failed, in its own words with control characters removed", "  Error: rate limited, [2"),
-        (b"i", "is idle", "  Idle "),
+        (b"w", "working", "work  Working "),
+        (b"p", "needs permission: the yellow block", "work  NEEDS YOU   "),
+        (b"q", "has a question", "work  NEEDS YOU   "),
+        (b"a", "needs signing in", "work  NEEDS YOU   "),
+        (b"k", "is waiting with no kind given", "work  NEEDS YOU   "),
+        (b"d", "is done", "work  Done "),
+        (b"e", "failed", "work  Error   "),
+        (b"i", "is idle", "work  Idle "),
     ];
     for (key, what, shown) in steps {
         s.keys(key);
         s.expect(&format!("reported: {what}"), shown);
+        // The sidebar says NEEDS YOU only; what it needs is in the status
+        // report.
+        let kind = match key {
+            b"p" => Some("Status: Needs you: permission."),
+            b"q" => Some("Status: Needs you: question."),
+            b"a" => Some("Status: Needs you: sign in."),
+            b"k" => Some("Status: Needs you. "),
+            _ => None,
+        };
+        if let Some(kind) = kind {
+            s.raw(CTRL_Q);
+            s.keys(b"s");
+            s.expect("what it needs is in the status report", kind);
+            s.keys(b"z");
+        }
         if key == b"p" {
-            s.expect("the heading counts it", " AGENTS  1 NEEDS YOU");
+            s.expect("the heading counts it", " Lillignode  1 NEEDS YOU");
+            s.expect("and its mark carries the sign for Needs you", ">/\\! Claude Code");
+        }
+        if key == b"d" {
+            s.expect("with the sign for Done", ">/\\= Claude Code");
+        }
+        if key == b"e" {
+            s.expect("with the sign for Errored", ">/\\x Claude Code");
+            // The sidebar says Error only; its own words are in the status
+            // report, with control characters removed.
+            s.raw(CTRL_Q);
+            s.keys(b"s");
+            s.expect("its own words in full, made safe to show", "Status: Error: rate limited, [2");
+            s.keys(b"z");
+        }
+        if key == b"i" {
+            s.expect("with the sign for Idle", ">/\\z Claude Code");
         }
     }
     s.expect_gone("the heading count goes when it stops needing you", "NEEDS YOU");
@@ -856,9 +1064,9 @@ fn main() {
     );
     s.keys(b"t");
     s.expect("a background task's report arrives", "SENT t");
-    s.never("and does not change the agent's status", "  Working ");
+    s.never("and does not change the agent's status", "work  Working ");
     s.keys(b"u");
-    s.expect("a state Lillignode does not know is Unknown, not a guess", "  Unknown: not understood ");
+    s.expect("a state Lillignode does not know is Unknown, not a guess", "work  Unknown   ");
     if !cfg!(windows) || newer_pty {
         s.expect(
             "a notice says so, once",
@@ -866,9 +1074,9 @@ fn main() {
         );
     }
     s.keys(b"i");
-    s.expect("the next good report replaces it", "  Idle ");
+    s.expect("the next good report replaces it", "work  Idle ");
     s.keys(b"n");
-    s.expect("a report with a part Lillignode does not know is Unknown too", "  Unknown: not understood ");
+    s.expect("a report with a part Lillignode does not know is Unknown too", "work  Unknown   ");
     s.raw(CTRL_Q);
     s.keys(b"s");
     s.expect("menu then s shows the status report", "Status report for Claude Code (work)");
@@ -880,7 +1088,11 @@ fn main() {
     s.keys(b"z");
     s.expect("any key goes back to the agent", "Typing goes to Claude Code (work)");
     s.keys(b"c");
-    s.expect("a withdrawn status is Unknown", "  Unknown: withdrawn ");
+    s.expect("a withdrawn status is Unknown", "work  Unknown   ");
+    s.raw(CTRL_Q);
+    s.keys(b"s");
+    s.expect("and the status report says why", "Status: Unknown: withdrawn.");
+    s.keys(b"z");
     s.keys(b"l");
     s.expect("a long report", "SENT l");
     s.raw(CTRL_Q);
@@ -889,20 +1101,20 @@ fn main() {
     s.keys(b"z");
     // Leave the first one waiting for permission, then put another in front.
     s.keys(b"p");
-    s.expect("the first agent needs you again", " ! NEEDS YOU: permission ");
+    s.expect("the first agent needs you again", "work  NEEDS YOU   ");
     let bells_before = bells(&s);
 
     s.new_agent(&silent.join("claude").display().to_string());
     s.expect("an agent that never asks", "STANDIN READY status-silent");
-    s.expect("shows Starting at first", "  Starting ");
+    s.expect("shows Starting at first", "work  Starting ");
     s.expect(
         "the notice names the agent behind that needs you, and how to reach it",
         "Claude Code (work) needs you: permission. Ctrl+Q then Tab to go to it.",
     );
-    s.expect("the heading still counts it", " AGENTS  1 NEEDS YOU");
+    s.expect("the heading still counts it", " Lillignode  1 NEEDS YOU");
     check("no new bell: it did not change", bells(&s) == bells_before, "a bell rang");
     s.pump_for(status_deadline());
-    s.expect("and Unknown once the deadline passes", "  Unknown: no report ");
+    s.expect("and Unknown once the deadline passes", "work  Unknown   ");
     s.expect(
         "an ordinary notice cannot push the needs-you notice out",
         "Claude Code (work) needs you: permission. Ctrl+Q then Tab to go to it.",
@@ -942,7 +1154,7 @@ fn main() {
     s.new_agent(&asks.join("claude").display().to_string());
     s.expect("the agent asks the status question", "STATUS QUESTION ");
     s.keys(b"d");
-    s.expect("it is done", "  Done ");
+    s.expect("it is done", "work  Done ");
     s.raw(CTRL_Q);
     s.keys(b"q");
     let tail = s.quit_already_asked("quit with every agent Done");
@@ -953,7 +1165,7 @@ fn main() {
         Session::start_with(&sb, &sb.root.join("state-status-off"), &[(lillignode::status::OFF_SWITCH, "1")]);
     s.new_agent(&silent.join("claude").display().to_string());
     s.pump_for(status_deadline());
-    s.expect("the agent shows Unknown", "  Unknown: no report ");
+    s.expect("the agent shows Unknown", "work  Unknown   ");
     s.expect(
         "the notice names the setting, not a fault",
         "Status shows Unknown: CLAUDE_CODE_DISABLE_TERMINAL_TITLE is set here.",
@@ -963,6 +1175,7 @@ fn main() {
 
     paste_after_status(&sb, &standin);
     cost(&sb);
+    side_by_side(&sb, &standin);
 
     let _ = std::fs::remove_dir_all(&sb.root);
     println!("\nAll checks passed.");

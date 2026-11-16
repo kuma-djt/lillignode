@@ -14,6 +14,8 @@ One folder, `dist\lillignode-<version>-windows-x64\`, holding everything a Windo
 | `README.md` | The README |
 | `LICENSE` | Lillignode's own licence, the AGPL-3.0 |
 
+Then a zip of that folder, `dist\lillignode-<version>-windows-x64.zip`, which unpacks into one folder of the same name, and `dist\lillignode-<version>-windows-x64.zip.sha256`, its SHA-256 hash in the form `sha256sum -c` reads. The zip is made only after every check below has passed.
+
 `dist\` is not committed.
 
 ## How to run it
@@ -24,7 +26,7 @@ From the repository, in any terminal:
 powershell -ExecutionPolicy Bypass -File scripts\package-windows.ps1
 ```
 
-It needs the Rust toolchain for x64 Windows and, the first time, a connection to github.com. It takes about a minute. It ends with the folder's path and the SHA-256 hash of every file in it, or with `PACKAGING FAILED` and exit code 1.
+It needs the Rust toolchain for x64 Windows and, the first time, a connection to github.com. It takes about a minute. It ends with the folder's path, the SHA-256 hash of every file in it, and the zip's path and hash, or with `PACKAGING FAILED` and exit code 1.
 
 Two options:
 
@@ -42,6 +44,7 @@ The Microsoft files come from one pinned package, the one Lillignode was checked
 | `OpenConsole.exe` SHA-256 hash | It is not the file whose hash is written in the script |
 | `conpty.dll` signature | Windows does not report the signature as valid, or the signer is not Microsoft Corporation |
 | `OpenConsole.exe` signature | The same |
+| No local paths in `lillignode.exe` | The built program contains the user folder, the repository's folder or the user name of the machine it was built on. The build rewrites the source paths Rust records for panic messages (`--remap-path-prefix`) so that it does not |
 | The packaged `lillignode.exe --version` | It does not start or does not report a version. It is run with `LILLIGNODE_STATE_DIR` pointed at a throwaway folder |
 
 The hash check and the signature check do not depend on each other. The hash is compared with a value written in the script; the signature is checked by Windows against Microsoft's certificate and does not read that value. A wrong pin in the script is caught by the signature; a file signed by Microsoft but not the version that was hand-checked is caught by the hash.

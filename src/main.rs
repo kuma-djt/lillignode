@@ -28,7 +28,7 @@ impl From<AgentEvent> for Msg {
 fn help(config: &Config) -> String {
     format!(
         "\
-Lillignode runs AI coding agents side by side in one terminal window.
+Lillignode runs several AI coding agents at once in one terminal window.
 
 Usage: lillignode            open your workspace
        lillignode --where    print where your workspace and settings are kept
@@ -36,11 +36,16 @@ Usage: lillignode            open your workspace
        lillignode --help
 
 Inside Lillignode, typing goes to the agent in front. Press {keys} for
-Lillignode's own menu: switch agents, read back history, new agent, close, quit.
+Lillignode's own menu: switch agents, read back history, new agent, close, quit,
+and v for two agents side by side (in a window at least 109 columns wide).
 
 To change the menu keys, put this in the settings file (see --where):
   {{ \"menu_keys\": [\"ctrl+q\", \"f12\"] }}
 Allowed: ctrl+letter, alt+letter, f1 to f12.
+
+To see what each Claude Code conversation has used, add \"cost\": true to that
+file. It is experimental and off unless you ask. Lillignode then reads Claude
+Code's own record of each conversation on this machine, and changes nothing.
 
 Each agent uses its own account. Lillignode does not ask for your keys and
 sends nothing anywhere.",
@@ -143,10 +148,18 @@ fn main() -> ExitCode {
 
     let (tx, rx) = mpsc::channel::<Msg>();
     let backend = LocalAgents::new(tx.clone());
-    let mut app = App::launch(backend, ui::agent_size(window), state_dir, launch_dir, config, config_problem);
-    // Cost is read from Claude Code's own records. Where they are is found
-    // here, in the real program only.
-    app.ws.set_claude_folder(lillignode::cost::claude_folder_from_env());
+    let mut app =
+        App::launch(backend, ui::agent_size(window, false), state_dir, launch_dir, config, config_problem);
+    app.set_window(window);
+    // Cost is read from Claude Code's own records, and only when the user
+    // has asked for it. Where the records are is found here, in the real
+    // program only.
+    if app.config.cost {
+        app.ws.read_cost_from(lillignode::cost::claude_folder_from_env());
+        app.ws.set_cost_warning(app.config.cost_warning_tokens);
+    }
+    app.colors = lillignode::look::depth(app.config.colors, |name| std::env::var(name).ok(), cfg!(windows));
+    let started = Instant::now();
     input::spawn_reader(tx, Msg::Input);
 
     // Measurement only: with LILLIGNODE_TIMING=<file>, record for each key how
@@ -159,6 +172,7 @@ fn main() -> ExitCode {
 
     let mut draw_error = None;
     while !app.quit {
+        app.clock = started.elapsed().as_secs();
         if let Err(e) = terminal.draw(|frame| {
             app.too_small = ui::areas(frame.area()).is_none();
             ui::draw(frame, &app);
@@ -195,7 +209,7 @@ fn main() -> ExitCode {
                 }
                 Msg::Input(Input::Paste(text), _) => app.on_paste(text),
                 Msg::Input(Input::Resize { cols, rows }, _) => {
-                    app.ws.resize(ui::agent_size(ratatui::layout::Rect::new(0, 0, cols, rows)));
+                    app.set_window(ratatui::layout::Rect::new(0, 0, cols, rows));
                 }
             }
         }

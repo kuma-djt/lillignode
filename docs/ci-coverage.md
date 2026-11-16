@@ -1,6 +1,6 @@
 # What CI must cover
 
-Status: 2026-11-13. No CI exists yet. Everything so far has been run on one Windows 11 machine. macOS and Linux are untested and must not be called supported until the checks below run there.
+Status: 2026-11-16. CI builds Lillignode, runs its unit tests and the lint on Windows and Linux, and the format check on Linux, on every push (`.github/workflows/ci.yml`). That is item 1 below, in a debug build, and nothing more: no end-to-end check, no probe, and no macOS. Everything else on this page has only been run by hand on one Windows 11 machine. macOS and Linux are untested and must not be called supported until the checks below run there.
 
 ## Why the other platforms are not a formality
 

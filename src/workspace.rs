@@ -54,6 +54,8 @@ pub struct Entry {
     id: Option<AgentId>,
     /// Set while a resume is unproven: when it was started.
     resuming_since: Option<Instant>,
+    /// The user has been told this conversation passed their cost warning.
+    cost_warned: bool,
 }
 
 impl Entry {
@@ -98,6 +100,12 @@ impl Entry {
             Some(reader) => reader.cost().clone(),
             None => Cost::Unknown(cost::WhyNot::NoConversation),
         }
+    }
+
+    /// What the conversation has used since Lillignode was started. None
+    /// while its cost is not known, or when that cannot be told.
+    pub fn cost_since_started(&self) -> Option<cost::Usage> {
+        self.usage.as_ref().and_then(cost::Reader::since_started)
     }
 
     /// When Claude Code's record of the conversation last changed.
@@ -210,24 +218,101 @@ pub enum Happened {
     },
 }
 
+/// Two agents side by side. The agent in front is always one of them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Pair {
+    pub left: usize,
+    pub right: usize,
+}
+
+/// Why two agents cannot be put side by side.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NoPair {
+    /// How many agents are open: fewer than two.
+    TooFewAgents(usize),
+}
+
 pub struct Workspace<B: AgentBackend> {
     backend: B,
     entries: Vec<Entry>,
     focused: usize,
+    /// Set while the user has asked for two agents side by side. Whether
+    /// the window has room for them is the caller's to decide.
+    pair: Option<Pair>,
     size: Size,
+    /// Cost is read only once the program says to. Until then no record is
+    /// looked for or opened.
+    cost_on: bool,
     /// Where Claude Code keeps its records, for reading cost. None until
     /// the program says, so nothing built for a test ever looks at a real one.
     claude_folder: Option<PathBuf>,
+    /// The count at which a conversation's cost is marked and the user is
+    /// told. A warning only: nothing is stopped or held.
+    cost_warning: Option<u64>,
 }
 
 impl<B: AgentBackend> Workspace<B> {
     pub fn new(backend: B, size: Size) -> Self {
-        Self { backend, entries: Vec::new(), focused: 0, size, claude_folder: None }
+        Self {
+            backend,
+            entries: Vec::new(),
+            focused: 0,
+            pair: None,
+            size,
+            cost_on: false,
+            claude_folder: None,
+            cost_warning: None,
+        }
     }
 
-    /// Say where Claude Code keeps its records. Cost is Unknown until then.
-    pub fn set_claude_folder(&mut self, folder: Option<PathBuf>) {
+    /// Switch the cost readout on and say where Claude Code keeps its
+    /// records. With no folder, every cost is Unknown and says why. Until
+    /// this is called nothing of Claude Code's is read.
+    pub fn read_cost_from(&mut self, folder: Option<PathBuf>) {
+        self.cost_on = true;
         self.claude_folder = folder;
+    }
+
+    pub fn cost_on(&self) -> bool {
+        self.cost_on
+    }
+
+    /// The count at which a conversation is marked as over the user's
+    /// warning. None for no warning.
+    pub fn set_cost_warning(&mut self, at: Option<u64>) {
+        self.cost_warning = at;
+    }
+
+    pub fn cost_warning(&self) -> Option<u64> {
+        self.cost_warning
+    }
+
+    /// The count that put this agent over the warning, if it is over.
+    pub fn over_cost_warning(&self, entry: &Entry) -> Option<u64> {
+        cost::over(&entry.cost(), self.cost_warning)
+    }
+
+    /// Agents that have passed the warning since the last call, with the
+    /// count each had reached. Each is named once for its conversation.
+    pub fn take_passed_cost_warning(&mut self) -> Vec<(String, u64)> {
+        let warn_at = self.cost_warning;
+        let mut passed = Vec::new();
+        for entry in self.entries.iter_mut().filter(|e| !e.cost_warned) {
+            if let Some(count) = cost::over(&entry.cost(), warn_at) {
+                entry.cost_warned = true;
+                passed.push((entry.label(), count));
+            }
+        }
+        passed
+    }
+
+    /// Every open agent's cost, added up, and how many are left out.
+    pub fn cost_summary(&self) -> cost::Summary {
+        let mut all = cost::Summary::new();
+        for entry in &self.entries {
+            all.count(&entry.cost(), entry.cost_since_started());
+        }
+        all
     }
 
     pub fn claude_folder(&self) -> Option<&Path> {
@@ -317,6 +402,7 @@ impl<B: AgentBackend> Workspace<B> {
             track: Track::new(Instant::now()),
             id,
             resuming_since,
+            cost_warned: false,
         };
         (entry, continuing)
     }
@@ -360,8 +446,9 @@ impl<B: AgentBackend> Workspace<B> {
             track: Track::new(Instant::now()),
             id: Some(id),
             resuming_since: None,
+            cost_warned: false,
         });
-        self.focused = self.entries.len() - 1;
+        self.bring_to_front(self.entries.len() - 1);
         Ok(())
     }
 
@@ -373,7 +460,16 @@ impl<B: AgentBackend> Workspace<B> {
         if entry.is_running() {
             return None;
         }
-        let (entry, continuing) = self.open(entry.saved.clone());
+        let conversation = entry.saved.conversation.clone();
+        let (mut entry, continuing) = self.open(entry.saved.clone());
+        if entry.saved.conversation == conversation {
+            // The same conversation, so the same record: what it had used
+            // when Lillignode started, and whether its warning was given,
+            // are still true.
+            let old = &mut self.entries[self.focused];
+            entry.usage = old.usage.take();
+            entry.cost_warned = old.cost_warned;
+        }
         self.entries[self.focused] = entry;
         Some(continuing)
     }
@@ -383,24 +479,107 @@ impl<B: AgentBackend> Workspace<B> {
         if self.focused >= self.entries.len() {
             return None;
         }
-        let entry = self.entries.remove(self.focused);
+        let removed = self.focused;
+        let entry = self.entries.remove(removed);
         if let Some(id) = entry.id {
             self.backend.close(id);
         }
         self.focused = self.focused.min(self.entries.len().saturating_sub(1));
+        self.mend_pair(removed);
         Some(entry.label())
     }
 
     pub fn focus_next(&mut self) {
         if !self.entries.is_empty() {
-            self.focused = (self.focused + 1) % self.entries.len();
+            self.bring_to_front((self.focused + 1) % self.entries.len());
         }
     }
 
     pub fn focus_previous(&mut self) {
         if !self.entries.is_empty() {
-            self.focused = (self.focused + self.entries.len() - 1) % self.entries.len();
+            self.bring_to_front((self.focused + self.entries.len() - 1) % self.entries.len());
         }
+    }
+
+    /// Put agent `index` in front. With two agents side by side: one that
+    /// is already shown is simply given the keyboard, where it is. Any
+    /// other takes the place of the agent that was in front, and the agent
+    /// beside it stays where it was.
+    fn bring_to_front(&mut self, index: usize) {
+        if let Some(pair) = &mut self.pair {
+            if index != pair.left && index != pair.right {
+                if pair.left == self.focused {
+                    pair.left = index;
+                } else {
+                    pair.right = index;
+                }
+            }
+        }
+        self.focused = index;
+    }
+
+    /// The two agents shown side by side, if the user has asked for two.
+    pub fn pair(&self) -> Option<Pair> {
+        self.pair
+    }
+
+    /// Put the agent in front on the left and the next one beside it.
+    /// Nothing is resized here: sizes are the caller's, with `resize`.
+    pub fn show_two(&mut self) -> Result<Pair, NoPair> {
+        let count = self.entries.len();
+        if count < 2 {
+            return Err(NoPair::TooFewAgents(count));
+        }
+        let pair = Pair { left: self.focused, right: (self.focused + 1) % count };
+        self.pair = Some(pair);
+        Ok(pair)
+    }
+
+    /// Back to one agent on screen: the one in front.
+    pub fn show_one(&mut self) {
+        self.pair = None;
+    }
+
+    /// After the agent at `removed` has been taken out of the list: keep
+    /// the pair pointing at the same agents, give the empty side to an
+    /// agent not already shown, and go back to one agent on screen when
+    /// there are no longer two to show.
+    fn mend_pair(&mut self, removed: usize) {
+        let Some(mut pair) = self.pair else { return };
+        let count = self.entries.len();
+        if count < 2 {
+            self.pair = None;
+            return;
+        }
+        let kept = |side: usize| match side.cmp(&removed) {
+            std::cmp::Ordering::Less => Some(side),
+            std::cmp::Ordering::Equal => None,
+            std::cmp::Ordering::Greater => Some(side - 1),
+        };
+        // `focused` has already been moved to an agent that still exists.
+        let spare = |taken: usize, focused: usize| {
+            if focused != taken {
+                focused
+            } else {
+                (taken + 1) % count
+            }
+        };
+        match (kept(pair.left), kept(pair.right)) {
+            (Some(left), Some(right)) => pair = Pair { left, right },
+            (None, Some(right)) => pair = Pair { left: spare(right, self.focused), right },
+            (Some(left), None) => pair = Pair { left, right: spare(left, self.focused) },
+            // One agent was removed and the sides differ, so this cannot
+            // happen. If it ever did, one agent on screen is the safe answer.
+            (None, None) => {
+                self.pair = None;
+                return;
+            }
+        }
+        // The agent in front is always one of the two.
+        if self.focused != pair.left && self.focused != pair.right {
+            self.focused = pair.left;
+        }
+        self.pair = Some(pair);
     }
 
     /// Send what the user typed or pasted to the focused agent. Dropped if it
@@ -472,6 +651,7 @@ impl<B: AgentBackend> Workspace<B> {
                     Status::Running => {
                         // A new conversation has a new record, and its own cost.
                         entry.usage = usage_reader(&saved);
+                        entry.cost_warned = false;
                         entry.saved = saved;
                         entry.status = Status::Running;
                         entry.id = id;
@@ -505,7 +685,7 @@ impl<B: AgentBackend> Workspace<B> {
                 changed |= entry.track.tick(now);
             }
             // Whether or not the program is running: the record is still there.
-            if let Some(reader) = &mut entry.usage {
+            if let (true, Some(reader)) = (self.cost_on, &mut entry.usage) {
                 changed |= reader.look(now, self.claude_folder.as_deref());
             }
         }
@@ -716,6 +896,104 @@ mod tests {
         assert_eq!(ws.focused_index(), None);
     }
 
+    /// A workspace with agents in folders a, b, c, d; `front` is in front.
+    fn four(front: usize) -> Workspace<Fake> {
+        let mut ws = Workspace::new(Fake::default(), SIZE);
+        for folder in ["a", "b", "c", "d"] {
+            ws.start_new("claude", root(folder)).unwrap();
+        }
+        while ws.focused_index() != Some(front) {
+            ws.focus_next();
+        }
+        ws
+    }
+
+    fn shown(ws: &Workspace<Fake>) -> (String, String, String) {
+        let pair = ws.pair().expect("two are shown");
+        let folder = |i: usize| ws.entries()[i].folder_name();
+        (folder(pair.left), folder(pair.right), ws.focused().unwrap().folder_name())
+    }
+
+    #[test]
+    fn two_side_by_side_takes_two_agents_and_starts_with_the_one_in_front_on_the_left() {
+        let mut ws = Workspace::new(Fake::default(), SIZE);
+        assert_eq!(ws.show_two(), Err(NoPair::TooFewAgents(0)));
+        ws.start_new("claude", root("a")).unwrap();
+        assert_eq!(ws.show_two(), Err(NoPair::TooFewAgents(1)));
+        assert_eq!(ws.pair(), None, "a refusal changes nothing");
+
+        let mut ws = four(1);
+        assert_eq!(ws.show_two(), Ok(Pair { left: 1, right: 2 }));
+        // The last agent pairs with the first: the list wraps.
+        let mut last = four(3);
+        assert_eq!(last.show_two(), Ok(Pair { left: 3, right: 0 }));
+        ws.show_one();
+        assert_eq!(ws.pair(), None);
+        assert_eq!(ws.focused_index(), Some(1), "the agent in front stays in front");
+    }
+
+    #[test]
+    fn with_two_shown_switching_moves_the_keyboard_or_replaces_only_the_side_in_front() {
+        let mut ws = four(1);
+        ws.show_two().unwrap();
+        assert_eq!(shown(&ws), ("b".into(), "c".into(), "b".into()));
+        // The next agent is already on screen: only the keyboard moves.
+        ws.focus_next();
+        assert_eq!(shown(&ws), ("b".into(), "c".into(), "c".into()));
+        // The next is not on screen: it takes the side in front (the
+        // right), and the agent on the left stays where it was.
+        ws.focus_next();
+        assert_eq!(shown(&ws), ("b".into(), "d".into(), "d".into()));
+        ws.focus_next();
+        assert_eq!(shown(&ws), ("b".into(), "a".into(), "a".into()));
+        // Back to one already shown, then on to one that is not.
+        ws.focus_next();
+        assert_eq!(shown(&ws), ("b".into(), "a".into(), "b".into()));
+        ws.focus_previous();
+        assert_eq!(shown(&ws), ("b".into(), "a".into(), "a".into()));
+        ws.focus_previous();
+        assert_eq!(shown(&ws), ("b".into(), "d".into(), "d".into()));
+        // A new agent takes the side in front too.
+        ws.start_new("claude", root("e")).unwrap();
+        assert_eq!(shown(&ws), ("b".into(), "e".into(), "e".into()));
+    }
+
+    #[test]
+    fn closing_one_of_two_gives_its_side_to_another_agent_or_goes_back_to_one() {
+        // Close the one in front, on the left. As with one agent on
+        // screen, the next in the list comes to the front: here that is the
+        // agent already on the right, which does not move. The empty side
+        // goes to the next agent not already shown.
+        let mut ws = four(1);
+        ws.show_two().unwrap();
+        ws.close_focused();
+        assert_eq!(shown(&ws), ("d".into(), "c".into(), "c".into()));
+
+        // Close the one in front, on the right, when it is last in the list.
+        let mut ws = four(2);
+        ws.show_two().unwrap();
+        ws.focus_next();
+        assert_eq!(shown(&ws), ("c".into(), "d".into(), "d".into()));
+        ws.close_focused();
+        assert_eq!(shown(&ws), ("c".into(), "a".into(), "c".into()));
+
+        // Down to two agents, then one: back to one on screen, by itself.
+        let mut ws = four(0);
+        ws.show_two().unwrap();
+        ws.close_focused();
+        ws.close_focused();
+        assert_eq!(ws.entries().len(), 2);
+        let (left, right, front) = shown(&ws);
+        assert_ne!(left, right, "never the same agent on both sides");
+        assert!(front == left || front == right, "the agent in front is always one of the two");
+        ws.close_focused();
+        assert_eq!(ws.pair(), None);
+        assert_eq!(ws.entries().len(), 1);
+        ws.close_focused();
+        assert_eq!(ws.pair(), None);
+        assert_eq!(ws.focused_index(), None);
+    }
+
     #[test]
     fn closing_stops_the_agent_removes_it_and_ignores_its_late_exit() {
         let mut ws = Workspace::new(Fake::default(), SIZE);
@@ -883,12 +1161,17 @@ mod tests {
         ws.entries[1].saved.command = "codex".into();
         assert_eq!(ws.entries[0].cost(), Cost::Pending(Waiting::NotLooked));
         assert_eq!(ws.entries[1].cost(), Cost::Unknown(WhyNot::NotClaudeCode));
-        // No folder named: nothing is looked at, and it says so.
+        // The readout is off until the program switches it on: no look.
+        assert!(!ws.cost_on());
+        assert!(!ws.tick(Instant::now()));
+        assert_eq!(ws.entries[0].cost(), Cost::Pending(Waiting::NotLooked));
+        // On, with no folder named: nothing is looked at, and it says so.
+        ws.read_cost_from(None);
         assert!(ws.tick(Instant::now()));
         assert_eq!(ws.entries[0].cost(), Cost::Unknown(WhyNot::NoFolder));
 
         let folder = claude_folder_with_record("read", ID);
-        ws.set_claude_folder(Some(folder.clone()));
+        ws.read_cost_from(Some(folder.clone()));
         assert!(ws.tick(Instant::now() + crate::cost::LOOK_EVERY));
         let Cost::Known(usage) = ws.entries[0].cost() else { panic!("{:?}", ws.entries[0].cost()) };
         assert_eq!(usage.total().total(), 3150);
@@ -902,12 +1185,111 @@ mod tests {
         let _ = std::fs::remove_dir_all(folder);
     }
 
+    /// Add one more reply, of the same size, to the record made above.
+    fn record_another(folder: &Path, id: &str, reply: &str) {
+        use std::io::Write;
+        let path = folder.join("projects").join("C--work-a").join(format!("{id}.jsonl"));
+        let mut file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+        writeln!(
+            file,
+            "{{\"type\":\"assistant\",\"message\":{{\"id\":\"{reply}\",\"model\":\"claude-opus-5-5\",\
+             \"usage\":{{\"input_tokens\":100,\"output_tokens\":50,\"cache_creation_input_tokens\":1000,\
+             \"cache_read_input_tokens\":2000}}}}}}"
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn since_started_counts_only_what_came_after_the_first_full_reading() {
+        let mut ws = Workspace::new(Fake::default(), SIZE);
+        let folder = claude_folder_with_record("since", ID);
+        ws.read_cost_from(Some(folder.clone()));
+        ws.restore(saved(vec![agent("claude", "a")], Some(0)));
+        assert_eq!(ws.entries[0].cost_since_started(), None, "not known before the first look");
+        let now = Instant::now();
+        ws.tick(now);
+        // What was there before Lillignode started is not counted.
+        let since = ws.entries[0].cost_since_started().unwrap();
+        assert_eq!(since.total().total(), 0);
+        record_another(&folder, ID, "msg_2");
+        ws.tick(now + crate::cost::LOOK_EVERY);
+        let since = ws.entries[0].cost_since_started().unwrap();
+        assert_eq!((since.total().total(), since.total().headline()), (3150, 1150));
+        let all = ws.cost_summary();
+        assert_eq!((all.known, all.pending, all.unknown), (1, 0, 0));
+        assert_eq!(all.usage.total().total(), 6300);
+        assert_eq!(all.since_started.unwrap().total().total(), 3150);
+
+        // A record swapped for another while Lillignode is open: there is
+        // no honest starting point any more, so none is claimed.
+        let path = folder.join("projects").join("C--work-a").join(format!("{ID}.jsonl"));
+        std::fs::write(&path, "").unwrap();
+        record_another(&folder, ID, "msg_9");
+        ws.tick(now + crate::cost::LOOK_EVERY * 2);
+        assert!(matches!(ws.entries[0].cost(), crate::cost::Cost::Known(_)));
+        assert_eq!(ws.entries[0].cost_since_started(), None);
+        assert_eq!(ws.cost_summary().since_started, None);
+        let _ = std::fs::remove_dir_all(folder);
+    }
+
+    #[test]
+    fn passing_the_cost_warning_is_told_once_and_stops_nothing() {
+        let mut ws = Workspace::new(Fake::default(), SIZE);
+        let folder = claude_folder_with_record("warn", ID);
+        ws.read_cost_from(Some(folder.clone()));
+        ws.restore(saved(vec![agent("claude", "a")], Some(0)));
+        let now = Instant::now();
+        ws.tick(now);
+        // No threshold set: nothing is ever over.
+        assert_eq!(ws.over_cost_warning(&ws.entries[0]), None);
+        assert!(ws.take_passed_cost_warning().is_empty());
+        // The count compared is the one shown: 1,150, without cache reads.
+        ws.set_cost_warning(Some(1151));
+        assert!(ws.take_passed_cost_warning().is_empty());
+        record_another(&folder, ID, "msg_2");
+        ws.tick(now + crate::cost::LOOK_EVERY);
+        assert_eq!(ws.over_cost_warning(&ws.entries[0]), Some(2300));
+        let passed = ws.take_passed_cost_warning();
+        assert_eq!(passed, vec![(ws.entries[0].label(), 2300)]);
+        assert!(ws.take_passed_cost_warning().is_empty(), "once");
+        assert_eq!(ws.over_cost_warning(&ws.entries[0]), Some(2300), "the row stays marked");
+        // A cost that is pending or unknown is never over: there is no
+        // count to compare. And the agent still runs.
+        use crate::cost::{Cost, Waiting, WhyNot};
+        assert_eq!(cost::over(&Cost::Pending(Waiting::NoReplies), Some(1)), None);
+        assert_eq!(cost::over(&Cost::Unknown(WhyNot::NoFolder), Some(1)), None);
+        assert!(ws.entries[0].is_running());
+        let _ = std::fs::remove_dir_all(folder);
+    }
+
+    #[test]
+    fn starting_an_agent_again_keeps_what_its_conversation_had_used_and_its_warning() {
+        let mut ws = Workspace::new(Fake::default(), SIZE);
+        let folder = claude_folder_with_record("again", ID);
+        ws.read_cost_from(Some(folder.clone()));
+        ws.set_cost_warning(Some(2000));
+        ws.restore(saved(vec![agent("claude", "a")], Some(0)));
+        let now = Instant::now();
+        ws.tick(now);
+        record_another(&folder, ID, "msg_2");
+        ws.tick(now + crate::cost::LOOK_EVERY);
+        assert_eq!(ws.take_passed_cost_warning().len(), 1);
+        // It exits cleanly and is started again: the same conversation.
+        ws.handle(AgentEvent::Exited(AgentId(1), Exit { code: 0 }));
+        assert_eq!(ws.restart_focused(), Some(true));
+        ws.tick(now + crate::cost::LOOK_EVERY * 2);
+        let since = ws.entries[0].cost_since_started().unwrap();
+        assert_eq!(since.total().total(), 3150, "what was used before the restart still counts");
+        assert!(ws.take_passed_cost_warning().is_empty(), "and its warning is not given twice");
+        let _ = std::fs::remove_dir_all(folder);
+    }
+
     #[test]
     fn a_new_conversation_starts_its_cost_afresh() {
         use crate::cost::Cost;
         let mut ws = Workspace::new(Fake::default(), SIZE);
         let folder = claude_folder_with_record("fresh", ID);
-        ws.set_claude_folder(Some(folder.clone()));
+        ws.read_cost_from(Some(folder.clone()));
         ws.restore(saved(vec![agent("claude", "a")], Some(0)));
         ws.tick(Instant::now());
         assert!(matches!(ws.entries[0].cost(), Cost::Known(_)));

@@ -5,6 +5,7 @@ pub mod cost;
 pub mod input;
 pub mod keys;
 pub mod local;
+pub mod look;
 pub mod state;
 pub mod status;
 pub mod terminal;

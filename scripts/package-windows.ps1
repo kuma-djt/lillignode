@@ -6,7 +6,8 @@ Builds the Windows release folder for Lillignode.
 Builds lillignode.exe and puts it in dist\lillignode-<version>-windows-x64\ with
 the two Microsoft pseudo-terminal files Claude Code's status needs on Windows
 (conpty.dll and OpenConsole.exe), the MIT notice for those
-two files, and the README.
+two files, the README and the LICENCE. Then zips that folder into
+dist\lillignode-<version>-windows-x64.zip and writes the zip's SHA-256 beside it.
 
 The Microsoft files come from one pinned package on the Windows Terminal
 releases page. Each file must match its recorded SHA-256 hash AND carry a
@@ -40,7 +41,7 @@ $ProgressPreference = 'SilentlyContinue'
 
 # ---------------------------------------------------------------------------
 # The pin. Changing any of these values is a
-# decision, not a chore: record it in docspackaging-windows.md and repeat the
+# decision, not a chore: record it in docs\packaging-windows.md and repeat the
 # status check against real Claude Code by hand.
 # ---------------------------------------------------------------------------
 $PinnedRelease = 'v1.25.3131.0'
@@ -185,13 +186,38 @@ try {
         if ($hostLine -notlike '*x86_64-pc-windows-*') {
             throw "The Rust toolchain here builds for `"$hostLine`", not x64 Windows. The Microsoft files packaged are x64."
         }
-        Invoke-Program 'cargo build --release --locked' | Out-Null
+        # Rust writes the source paths of its dependencies into the program,
+        # for its panic messages, and those paths name this machine's user
+        # folder. They are rewritten to short neutral names for the release.
+        # CARGO_ENCODED_RUSTFLAGS keeps a path with spaces in one piece.
+        $cargoHome  = if ($env:CARGO_HOME)  { $env:CARGO_HOME }  else { Join-Path $env:USERPROFILE '.cargo' }
+        $rustupHome = if ($env:RUSTUP_HOME) { $env:RUSTUP_HOME } else { Join-Path $env:USERPROFILE '.rustup' }
+        $remaps = @("$cargoHome=cargo", "$rustupHome=rustup", "$repo=lillignode", "$($env:USERPROFILE)=home")
+        $flagsBefore = $env:CARGO_ENCODED_RUSTFLAGS
+        $env:CARGO_ENCODED_RUSTFLAGS = ($remaps | ForEach-Object { "--remap-path-prefix=$_" }) -join [char]0x1f
+        # A release is never built without its icon (build.rs).
+        $iconBefore = $env:LILLIGNODE_REQUIRE_ICON
+        $env:LILLIGNODE_REQUIRE_ICON = '1'
+        try {
+            Invoke-Program 'cargo build --release --locked' | Out-Null
+        } finally {
+            $env:CARGO_ENCODED_RUSTFLAGS = $flagsBefore
+            $env:LILLIGNODE_REQUIRE_ICON = $iconBefore
+        }
     } finally {
         Pop-Location
     }
     $exe = Join-Path $repo 'target\release\lillignode.exe'
     if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) {
         throw "The build finished but $exe is not there."
+    }
+    # Checked, not assumed: the program must not name this machine's folders.
+    $bytes = [IO.File]::ReadAllBytes($exe)
+    $text = [Text.Encoding]::GetEncoding(28591).GetString($bytes)
+    foreach ($local in @($env:USERPROFILE, $repo, $env:USERNAME)) {
+        if ($local -and $text.IndexOf($local, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            throw "The built lillignode.exe still contains a path or name from this machine ($local). Nothing was packaged."
+        }
     }
 
     $packagePath = Get-PinnedPackage (Join-Path $repo 'target\package-cache') $Package
@@ -238,6 +264,31 @@ try {
         Assert-MicrosoftSignature $shipped "$($file.Name) in the release folder"
     }
 
+    # The zip holds the release folder itself, so it unpacks into one folder.
+    # Its SHA-256 is written beside it, in the form sha256sum -c reads.
+    $zipPath = "$final.zip"
+    $hashPath = "$zipPath.sha256"
+    foreach ($old in @($zipPath, $hashPath)) {
+        if (Test-Path -LiteralPath $old) { Remove-Item -LiteralPath $old -Force }
+    }
+    # Each entry is named with forward slashes, as the zip format requires.
+    # Windows PowerShell's CreateFromDirectory writes backslashes, which
+    # other systems' unzip tools do not read as folders.
+    Add-Type -AssemblyName System.IO.Compression
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $folderName = Split-Path -Leaf $final
+    $archive = [IO.Compression.ZipFile]::Open($zipPath, [IO.Compression.ZipArchiveMode]::Create)
+    try {
+        Get-ChildItem -LiteralPath $final -File | Sort-Object Name | ForEach-Object {
+            [IO.Compression.ZipFileExtensions]::CreateEntryFromFile(
+                $archive, $_.FullName, "$folderName/$($_.Name)", [IO.Compression.CompressionLevel]::Optimal) | Out-Null
+        }
+    } finally {
+        $archive.Dispose()
+    }
+    $zipHash = Get-Sha256 $zipPath
+    [IO.File]::WriteAllText($hashPath, "$zipHash  $(Split-Path -Leaf $zipPath)`n", (New-Object Text.UTF8Encoding $false))
+
     if ($BesideBuild) {
         foreach ($file in $MicrosoftFiles) {
             Copy-Item -LiteralPath (Join-Path $final $file.Name) -Destination (Join-Path $repo "target\release\$($file.Name)") -Force
@@ -250,6 +301,9 @@ try {
     Get-ChildItem -LiteralPath $final | Sort-Object Name | ForEach-Object {
         Write-Host ("  {0}  {1,9:N0} bytes  {2}" -f (Get-Sha256 $_.FullName), $_.Length, $_.Name)
     }
+    Write-Host ""
+    Write-Host "Zip: $zipPath"
+    Write-Host "  SHA-256 $zipHash (also in $(Split-Path -Leaf $hashPath))"
     Write-Host ""
     Write-Host "Lillignode $version packaged. Both Microsoft files matched their hashes and are signed by $RequiredSigner."
     exit 0

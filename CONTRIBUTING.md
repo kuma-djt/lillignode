@@ -43,7 +43,7 @@ cargo run --release --example e2e
 
 If you change `scripts\package-windows.ps1`, also run `scripts\test-package-windows.ps1`.
 
-What these do not prove is listed in [docs/ci-coverage.md](docs/ci-coverage.md). There is no CI yet.
+What these do not prove is listed in [docs/ci-coverage.md](docs/ci-coverage.md). CI runs the build, the unit tests and the lint on Windows and Linux, and the format check on Linux, on every push. It does not run the end-to-end check; run all five yourself.
 
 ## What a change should look like
 

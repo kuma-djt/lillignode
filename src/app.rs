@@ -8,19 +8,76 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::layout::Rect;
 
 use crate::agent::{AgentBackend, AgentEvent, Size};
 use crate::config::{Billing, Config};
 use crate::cost::{self, Cost, Usage, Waiting, WhyNot};
 use crate::keys;
+use crate::look::Depth;
 use crate::state::{self, LoadOutcome};
 use crate::status::{self, AgentStatus, Reading};
 use crate::terminal::HISTORY_ROWS;
-use crate::workspace::{Entry, Happened, RestoreReport, Status, Workspace};
+use crate::ui;
+use crate::workspace::{Entry, Happened, NoPair, RestoreReport, Status, Workspace};
 
 pub const DEFAULT_COMMAND: &str = "claude";
 const AGENT_PROMPT: &str = "Agent to start: ";
 const FOLDER_PROMPT: &str = "Folder to work in: ";
+/// The last line of the cost total at the foot of the sidebar.
+const EXPERIMENTAL: &str = "  cost is experimental";
+/// Said in the status report whenever a cost is shown. The count is left
+/// as it is: what Claude Code stores at the start of a conversation is
+/// real use, so it is explained, not hidden.
+const FIRST_REQUEST: &str = "Experimental: this readout has not been checked against /usage. A \
+    conversation's first request counts tens of thousands of tokens (about 59,000 in one check), most of \
+    them Claude Code writing its own instructions to its cache. That is real use, and it is counted. It \
+    is also why a cost warning set below that is passed by every agent at once.\n";
+
+/// Marks in the bar's text, taken out before it is shown: where a key's
+/// name starts, where the name of the mode starts, and where either ends.
+/// They let the bar be drawn with keys emphasised and labels dim while the
+/// words are written once, in one place.
+const KEY: char = '\u{1}';
+const MODE: char = '\u{3}';
+const END: char = '\u{2}';
+
+/// What a piece of the bar is, which decides how it is drawn.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BarPart {
+    /// The mode the bar is in: MENU, HISTORY, STATUS REPORT.
+    Mode,
+    /// A key the user can press.
+    Key,
+    /// What a key does, and everything else.
+    Label,
+}
+
+fn key(name: &str) -> String {
+    format!("{KEY}{name}{END}")
+}
+
+fn mode(name: &str) -> String {
+    format!("{MODE}{name}{END}")
+}
+
+/// The menu, in the narrowest window Lillignode draws in. The two ways out
+/// come first, so no width can cut them off, and the whole line fits 80
+/// columns. Shift+Tab (previous agent) works too and is in the README.
+fn menu_line() -> String {
+    let items = [
+        ("Esc", "back"),
+        ("q", "quit"),
+        ("Tab", "next"),
+        ("n", "new"),
+        ("x", "close"),
+        ("r", "start"),
+        ("s", "status"),
+        ("PgUp", "history"),
+    ];
+    let items: Vec<String> = items.iter().map(|(k, does)| format!("{} {does}", key(k))).collect();
+    format!("{} {}", mode("MENU"), items.join("  "))
+}
 
 pub enum Mode {
     /// Keys go to the focused agent if it is running.
@@ -49,20 +106,40 @@ pub enum Confirm {
     /// A paste of several lines into an agent that would take each line as
     /// a separate Enter. The text waits in `App::held_paste`.
     Paste,
+    /// Changing between one agent on screen and two, while an agent is
+    /// waiting for the user: every agent is told a new size and redraws.
+    View,
 }
 
 pub struct App<B: AgentBackend> {
     pub ws: Workspace<B>,
     pub mode: Mode,
     pub config: Config,
-    /// The latest thing the user should know. Stays until replaced.
+    /// The latest thing the user should know. Stays until replaced, except
+    /// a refusal (`refuse`), which goes at the next menu action.
     pub notice: Option<String>,
+    /// The notice that said an action was refused, while it is still shown.
+    /// It is about a key already pressed, so it does not stay to crowd what
+    /// comes next, such as who needs you.
+    refused: Option<String>,
+    /// What is wrong with the settings file, led by how to fix it. Shown
+    /// before any other notice and never cut before the fix; it goes at the
+    /// next menu action, and is said again when Lillignode closes.
+    settings_problem: Option<String>,
     /// Problems found on starting, repeated on the way out so they remain in
     /// the terminal after Lillignode closes.
     pub start_problems: Vec<String>,
     pub quit: bool,
     /// Set by the caller each time it draws: the window cannot show agents.
     pub too_small: bool,
+    /// How many colours to draw with. Full unless the caller says otherwise.
+    pub colors: Depth,
+    /// Whole seconds since Lillignode started, set by the caller before it
+    /// draws. A Working agent's sign in the sidebar moves with it.
+    pub clock: u64,
+    /// The window, as last told by `set_window`. Decides whether two
+    /// agents fit side by side, and what size agents are given.
+    window: Rect,
     held_paste: Option<String>,
     /// Where the workspace is saved, or why it cannot be.
     state_dir: Result<PathBuf, String>,
@@ -159,8 +236,8 @@ impl<B: AgentBackend> App<B> {
         config_problem: Option<String>,
     ) -> Self {
         let mut ws = Workspace::new(backend, size);
-        let mut start_problems: Vec<String> = config_problem.into_iter().collect();
-        let mut said = start_problems.clone();
+        let mut start_problems: Vec<String> = config_problem.iter().cloned().collect();
+        let mut said = Vec::new();
         match &state_dir {
             Ok(dir) => {
                 let loaded = state::load(dir);
@@ -181,9 +258,14 @@ impl<B: AgentBackend> App<B> {
             mode: Mode::Normal,
             config,
             notice,
+            refused: None,
+            settings_problem: config_problem,
             start_problems,
             quit: false,
             too_small: false,
+            colors: Depth::Full,
+            clock: 0,
+            window: Rect::default(),
             held_paste: None,
             state_dir,
             launch_dir,
@@ -266,7 +348,23 @@ impl<B: AgentBackend> App<B> {
                     self.ws.send_to_focused(&bytes);
                 }
             }
-            Mode::Normal => self.command(key),
+            // No agents yet: the welcome screen's keys work as they are.
+            Mode::Normal if self.ws.entries().is_empty() => self.command(key),
+            // The agent in front has stopped. Typing meant for it must not
+            // turn into commands (x would remove it, q would quit), so
+            // commands need the menu key here too, and a typed key says so.
+            Mode::Normal => {
+                if matches!(key.code, KeyCode::Char(_) | KeyCode::Enter) {
+                    let menu = self.config.menu_keys.first().map(|k| k.label()).unwrap_or_default();
+                    self.notice = Some(format!(
+                        "{} has stopped, so typing goes nowhere. Nothing was sent. {menu} then r starts 
+                         it again, or {menu} then x removes it.",
+                        self.focused_label()
+                    ));
+                }
+            }
+            // The menu key again closes the menu, as Esc does.
+            Mode::Menu if menu_key => self.mode = Mode::Normal,
             Mode::Menu => {
                 // Switching keeps the menu open, so reaching the fourth agent
                 // is Tab Tab Tab, not three trips through the menu.
@@ -285,6 +383,10 @@ impl<B: AgentBackend> App<B> {
                 match what {
                     Confirm::Close if yes => self.close_focused(),
                     Confirm::Quit if yes => self.quit = true,
+                    Confirm::View if yes => self.change_view(),
+                    Confirm::View => {
+                        self.notice = Some("The view was left as it was. No agent was resized.".to_string());
+                    }
                     Confirm::Paste => {
                         let text = self.held_paste.take().unwrap_or_default();
                         if yes {
@@ -305,8 +407,12 @@ impl<B: AgentBackend> App<B> {
     /// never passed on as Enter presses unasked.
     pub fn on_paste(&mut self, text: String) {
         if let Mode::NewAgent(form) = &mut self.mode {
-            // A pasted folder path: take the first line only.
-            form.input.push_str(text.lines().next().unwrap_or("").trim());
+            // A pasted folder path: take the first line only, and nothing
+            // that draws no character. Such a character would put the
+            // typing cursor in the wrong place, and three of them are the
+            // bar's own marks.
+            let line = text.lines().next().unwrap_or("").trim();
+            form.input.extend(line.chars().filter(|c| !c.is_control()));
             return;
         }
         let can_take_it = self.focused_running() && !self.too_small;
@@ -334,6 +440,17 @@ impl<B: AgentBackend> App<B> {
 
     /// A Lillignode command key. Unknown keys do nothing.
     fn command(&mut self, key: KeyEvent) {
+        // A key held with Ctrl or Alt is not a command: Ctrl+X is not x.
+        if key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+            return;
+        }
+        // The settings problem has been seen; it is said again on the way out.
+        self.settings_problem = None;
+        if let Some(refused) = self.refused.take() {
+            if self.notice.as_ref() == Some(&refused) {
+                self.notice = None;
+            }
+        }
         match key.code {
             KeyCode::Char('n') => {
                 self.mode = Mode::NewAgent(NewAgent { command: None, input: String::new() });
@@ -355,20 +472,46 @@ impl<B: AgentBackend> App<B> {
                         _ => format!("Started {} again.", e.label()),
                     });
                     self.save_or_say();
+                } else if self.focused_running() {
+                    // Said, so the key is never pressed into silence.
+                    self.refuse(format!(
+                        "{} is already running, so it was not started again. Nothing was changed.",
+                        self.focused_label()
+                    ));
                 }
             }
-            KeyCode::Char('x') => {
-                if self.focused_running() {
-                    self.mode = Mode::Confirm(Confirm::Close);
-                } else {
-                    self.close_focused();
-                }
-            }
+            // Always asked: closing takes the agent and its conversation out
+            // of the workspace, and it does not come back.
+            KeyCode::Char('x') if self.ws.focused().is_some() => self.mode = Mode::Confirm(Confirm::Close),
             KeyCode::Char('s') => {
                 if self.ws.focused().is_some() {
                     self.mode = Mode::StatusReport;
                 } else {
-                    self.notice = Some("There is no agent to show a status report for.".to_string());
+                    self.refuse("There is no agent to show a status report for.".to_string());
+                }
+            }
+            KeyCode::Char('v') => {
+                // Changing the view tells every agent a new size, and each
+                // redraws. While one is waiting for an answer, that is asked
+                // about first. A change that would be refused anyway is
+                // refused at once, without a question.
+                if self.ws.pair().is_some() && !self.two_shown() {
+                    // Two were asked for and the window has no room, so one
+                    // is on screen already. Nothing is resized: this only
+                    // stops two coming back when the window is widened.
+                    self.ws.show_one();
+                    self.notice = Some(
+                        "One agent on screen. Two side by side will not come back when the window is \
+                         widened. No agent was resized."
+                            .to_string(),
+                    );
+                    return;
+                }
+                let would_change = self.ws.pair().is_some() || self.can_show_two().is_ok();
+                if would_change && self.needs_you_count() > 0 {
+                    self.mode = Mode::Confirm(Confirm::View);
+                } else {
+                    self.change_view();
                 }
             }
             KeyCode::Char('q') => {
@@ -439,9 +582,138 @@ impl<B: AgentBackend> App<B> {
     }
 
     fn close_focused(&mut self) {
+        let two_before = self.ws.pair().is_some();
         if let Some(label) = self.ws.close_focused() {
-            self.notice = Some(format!("Closed {label} and removed it from your workspace."));
+            let mut said = format!("Closed {label} and removed it from your workspace.");
+            if two_before && self.ws.pair().is_none() {
+                // Fewer than two agents are left to show side by side.
+                self.apply_size();
+                if let Some(left) = self.ws.focused() {
+                    said += &format!(" {} has the whole screen again.", left.label());
+                }
+            }
+            self.notice = Some(said);
             self.save_or_say();
+        }
+    }
+
+    /// Tell Lillignode the size of its window. Agents are given the size
+    /// that fits: the whole agent area, or half of it each when two are
+    /// side by side and there is room.
+    pub fn set_window(&mut self, window: Rect) {
+        let two_before = self.two_shown();
+        let menu = self.config.menu_keys.first().map(|k| k.label()).unwrap_or_default();
+        self.window = window;
+        self.apply_size();
+        let Some(pair) = self.ws.pair() else { return };
+        if two_before && !self.two_shown() {
+            // The user asked for two and still wants them: say why only
+            // one is on screen, that the other was left alone, and the way
+            // to stay with one.
+            let other = if self.ws.focused_index() == Some(pair.left) { pair.right } else { pair.left };
+            let other = self.ws.entries().get(other).map(Entry::label).unwrap_or_default();
+            self.notice = Some(format!(
+                "Too narrow for two agents now, so only {} is shown. {other} was not stopped or closed. \
+                 Widen to {} columns for both, or {menu} then v to stay with one.",
+                self.focused_label(),
+                ui::TWO_MIN_COLS
+            ));
+        } else if !two_before && self.two_shown() {
+            self.notice = Some(format!(
+                "There is room again: two agents are side by side. Typing goes to {}{}.",
+                self.focused_label(),
+                self.side_in_front()
+            ));
+        }
+    }
+
+    /// True while two agents are side by side on screen: the user asked
+    /// for two and the window has room.
+    pub fn two_shown(&self) -> bool {
+        self.ws.pair().is_some() && ui::fits_two(self.window)
+    }
+
+    fn apply_size(&mut self) {
+        self.ws.resize(ui::agent_size(self.window, self.ws.pair().is_some()));
+    }
+
+    /// Why two agents cannot be put side by side right now, said in full.
+    fn can_show_two(&self) -> Result<(), String> {
+        let menu = self.config.menu_keys.first().map(|k| k.label()).unwrap_or_default();
+        if self.too_small || ui::areas(self.window).is_none() {
+            return Err("This window is too small to show agents at all, so the view was not changed. Make \
+                        it bigger first."
+                .to_string());
+        }
+        if !ui::fits_two(self.window) {
+            return Err(format!(
+                "This window is too narrow for two agents side by side: it is {} columns wide and that \
+                 takes {}. Nothing was changed. Widen the window, then {menu} then v.",
+                self.window.width,
+                ui::TWO_MIN_COLS
+            ));
+        }
+        match self.ws.entries().len() {
+            0 => Err(format!(
+                "Two agents side by side takes two agents, and none is open. Nothing was changed. {menu} \
+                 then n starts one."
+            )),
+            1 => Err(format!(
+                "Two agents side by side takes two agents, and one is open. Nothing was changed. {menu} \
+                 then n starts another."
+            )),
+            _ => Ok(()),
+        }
+    }
+
+    /// Say that an action was refused. The notice goes at the next menu
+    /// action, unless something else has replaced it by then.
+    fn refuse(&mut self, why: String) {
+        self.refused = Some(why.clone());
+        self.notice = Some(why);
+    }
+
+    /// Change between one agent on screen and two side by side. Refused,
+    /// with the reason and nothing changed, when two cannot be shown.
+    fn change_view(&mut self) {
+        let menu = self.config.menu_keys.first().map(|k| k.label()).unwrap_or_default();
+        if self.ws.pair().is_some() {
+            self.ws.show_one();
+            self.apply_size();
+            self.notice = Some(format!(
+                "One agent on screen: {}. Every agent was told its new size.",
+                self.focused_label()
+            ));
+            return;
+        }
+        if let Err(why) = self.can_show_two() {
+            self.refuse(why);
+            return;
+        }
+        match self.ws.show_two() {
+            Ok(pair) => {
+                self.apply_size();
+                let label = |i: usize| self.ws.entries().get(i).map(Entry::label).unwrap_or_default();
+                self.notice = Some(format!(
+                    "{} and {} are side by side, and typing goes to the one on the left. Every agent was \
+                     told its new size. If one draws badly, {menu} then v goes back to one.",
+                    label(pair.left),
+                    label(pair.right)
+                ));
+            }
+            // Checked above; said again here so it can never pass silently.
+            Err(NoPair::TooFewAgents(_)) => {
+                self.notice = Some("Two agents side by side takes two agents. Nothing was changed.".into());
+            }
+        }
+    }
+
+    /// With two agents side by side: which side typing goes to.
+    fn side_in_front(&self) -> &'static str {
+        match self.ws.pair().filter(|_| self.two_shown()) {
+            Some(pair) if self.ws.focused_index() == Some(pair.right) => ", on the right",
+            Some(_) => ", on the left",
+            None => "",
         }
     }
 
@@ -495,35 +767,84 @@ impl<B: AgentBackend> App<B> {
     /// The one line at the bottom: what can be done right now. Outside a
     /// question it always names the menu keys, so the way out is never hidden.
     pub fn bar(&self) -> String {
-        let menu = self.config.menu_keys_label();
+        self.bar_marked().chars().filter(|c| ![KEY, MODE, END].contains(c)).collect()
+    }
+
+    /// The bar in pieces, for drawing: which words are keys, which name the
+    /// mode, and which say what a key does. Joined, they are `bar()`.
+    pub fn bar_parts(&self) -> Vec<(BarPart, String)> {
+        let mut parts: Vec<(BarPart, String)> = Vec::new();
+        let mut now = BarPart::Label;
+        for c in self.bar_marked().chars() {
+            let next = match c {
+                KEY => BarPart::Key,
+                MODE => BarPart::Mode,
+                END => BarPart::Label,
+                _ => {
+                    match parts.last_mut() {
+                        Some((part, text)) if *part == now => text.push(c),
+                        _ => parts.push((now, c.to_string())),
+                    }
+                    continue;
+                }
+            };
+            now = next;
+        }
+        parts
+    }
+
+    fn bar_marked(&self) -> String {
+        let menu = self.config.menu_keys.iter().map(|k| key(&k.label())).collect::<Vec<_>>().join(" or ");
         match &self.mode {
-            // The sidebar is not drawn here, so who needs you is said first.
+            // Outside a question the menu keys come first, so nothing put
+            // before them (a long agent name or folder) can push them off.
+            // The sidebar is not drawn here, so who needs you is said too.
             Mode::Normal if self.too_small => match self.needs_you_count() {
-                0 => format!("{menu}: menu, then q to quit"),
+                0 => format!("{menu}: menu, then {} to quit", key("q")),
                 n => format!(
-                    "{} you.  {menu}: menu, then Tab to go to it, q to quit",
+                    "{menu}: menu, then {} goes to who needs you, {} quits.  {} you.",
+                    key("Tab"),
+                    key("q"),
                     plural(n, "agent needs", "agents need")
                 ),
             },
-            Mode::Normal if self.focused_running() => {
-                format!("Typing goes to {}.  {menu}: Lillignode menu", self.focused_label())
+            Mode::Normal if self.focused_running() => format!(
+                "{menu}: Lillignode menu   Typing goes to {}{}.",
+                self.focused_label(),
+                self.side_in_front()
+            ),
+            Mode::Normal if self.ws.entries().is_empty() => {
+                format!("{menu}: menu   {} new agent   {} quit", key("n"), key("q"))
             }
-            Mode::Normal if self.ws.entries().is_empty() => format!("n new agent   q quit   ({menu}: menu)"),
-            Mode::Normal => {
-                format!("r start again   x remove   Tab next agent   n new agent   q quit   ({menu}: menu)")
+            Mode::Normal => format!(
+                "{menu}: menu, then {} start again   {} remove   {} next agent   {} quit",
+                key("r"),
+                key("x"),
+                key("Tab"),
+                key("q")
+            ),
+            // The key for two agents side by side is named only where it
+            // would do something: with two on screen, or room for two.
+            Mode::Menu if self.ws.pair().is_some() => format!("{}  {} one agent", menu_line(), key("v")),
+            Mode::Menu if self.can_show_two().is_ok() => {
+                format!("{}  {} two side by side", menu_line(), key("v"))
             }
-            Mode::Menu => "MENU  Tab next   Shift+Tab previous   PgUp history   n new agent   x close   \
-                           r start again   s status, cost   q quit   Esc back to agent"
-                .to_string(),
-            Mode::StatusReport => {
-                format!("STATUS REPORT of {}.  Any key: back to the agent", self.focused_label())
-            }
+            Mode::Menu => menu_line(),
+            Mode::StatusReport => format!(
+                "{} of {}.  {}: back to the agent",
+                mode("STATUS REPORT"),
+                self.focused_label(),
+                key("Any key")
+            ),
             Mode::History => {
                 let back = self.ws.focused().map(|e| e.term.scrolled_back()).unwrap_or(0);
+                let scroll = ["PgUp", "PgDn", "Up", "Down", "Home"].map(key).join(" ");
                 format!(
-                    "HISTORY of {}: {} back.  PgUp PgDn Up Down Home scroll   any other key: back to now",
+                    "{} of {}: {} back.  {scroll} scroll   {}: back to now",
+                    mode("HISTORY"),
                     self.focused_label(),
-                    plural(back, "line", "lines")
+                    plural(back, "line", "lines"),
+                    key("any other key")
                 )
             }
             // What is being typed comes first and the hint after it, so a
@@ -537,8 +858,13 @@ impl<B: AgentBackend> App<B> {
             // Every question puts the question and its keys first. The bar
             // is one line, and a question cut off before "y / n" cannot be
             // answered.
-            Mode::Confirm(Confirm::Close) => format!(
+            Mode::Confirm(Confirm::Close) if self.focused_running() => format!(
                 "Close {}? y / n   It is running: closing stops it and removes it from your workspace.",
+                self.focused_label()
+            ),
+            Mode::Confirm(Confirm::Close) => format!(
+                "Remove {}? y / n   It has stopped: removing it takes it and its conversation out of your 
+                 workspace.",
                 self.focused_label()
             ),
             Mode::Confirm(Confirm::Quit) => {
@@ -549,6 +875,15 @@ impl<B: AgentBackend> App<B> {
                     plural(running, "running agent", "running agents"),
                     self.unfinished().join(", "),
                     if running == 1 { "It comes" } else { "They come" },
+                )
+            }
+            Mode::Confirm(Confirm::View) => {
+                let waiting: Vec<String> =
+                    self.ws.entries().iter().filter(|e| e.needs_you().is_some()).map(Entry::label).collect();
+                format!(
+                    "Resize every agent now? y / n   Waiting for you: {}. Changing the view makes every \
+                     agent redraw at a new size.",
+                    waiting.join(", ")
                 )
             }
             Mode::Confirm(Confirm::Paste) => {
@@ -608,6 +943,21 @@ impl<B: AgentBackend> App<B> {
                 });
             }
         }
+        // A conversation that has passed the user's cost warning is named
+        // once. Only told: no key is held, no agent stopped, no bell rung.
+        for (label, count) in self.ws.take_passed_cost_warning() {
+            let menu = self.config.menu_keys.first().map(|k| k.label()).unwrap_or_default();
+            let limit = self.ws.cost_warning().map(cost::short).unwrap_or_default();
+            let text = format!(
+                "Warning only, nothing stopped: {label} is past your cost warning ({} tokens; warning \
+                 at {limit} a conversation). {menu} then s shows the detail.",
+                cost::short(count)
+            );
+            self.notice = Some(match self.notice.take() {
+                Some(earlier) => format!("{text}  {earlier}"),
+                None => text,
+            });
+        }
         began && self.config.bell
     }
 
@@ -631,10 +981,11 @@ impl<B: AgentBackend> App<B> {
             );
         }
         if self.newer_pty_missing {
-            return format!(
-                "Status shows Unknown: conpty.dll and OpenConsole.exe are not beside lillignode.exe. \
-                 {fine} Reinstall Lillignode to fix it."
-            );
+            // Agents run as before; the fix is for people who built it
+            // themselves, as the release zip has both files.
+            return "Status shows Unknown: conpty.dll and OpenConsole.exe are not beside lillignode.exe. \
+                    Nothing was changed. Run scripts\\package-windows.ps1 -BesideBuild."
+                .to_string();
         }
         format!(
             "Status shows Unknown: Claude Code is not reporting it. {fine} Checked with Claude Code {}; \
@@ -695,21 +1046,56 @@ impl<B: AgentBackend> App<B> {
     /// to do, so when there is too much to show, words are taken out of the
     /// middle of a message and never off its end.
     pub fn notice_fitted(&self, room: usize) -> Option<String> {
-        let (waiting, notice) = match (self.needs_you_notice(), &self.notice) {
+        let (waiting, notice) = self.notice_parts(room)?;
+        Some(match (waiting.is_empty(), notice.is_empty()) {
+            (false, false) => format!("{waiting}  {notice}"),
+            _ => format!("{waiting}{notice}"),
+        })
+    }
+
+    /// The same in its two parts, so they can be drawn differently: the
+    /// sentence about who needs you, then the latest notice. Either may be
+    /// empty. None when there is nothing to say.
+    pub fn notice_parts(&self, room: usize) -> Option<(String, String)> {
+        let notice = match (&self.settings_problem, &self.notice) {
+            (Some(settings), Some(notice)) => Some(format!("{settings}  {notice}")),
+            (settings, notice) => settings.clone().or_else(|| notice.clone()),
+        };
+        let (waiting, notice) = match (self.needs_you_notice(), notice) {
             (Some(waiting), Some(notice)) => (waiting, notice),
-            (Some(waiting), None) => return Some(keep_end(&waiting, room)),
-            (None, notice) => return notice.as_deref().map(|n| keep_end(n, room)),
+            (Some(waiting), None) => return Some((keep_end(&waiting, room), String::new())),
+            (None, notice) => return notice.map(|_| (String::new(), self.notice_fit(room))),
         };
         let count = |s: &str| s.chars().count();
-        if count(&waiting) + 2 + count(notice) <= room {
-            return Some(format!("{waiting}  {notice}"));
+        if count(&waiting) + 2 + count(&notice) <= room {
+            return Some((waiting, notice));
         }
         // Who needs you comes first and is shortened last. The notice after
         // it is promised room for its last sentence, up to half the rows.
-        let reserve = (count(last_sentence(notice)) + 2).min(count(notice)).min(room / 2);
+        let reserve = (count(last_sentence(&notice)) + 2).min(count(&notice)).min(room / 2);
+        // A settings problem is never cut before its fix, its first sentence.
+        let fix = self.settings_problem.as_deref().map_or(0, |s| count(first_sentence(s)) + 2);
+        let reserve = reserve.max(fix).min(room);
         let waiting = keep_end(&waiting, room.saturating_sub(reserve + 2));
-        let notice = keep_end(notice, room.saturating_sub(count(&waiting) + 2));
-        Some(format!("{waiting}  {notice}"))
+        let notice = self.notice_fit(room.saturating_sub(count(&waiting) + 2));
+        Some((waiting, notice))
+    }
+
+    /// The notice, with any settings problem before it, in `room`
+    /// characters. A notice keeps its last sentence, which says what to do.
+    /// The settings problem leads with its fix, so it keeps its start, and
+    /// it is shortened only when nothing else is left to shorten.
+    fn notice_fit(&self, room: usize) -> String {
+        let count = |s: &str| s.chars().count();
+        match (&self.settings_problem, &self.notice) {
+            (None, Some(notice)) => keep_end(notice, room),
+            (None, None) => String::new(),
+            (Some(settings), None) => cut_end(settings, room),
+            (Some(settings), Some(_)) if count(settings) + 3 >= room => cut_end(settings, room),
+            (Some(settings), Some(notice)) => {
+                format!("{settings}  {}", keep_end(notice, room - count(settings) - 2))
+            }
+        }
     }
 
     /// A figure for the sidebar: tokens, or for a user who has said they
@@ -720,14 +1106,26 @@ impl<B: AgentBackend> App<B> {
             (Billing::Key, Ok(amount)) => {
                 format!("est. {}", cost::dollars_text(amount).replace("under ", "<"))
             }
-            _ => format!("{} tokens", cost::short(usage.total().total())),
+            // Tokens read from cache are left out of the count shown here;
+            // the status report panel has them (`Tokens::headline`).
+            _ => format!("{} tokens", cost::short(usage.total().headline())),
         }
     }
 
+    /// True when the user has asked for the cost readout. Off, nothing
+    /// about cost is drawn and none of Claude Code's records are read.
+    pub fn cost_shown(&self) -> bool {
+        self.ws.cost_on()
+    }
+
     /// The few words about an agent's cost on its row of the sidebar.
-    /// Pending and unknown are said as such, never shown as a number.
+    /// Pending and unknown are said as such, never shown as a number. A
+    /// conversation past the user's warning says PAST WARNING before its figure.
     pub fn cost_short(&self, entry: &Entry) -> String {
         match entry.cost() {
+            Cost::Known(usage) if self.ws.over_cost_warning(entry).is_some() => {
+                format!("PAST WARNING {}", self.figure(&usage))
+            }
             Cost::Known(usage) => self.figure(&usage),
             Cost::Pending(_) => "cost pending".to_string(),
             Cost::Unknown(_) => "cost unknown".to_string(),
@@ -735,48 +1133,56 @@ impl<B: AgentBackend> App<B> {
     }
 
     /// The foot of the sidebar: the total for all agents whose cost is
-    /// known, and on a second line how many agents are not in it. Empty
-    /// when there are no agents.
+    /// known, and on a second line how many agents are not in it. Last,
+    /// always, that the readout is experimental. Empty when there are no
+    /// agents, and when the readout is off.
     pub fn cost_total(&self) -> Vec<String> {
-        let mut all = Usage::default();
-        let (mut known, mut pending, mut unknown) = (0, 0, 0);
-        for entry in self.ws.entries() {
-            match entry.cost() {
-                Cost::Known(usage) => {
-                    known += 1;
-                    for (model, tokens) in usage.by_model {
-                        let sum = all.by_model.entry(model).or_default();
-                        sum.input = sum.input.saturating_add(tokens.input);
-                        sum.output = sum.output.saturating_add(tokens.output);
-                        sum.cache_write = sum.cache_write.saturating_add(tokens.cache_write);
-                        sum.cache_read = sum.cache_read.saturating_add(tokens.cache_read);
-                    }
-                }
-                Cost::Pending(_) => pending += 1,
-                Cost::Unknown(_) => unknown += 1,
-            }
+        if !self.cost_shown() {
+            return Vec::new();
         }
-        match (known, pending, unknown) {
-            (0, 0, 0) => Vec::new(),
+        let all = self.ws.cost_summary();
+        let mut foot = match (all.known, all.pending, all.unknown) {
+            (0, 0, 0) => return Vec::new(),
             (0, 0, _) => vec![" ALL AGENTS  cost unknown".to_string()],
             (0, _, _) => vec![" ALL AGENTS  cost pending".to_string()],
-            (_, 0, 0) => vec![format!(" ALL AGENTS  {}", self.figure(&all))],
-            _ => vec![
-                format!(" ALL AGENTS  {}", self.figure(&all)),
+            (_, 0, 0) => vec![format!(" ALL AGENTS  {}", self.figure(&all.usage))],
+            (_, pending, unknown) => vec![
+                format!(" ALL AGENTS  {}", self.figure(&all.usage)),
                 format!("  not counted: {}", plural(pending + unknown, "agent", "agents")),
             ],
-        }
+        };
+        foot.push(EXPERIMENTAL.to_string());
+        foot
+    }
+
+    /// "11,500 tokens, not counting 20,500 read from cache"
+    fn counted(tokens: &cost::Tokens) -> String {
+        format!(
+            "{} tokens, not counting {} read from cache",
+            cost::exact(tokens.headline()),
+            cost::exact(tokens.cache_read)
+        )
     }
 
     /// The cost part of the status report panel: the breakdown, what the
     /// figure is and is not, and for pending or unknown, the reason.
     fn cost_report(&self, e: &Entry) -> String {
+        if !self.cost_shown() {
+            return "Cost: off. To see what each Claude Code conversation has used, add \"cost\": true to \
+                    the settings file (lillignode --where says where it is) and start Lillignode again.\n"
+                .to_string();
+        }
         let record = "Claude Code's record of this conversation";
+        // A warning that cannot be checked is said, not left silently off.
+        let unchecked = match self.ws.cost_warning() {
+            Some(_) => " Your cost warning cannot be checked for this agent until its cost is known.",
+            None => "",
+        };
         let usage = match e.cost() {
             Cost::Known(usage) => usage,
             Cost::Pending(waiting) => {
                 return format!(
-                    "Cost: pending. {}\n",
+                    "Cost (experimental): pending. {}{unchecked}\n",
                     match waiting {
                         Waiting::NotLooked => "Lillignode has not finished reading yet.".to_string(),
                         Waiting::NoRecord { looked_in } => format!(
@@ -790,7 +1196,7 @@ impl<B: AgentBackend> App<B> {
             }
             Cost::Unknown(why) => {
                 return format!(
-                    "Cost: unknown. {}\n",
+                    "Cost (experimental): unknown. {}{unchecked}\n",
                     match why {
                         WhyNot::NotClaudeCode => "Lillignode reads cost only for Claude Code.".to_string(),
                         WhyNot::NoConversation => {
@@ -817,9 +1223,9 @@ impl<B: AgentBackend> App<B> {
         };
         let all = usage.total();
         let mut out = format!(
-            "Cost of this conversation so far, including before today: {} tokens.\n  input {}, output {}, \
+            "Cost (experimental) of this conversation so far, including before today: {}.\n  input {}, output {}, \
              written to cache {}, read from cache {}\n",
-            cost::exact(all.total()),
+            Self::counted(&all),
             cost::exact(all.input),
             cost::exact(all.output),
             cost::exact(all.cache_write),
@@ -827,8 +1233,45 @@ impl<B: AgentBackend> App<B> {
         );
         if usage.by_model.len() > 1 {
             for (model, tokens) in &usage.by_model {
-                out += &format!("  {model}: {}\n", cost::exact(tokens.total()));
+                out += &format!("  {model}: {}\n", Self::counted(tokens));
             }
+        }
+        out += &match e.cost_since_started() {
+            Some(since) => {
+                format!("Since Lillignode was started: {}.\n", Self::counted(&since.total()))
+            }
+            None => format!(
+                "Since Lillignode was started: not known. {record} was replaced while Lillignode was \
+                 open, or could not be read when Lillignode first looked, so there is nothing to count \
+                 from.\n"
+            ),
+        };
+        let everyone = self.ws.cost_summary();
+        let left_out = everyone.pending + everyone.unknown;
+        let left_out = match left_out {
+            0 => String::new(),
+            n => format!(" Not counted: {}.", plural(n, "agent", "agents")),
+        };
+        out += &match &everyone.since_started {
+            Some(since) => format!(
+                "All agents open now, since Lillignode was started: {}.{left_out}\n",
+                Self::counted(&since.total())
+            ),
+            None => format!("All agents open now, since Lillignode was started: not known.{left_out}\n"),
+        };
+        if let Some(limit) = self.ws.cost_warning() {
+            out += &match self.ws.over_cost_warning(e) {
+                Some(_) => format!(
+                    "Past your cost warning of {} tokens a conversation, counted the same way. It is only \
+                     a warning: nothing was stopped or held.\n",
+                    cost::exact(limit)
+                ),
+                None => format!(
+                    "Your cost warning is at {} tokens a conversation, counted the same way. It is only a \
+                     warning: nothing is stopped.\n",
+                    cost::exact(limit)
+                ),
+            };
         }
         out += &match usage.dollars() {
             Ok(amount) => format!(
@@ -857,6 +1300,7 @@ impl<B: AgentBackend> App<B> {
              /usage in the agent is the figure to trust. Lillignode changes nothing and saves none of this.\n",
             ago(e.cost_last_grew())
         );
+        out += FIRST_REQUEST;
         out
     }
 
@@ -881,18 +1325,21 @@ impl<B: AgentBackend> App<B> {
         let Some(e) = self.ws.focused() else { return "No agent is open.".to_string() };
         let t = &e.track;
         let mut out = format!("Status report for {}\n\n", e.label());
+        // The status in full, with its reason: the sidebar shows it short.
         match e.reported() {
             Some(shown) => {
-                out += &format!("The sidebar shows: {}", shown.text());
+                out += &format!("Status: {}", shown.text());
                 if let AgentStatus::Unknown(why) = shown {
                     out += &format!(". {}", status::why_long(why));
                 }
-                out += ".\n";
+                out += &format!(". The sidebar shows it as {}.\n", shown.short());
             }
-            None => out += &format!("The sidebar shows: {}. The program is not running.\n", e.status.text()),
+            None => out += &format!("Status: {}. The program is not running.\n", e.status.text()),
         }
-        out += &format!("\n{}", self.cost_report(e));
+        // The status trace comes before cost, so a short window, which
+        // cannot scroll this panel, still shows why a status is what it is.
         if !e.is_claude_code() {
+            out += &format!("\n{}", self.cost_report(e));
             return out;
         }
         out += "\n";
@@ -956,6 +1403,8 @@ impl<B: AgentBackend> App<B> {
              afresh whenever the agent is started.",
             status::CHECKED_WITH
         );
+        out += "\n\n";
+        out += &self.cost_report(e);
         out
     }
 
@@ -983,17 +1432,35 @@ fn newer_pty_missing() -> bool {
     dir.is_none_or(|d| !(d.join("conpty.dll").is_file() && d.join("OpenConsole.exe").is_file()))
 }
 
+/// The first sentence of a message.
+fn first_sentence(text: &str) -> &str {
+    text.find(". ").map_or(text, |at| &text[..=at])
+}
+
 /// The last sentence of a message, which is where it says what to do.
 fn last_sentence(text: &str) -> &str {
     let text = text.trim_end();
     text.rfind(". ").map_or(text, |at| text[at + 2..].trim_start())
 }
 
+/// `text` in at most `room` characters, cut at its end and the cut marked.
+/// For a message that leads with what to do.
+fn cut_end(text: &str, room: usize) -> String {
+    if text.chars().count() <= room {
+        return text.to_string();
+    }
+    let mut cut: String = text.chars().take(room.saturating_sub(1)).collect();
+    if room > 0 {
+        cut.push('…');
+    }
+    cut
+}
+
 /// `text` in at most `room` characters. When it is too long its last
 /// sentence is kept whole and the cut, marked with an ellipsis, is made
 /// before it. Only a last sentence that is itself longer than the room loses
 /// its end; then the start of the message is the most that can be shown.
-fn keep_end(text: &str, room: usize) -> String {
+pub(crate) fn keep_end(text: &str, room: usize) -> String {
     if text.chars().count() <= room {
         return text.to_string();
     }
@@ -1007,7 +1474,13 @@ fn keep_end(text: &str, room: usize) -> String {
         }
         return cut;
     };
-    let head: String = text.chars().take(head_chars).collect();
+    let mut head: String = text.chars().take(head_chars).collect();
+    // The cut falls between words, not inside one.
+    if text.chars().nth(head_chars).is_some_and(|c| c != ' ') {
+        if let Some(space) = head.rfind(' ') {
+            head.truncate(space);
+        }
+    }
     format!("{}… {tail}", head.trim_end())
 }
 
@@ -1258,7 +1731,7 @@ mod tests {
         assert!(matches!(app.mode, Mode::StatusReport));
         assert!(app.bar().starts_with("STATUS REPORT of cmd"), "{}", app.bar());
         let text = app.status_report_text();
-        assert!(text.contains("only for Claude Code"), "{text}");
+        assert!(text.contains("Cost: off."), "{text}");
         app.on_key(press(KeyCode::Char('z')));
         assert!(matches!(app.mode, Mode::Normal));
         assert!(sent.borrow().is_empty(), "the closing key reached the agent: {:?}", sent.borrow());
@@ -1287,7 +1760,17 @@ mod tests {
             format!("\x1b]7501;?\x07\x1b]7501;state=working:app=claude-code:msg={}\x07", "QUJD".repeat(600));
         app.on_agent_event(AgentEvent::Output(AgentId(2), report.into_bytes()));
         let text = app.status_report_text();
-        assert!(text.contains("The sidebar shows: Working."), "{text}");
+        assert!(text.starts_with("Status report for Claude Code"), "{text}");
+        assert!(text.contains("Status: Working. The sidebar shows it as Working."), "{text}");
+        // The trace comes before cost.
+        let trace = text.find("Lillignode answered yes.").unwrap();
+        let cost = text
+            .find(
+                "
+Cost",
+            )
+            .unwrap_or(text.len());
+        assert!(trace < cost, "{text}");
         assert!(text.contains("Lillignode answered yes."), "{text}");
         assert!(text.contains("more characters)"), "{text}");
         assert!(text.contains("Read as: Working, with the message \"ABCABC"), "{text}");
@@ -1458,7 +1941,10 @@ mod tests {
         app.newer_pty_missing = true;
         let text = app.unknown_notice(status::Why::NoReport);
         assert!(text.contains("conpty.dll and OpenConsole.exe are not beside lillignode.exe"), "{text}");
-        assert!(text.ends_with("Reinstall Lillignode to fix it."), "{text}");
+        assert!(
+            text.ends_with(r"Nothing was changed. Run scripts\package-windows.ps1 -BesideBuild."),
+            "{text}"
+        );
         app.status_off_switch = Some("1".into());
         let text = app.unknown_notice(status::Why::NoReport);
         assert!(
@@ -1611,27 +2097,48 @@ mod tests {
         let folder = claude_folder("states");
         let mut app = app_with_claude_agents(2);
         app.ws.start_new("cmd", std::env::temp_dir()).unwrap();
-        assert_eq!(app.cost_total(), vec![" ALL AGENTS  cost pending"], "nothing has been looked at");
-        app.ws.set_claude_folder(Some(folder.clone()));
+        // Off unless asked for: nothing is said about cost, and nothing read.
+        assert!(!app.cost_shown());
+        look(&mut app, 0);
+        assert!(app.cost_total().is_empty());
+        assert!(app.status_report_text().contains("Cost: off. To see what each"));
+        assert!(app.status_report_text().contains("add \"cost\": true to the settings file"));
+        assert!(app.status_report_text().contains("and start Lillignode again."));
+        app.ws.read_cost_from(Some(folder.clone()));
+        assert_eq!(
+            app.cost_total(),
+            vec![" ALL AGENTS  cost pending", EXPERIMENTAL],
+            "nothing has been looked at"
+        );
         look(&mut app, 1);
         let shown = |app: &App<Fake>| app.ws.entries().iter().map(|e| app.cost_short(e)).collect::<Vec<_>>();
         assert_eq!(shown(&app), ["cost pending", "cost pending", "cost unknown"]);
-        assert_eq!(app.cost_total(), vec![" ALL AGENTS  cost pending"]);
+        assert_eq!(app.cost_total(), vec![" ALL AGENTS  cost pending", EXPERIMENTAL]);
 
+        // The count shown leaves out the 20,500 tokens read from cache.
         record_reply(&app, &folder, 0, "claude-opus-5-5", REPLY);
         look(&mut app, 2);
-        assert_eq!(shown(&app), ["32.0k tokens", "cost pending", "cost unknown"]);
-        assert_eq!(app.cost_total(), vec![" ALL AGENTS  32.0k tokens", "  not counted: 2 agents"]);
+        assert_eq!(shown(&app), ["11.5k tokens", "cost pending", "cost unknown"]);
+        assert_eq!(
+            app.cost_total(),
+            vec![" ALL AGENTS  11.5k tokens", "  not counted: 2 agents", EXPERIMENTAL]
+        );
 
         record_reply(&app, &folder, 1, "claude-opus-5-5", REPLY);
         look(&mut app, 3);
-        assert_eq!(app.cost_total(), vec![" ALL AGENTS  64.0k tokens", "  not counted: 1 agent"]);
+        assert_eq!(
+            app.cost_total(),
+            vec![" ALL AGENTS  23.0k tokens", "  not counted: 1 agent", EXPERIMENTAL]
+        );
 
         // A reply that is not understood: unknown, and out of the total.
         record_reply(&app, &folder, 1, "claude-opus-5-5", "{\"type\":\"assistant\",\"message\":{}}");
         look(&mut app, 4);
-        assert_eq!(shown(&app), ["32.0k tokens", "cost unknown", "cost unknown"]);
-        assert_eq!(app.cost_total(), vec![" ALL AGENTS  32.0k tokens", "  not counted: 2 agents"]);
+        assert_eq!(shown(&app), ["11.5k tokens", "cost unknown", "cost unknown"]);
+        assert_eq!(
+            app.cost_total(),
+            vec![" ALL AGENTS  11.5k tokens", "  not counted: 2 agents", EXPERIMENTAL]
+        );
         for line in app.cost_total() {
             assert!(line.chars().count() <= 27, "does not fit the sidebar: {line}");
         }
@@ -1646,24 +2153,24 @@ mod tests {
     fn dollars_are_shown_only_to_a_user_who_pays_by_key_and_only_as_an_estimate() {
         let folder = claude_folder("dollars");
         let mut app = app_with_claude_agents(2);
-        app.ws.set_claude_folder(Some(folder.clone()));
+        app.ws.read_cost_from(Some(folder.clone()));
         record_reply(&app, &folder, 0, "claude-opus-5-5", REPLY);
         record_reply(&app, &folder, 1, "claude-opus-5-5", REPLY);
         look(&mut app, 1);
         let first = |app: &App<Fake>| app.cost_short(&app.ws.entries()[0]);
-        assert_eq!(first(&app), "32.0k tokens");
+        assert_eq!(first(&app), "11.5k tokens");
         app.config.billing = Billing::Subscription;
-        assert_eq!(first(&app), "32.0k tokens");
+        assert_eq!(first(&app), "11.5k tokens");
         app.config.billing = Billing::Key;
         assert_eq!(first(&app), "est. $0.07");
-        assert_eq!(app.cost_total(), vec![" ALL AGENTS  est. $0.14"]);
+        assert_eq!(app.cost_total(), vec![" ALL AGENTS  est. $0.14", EXPERIMENTAL]);
 
         // One agent on a model with no price: tokens for it, and tokens for
         // the total, never dollars that leave it out.
         record_reply(&app, &folder, 1, "claude-new-9", &REPLY.replace("msg_1", "msg_2"));
         look(&mut app, 2);
-        assert_eq!(app.cost_short(&app.ws.entries()[1]), "64.0k tokens");
-        assert_eq!(app.cost_total(), vec![" ALL AGENTS  96.0k tokens"]);
+        assert_eq!(app.cost_short(&app.ws.entries()[1]), "23.0k tokens");
+        assert_eq!(app.cost_total(), vec![" ALL AGENTS  34.5k tokens", EXPERIMENTAL]);
         let _ = std::fs::remove_dir_all(folder);
     }
 
@@ -1671,19 +2178,38 @@ mod tests {
     fn the_status_report_explains_the_cost_in_every_state() {
         let folder = claude_folder("panel");
         let mut app = app_with_claude_agents(1);
-        app.ws.set_claude_folder(Some(folder.clone()));
+        app.ws.read_cost_from(Some(folder.clone()));
         look(&mut app, 1);
         let text = app.status_report_text();
-        assert!(text.contains("Cost: pending. Nothing to read yet"), "{text}");
+        assert!(text.contains("Cost (experimental): pending. Nothing to read yet"), "{text}");
         assert!(text.contains("once something has been said in it"), "{text}");
 
         record_reply(&app, &folder, 0, "claude-opus-5-5", REPLY);
         look(&mut app, 2);
         let text = app.status_report_text();
         assert!(
-            text.contains("Cost of this conversation so far, including before today: 32,000 tokens."),
+            text.contains(
+                "Cost (experimental) of this conversation so far, including before today: 11,500 tokens, not counting \
+                 20,500 read from cache."
+            ),
             "{text}"
         );
+        // The conversation began after Lillignode did, so all of it counts.
+        assert!(
+            text.contains(
+                "Since Lillignode was started: 11,500 tokens, not counting 20,500 read from cache."
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "All agents open now, since Lillignode was started: 11,500 tokens, not counting 20,500 \
+                 read from cache.\n"
+            ),
+            "{text}"
+        );
+        assert!(!text.contains("Your cost warning"), "no warning is set, so none is spoken of: {text}");
+        assert!(text.ends_with(FIRST_REQUEST), "the first request is explained: {text}");
         assert!(
             text.contains("input 1,000, output 500, written to cache 10,000, read from cache 20,500"),
             "{text}"
@@ -1699,7 +2225,10 @@ mod tests {
         record_reply(&app, &folder, 0, "claude-new-9", &REPLY.replace("msg_1", "msg_2"));
         look(&mut app, 3);
         let text = app.status_report_text();
-        assert!(text.contains("  claude-new-9: 32,000"), "by model once there is more than one: {text}");
+        assert!(
+            text.contains("  claude-new-9: 11,500 tokens, not counting 20,500 read from cache"),
+            "by model once there is more than one: {text}"
+        );
         assert!(text.contains("No estimate in dollars"), "{text}");
         assert!(text.contains("has no price for claude-new-9"), "{text}");
         assert!(!text.contains('$'), "no dollar figure without a price for every model: {text}");
@@ -1707,7 +2236,7 @@ mod tests {
         record_reply(&app, &folder, 0, "x", "{\"type\":\"assistant\",\"message\":{\"model\":\"m\"}}");
         look(&mut app, 4);
         let text = app.status_report_text();
-        assert!(text.contains("Cost: unknown. Line 3 of Claude Code's record of this conversation was not understood: the reply has no id."), "{text}");
+        assert!(text.contains("Cost (experimental): unknown. Line 3 of Claude Code's record of this conversation was not understood: the reply has no id."), "{text}");
         assert!(
             text.contains("Lillignode shows no total rather than part of one. Nothing was changed."),
             "{text}"
@@ -1733,13 +2262,14 @@ mod tests {
 
         // Any other agent: one plain line, and no notice. Nothing failed.
         let (mut app, _) = app_with_agent();
+        app.ws.read_cost_from(Some(folder.clone()));
         app.notice = None;
         look(&mut app, 1);
         app.after_events();
         assert_eq!(app.notice, None);
         assert!(app
             .status_report_text()
-            .contains("Cost: unknown. Lillignode reads cost only for Claude Code."));
+            .contains("Cost (experimental): unknown. Lillignode reads cost only for Claude Code."));
         let _ = std::fs::remove_dir_all(folder);
     }
 
@@ -1748,19 +2278,91 @@ mod tests {
         use ratatui::backend::TestBackend;
         let folder = claude_folder("drawn");
         let mut app = app_with_claude_agents(2);
-        app.ws.set_claude_folder(Some(folder.clone()));
+        let drawn = |app: &App<Fake>| {
+            let mut term = ratatui::Terminal::new(TestBackend::new(100, 20)).unwrap();
+            term.draw(|f| crate::ui::draw(f, app)).unwrap();
+            let buf = term.backend().buffer().clone();
+            (0..20u16)
+                .map(|y| (0..27).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>())
+                .collect::<Vec<_>>()
+        };
+        // Off unless asked for: two lines an agent, and no total.
+        let rows = drawn(&app);
+        assert_eq!(rows[1].trim_end(), " /\\. Claude Code");
+        assert_eq!(rows[2].trim_end(), "  a  Starting");
+        assert_eq!(rows[3].trim_end(), ">/\\. Claude Code", "the agent in front is marked");
+        assert_eq!(rows[4].trim_end(), "  b  Starting");
+        assert!(!rows.iter().any(|r| r.contains("cost") || r.contains("ALL AGENTS")), "{rows:?}");
+
+        // On: a third line under each agent.
+        app.ws.read_cost_from(Some(folder.clone()));
         record_reply(&app, &folder, 0, "claude-opus-5-5", REPLY);
         look(&mut app, 1);
-        let mut term = ratatui::Terminal::new(TestBackend::new(100, 20)).unwrap();
-        term.draw(|f| crate::ui::draw(f, &app)).unwrap();
-        let buf = term.backend().buffer();
-        let row = |y: u16| (0..27).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>();
-        assert_eq!(row(2), "  a           32.0k tokens ");
-        assert_eq!(row(5), "  b           cost pending ");
-        // The sidebar is 17 rows tall here: the total is on its last two.
-        assert_eq!(row(15).trim_end(), " ALL AGENTS  32.0k tokens");
-        assert_eq!(row(16).trim_end(), "  not counted: 1 agent");
+        let rows = drawn(&app);
+        assert_eq!(rows[2].trim_end(), "  a  Starting");
+        assert_eq!(rows[3].trim_end(), "  11.5k tokens");
+        assert_eq!(rows[5].trim_end(), "  b  Starting");
+        assert_eq!(rows[6].trim_end(), "  cost pending");
+        // The sidebar is 17 rows tall here: the total is on its last three.
+        assert_eq!(rows[14].trim_end(), " ALL AGENTS  11.5k tokens");
+        assert_eq!(rows[15].trim_end(), "  not counted: 1 agent");
+        assert_eq!(rows[16].trim_end(), EXPERIMENTAL);
         let _ = std::fs::remove_dir_all(folder);
+    }
+
+    #[test]
+    fn passing_the_cost_warning_marks_the_row_and_says_so_once_and_nothing_else() {
+        let folder = claude_folder("warning");
+        let (mut app, sent) = app_with_agent();
+        app.ws.start_new("claude", std::env::temp_dir().join("a")).unwrap();
+        app.ws.read_cost_from(Some(folder.clone()));
+        app.ws.set_cost_warning(Some(20_000));
+        record_reply(&app, &folder, 1, "claude-opus-5-5", REPLY);
+        look(&mut app, 1);
+        app.notice = None;
+        assert!(!app.after_events(), "no bell");
+        assert_eq!(app.notice, None, "11,500 is under 20,000");
+        assert_eq!(app.cost_short(&app.ws.entries()[1]), "11.5k tokens");
+        assert!(app.status_report_text().contains("Your cost warning is at 20,000 tokens"));
+
+        record_reply(&app, &folder, 1, "claude-opus-5-5", &REPLY.replace("msg_1", "msg_2"));
+        look(&mut app, 2);
+        app.notice = Some("Earlier.".into());
+        assert!(!app.after_events(), "a warning rings no bell");
+        assert_eq!(
+            app.notice.as_deref(),
+            Some(
+                "Warning only, nothing stopped: Claude Code (a) is past your cost warning (23.0k tokens; \
+                 warning at 20.0k a conversation). Ctrl+Q then s shows the detail.  Earlier."
+            )
+        );
+        assert_eq!(app.cost_short(&app.ws.entries()[1]), "PAST WARNING 23.0k tokens");
+        let text = app.status_report_text();
+        assert!(text.contains("Past your cost warning of 20,000 tokens a conversation"), "{text}");
+        assert!(text.contains("nothing was stopped or held"), "{text}");
+        // Once: the row stays marked, the notice does not come back.
+        app.notice = None;
+        app.after_events();
+        assert_eq!(app.notice, None);
+        // Nothing is interrupted: no question is asked, the agent still
+        // runs, and typing still reaches it.
+        assert!(matches!(app.mode, Mode::Normal));
+        assert!(app.ws.entries()[1].is_running());
+        app.on_key(press(KeyCode::Char('k')));
+        assert_eq!(*sent.borrow(), vec!["k".to_string()]);
+        let _ = std::fs::remove_dir_all(folder);
+    }
+
+    #[test]
+    fn the_menu_line_fits_the_narrowest_window_with_both_ways_out_first() {
+        let (mut app, _) = app_with_agent();
+        app.on_key(press(KeyCode::F(12)));
+        let bar = app.bar();
+        assert!(bar.chars().count() <= usize::from(crate::ui::MIN_COLS), "{} columns: {bar}", bar.len());
+        assert!(bar.starts_with("MENU Esc back  q quit  "), "{bar}");
+        for key in ["Tab next", "n new", "x close", "r start", "s status", "PgUp history"] {
+            assert!(bar.contains(key), "{key} is not named: {bar}");
+        }
     }
 
     #[test]
@@ -1774,8 +2376,11 @@ mod tests {
         term.draw(|f| crate::ui::draw(f, &app)).unwrap();
         let buf = term.backend().buffer();
         let row = |y: u16| (0..27).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>();
-        assert_eq!(row(0).trim_end(), " AGENTS  1 NEEDS YOU");
-        let block = (0..20).find(|&y| row(y).starts_with(" ! NEEDS YOU: permission")).expect("block drawn");
+        assert_eq!(row(0).trim_end(), " Lillignode  1 NEEDS YOU");
+        // Its mark carries the sign, its second line is the block.
+        assert_eq!(row(1).trim_end(), " /\\! Claude Code");
+        let block = (0..20).find(|&y| row(y).trim_end() == "  a  NEEDS YOU").expect("block drawn");
+        assert_eq!(block, 2);
         // Across the full sidebar width, black on yellow.
         for x in 0..27 {
             assert_eq!(buf[(x, block)].bg, Color::Yellow, "column {x}");
@@ -1783,17 +2388,651 @@ mod tests {
         }
         let yellow_rows = (1..20).filter(|&y| buf[(0, y)].bg == Color::Yellow).count();
         assert_eq!(yellow_rows, 1, "no other sidebar row is a block");
-        assert!((0..20).any(|y| row(y).starts_with("  Working")));
+        assert_eq!(row(3).trim_end(), ">/\\+ Claude Code");
+        assert_eq!(row(4).trim_end(), "  b  Working");
+        // Yellow is used for nothing else Lillignode draws: not the bar, not
+        // an ordinary notice, not the menu.
+        app.notice = Some("Started something.".into());
+        app.on_key(press(KeyCode::F(12)));
+        let mut term = ratatui::Terminal::new(TestBackend::new(100, 20)).unwrap();
+        term.draw(|f| crate::ui::draw(f, &app)).unwrap();
+        let buf = term.backend().buffer();
+        for y in 0..20u16 {
+            for x in 0..100u16 {
+                let cell = &buf[(x, y)];
+                let yellow = cell.bg == Color::Yellow || cell.fg == Color::Yellow;
+                // The heading's count, the sign, the block, and the sentence
+                // in the notice that names who needs you.
+                let sentence = app.needs_you_notice().map_or(0, |s| s.chars().count());
+                let in_sidebar = x < 28;
+                let about_needs_you =
+                    (in_sidebar && (y <= 1 || y == block)) || (y == 17 && usize::from(x) < sentence);
+                assert!(!yellow || about_needs_you, "yellow at {x},{y}: {:?}", cell.symbol());
+            }
+        }
+    }
+
+    /// Columns `from` to `to` of a drawn row, without the spaces at its end.
+    fn part(row: &str, from: usize, to: usize) -> String {
+        row.chars().skip(from).take(to - from).collect::<String>().trim_end().to_string()
+    }
+
+    /// Everything on screen, row by row.
+    fn screen(app: &App<Fake>, cols: u16, rows: u16) -> Vec<String> {
+        use ratatui::backend::TestBackend;
+        let mut term = ratatui::Terminal::new(TestBackend::new(cols, rows)).unwrap();
+        term.draw(|f| crate::ui::draw(f, app)).unwrap();
+        let buf = term.backend().buffer().clone();
+        (0..rows).map(|y| (0..cols).map(|x| buf[(x, y)].symbol().to_string()).collect()).collect()
     }
 
     #[test]
-    fn a_too_small_window_still_says_who_needs_you_before_the_menu_keys() {
+    fn each_status_draws_its_own_sign_and_word_under_a_hat() {
+        let mut app = app_with_claude_agents(6);
+        app.ws.start_new("cmd", std::env::temp_dir().join("g")).unwrap();
+        report(&mut app, 1, "state=working:app=claude-code");
+        report(&mut app, 2, PERMISSION);
+        report(&mut app, 3, "state=done:app=claude-code");
+        report(&mut app, 4, "state=idle:app=claude-code");
+        report(&mut app, 5, "state=error:app=claude-code");
+        app.on_agent_event(AgentEvent::Exited(AgentId(6), crate::agent::Exit { code: 0 }));
+        let rows = screen(&app, 100, 30);
+        let sidebar: Vec<String> = rows.iter().map(|r| part(r, 0, 27)).collect();
+        let expected = [
+            (" /\\+ Claude Code", "  a  Working"),
+            (" /\\! Claude Code", "  b  NEEDS YOU"),
+            (" /\\= Claude Code", "  c  Done"),
+            (" /\\z Claude Code", "  d  Idle"),
+            (" /\\x Claude Code", "  e  Error"),
+            (" /\\- Claude Code", "  f  Exited"),
+            (">/\\? cmd", "  g  Unknown"),
+        ];
+        for (i, (first, second)) in expected.iter().enumerate() {
+            assert_eq!(sidebar[1 + 2 * i], *first);
+            assert_eq!(sidebar[2 + 2 * i], *second);
+        }
+        // Working moves, one frame a second; nothing else does.
+        app.clock = 1;
+        let later = screen(&app, 100, 30);
+        assert_eq!(part(&later[1], 0, 27), " /\\* Claude Code");
+        for y in 2..30 {
+            assert_eq!(part(&later[y], 0, 27), part(&rows[y], 0, 27), "row {y} changed with the clock");
+        }
+    }
+
+    #[test]
+    fn a_long_folder_keeps_the_short_status_whole_and_marks_what_it_cut() {
+        let mut app = app_with_claude_agents(0);
+        app.ws.start_new("cmd", std::env::temp_dir().join("a-long-folder-name")).unwrap();
+        let rows = screen(&app, 100, 20);
+        assert_eq!(part(&rows[2], 0, 27), "  a-long-folder-n…  Unknown");
+    }
+
+    #[test]
+    fn the_agent_in_front_is_copper_and_the_sidebar_never_colours_the_agents_screen() {
+        use ratatui::backend::TestBackend;
+        use ratatui::style::Color;
+        let copper = Color::Rgb(0xC1, 0x7B, 0x3E);
+        let mut app = app_with_claude_agents(2);
+        output(&mut app, b"plain text from the agent");
+        report(&mut app, 2, "state=working:app=claude-code");
+        app.on_agent_event(AgentEvent::Output(AgentId(2), b"words the agent printed".to_vec()));
+        let draw = |app: &App<Fake>| {
+            let mut term = ratatui::Terminal::new(TestBackend::new(100, 20)).unwrap();
+            term.draw(|f| crate::ui::draw(f, app)).unwrap();
+            term.backend().buffer().clone()
+        };
+        let buf = draw(&app);
+        // The wordmark, both hats, and the name of the agent in front.
+        assert_eq!(buf[(1, 0)].fg, copper, "wordmark");
+        assert_eq!((buf[(1, 1)].fg, buf[(2, 1)].fg), (copper, copper), "hat");
+        assert_eq!((buf[(1, 3)].fg, buf[(2, 3)].fg), (copper, copper), "hat");
+        assert_eq!(buf[(5, 3)].fg, copper, "the agent in front");
+        assert_ne!(buf[(5, 1)].fg, copper, "an agent behind");
+        // The sidebar has a background of its own; the agent's screen has
+        // none of Lillignode's colours at all.
+        assert_ne!(buf[(0, 5)].bg, Color::Reset);
+        for y in 0..17u16 {
+            for x in 28..100u16 {
+                let cell = &buf[(x, y)];
+                assert_eq!((cell.fg, cell.bg), (Color::Reset, Color::Reset), "at {x},{y}");
+            }
+        }
+        // With fewer colours: no background, no copper, and the same words.
+        let words = screen(&app, 100, 20);
+        for depth in [Depth::Indexed, Depth::Basic, Depth::None] {
+            app.colors = depth;
+            assert_eq!(screen(&app, 100, 20), words, "{depth:?} changed what is written");
+        }
+        app.colors = Depth::None;
+        let buf = draw(&app);
+        for y in 0..20u16 {
+            for x in 0..100u16 {
+                let cell = &buf[(x, y)];
+                assert_eq!((cell.fg, cell.bg), (Color::Reset, Color::Reset), "colour at {x},{y}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_bar_emphasises_keys_and_its_pieces_say_what_the_bar_says() {
+        let (mut app, _) = app_with_agent();
+        let joined = |app: &App<Fake>| app.bar_parts().into_iter().map(|(_, t)| t).collect::<String>();
+        assert_eq!(joined(&app), app.bar());
+        let keys = |app: &App<Fake>| {
+            app.bar_parts()
+                .into_iter()
+                .filter(|(p, _)| *p == BarPart::Key)
+                .map(|(_, t)| t)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(keys(&app), ["Ctrl+Q", "F12"]);
+        app.on_key(press(KeyCode::F(12)));
+        assert_eq!(joined(&app), app.bar());
+        assert_eq!(app.bar_parts()[0], (BarPart::Mode, "MENU".to_string()));
+        assert_eq!(keys(&app), ["Esc", "q", "Tab", "n", "x", "r", "s", "PgUp"]);
+        // No mark is ever shown.
+        assert!(app.bar().chars().all(|c| !c.is_control()), "{:?}", app.bar());
+    }
+
+    #[test]
+    fn a_pasted_folder_keeps_nothing_that_draws_no_character() {
+        let (mut app, _) = app_with_agent();
+        app.on_key(press(KeyCode::F(12)));
+        app.on_key(press(KeyCode::Char('n')));
+        app.on_key(press(KeyCode::Enter));
+        app.on_paste("C:\\work\u{1}\tapi\u{3}\nsecond line".into());
+        assert!(app.bar().starts_with("Folder to work in: C:\\workapi   (Enter alone"), "{}", app.bar());
+        // The cursor sits where the typing is, not past it.
+        assert_eq!(app.bar_cursor(), Some("Folder to work in: C:\\workapi".chars().count()));
+    }
+
+    #[test]
+    fn the_welcome_screen_shows_the_gnome_the_pitch_and_the_key_to_start() {
+        let app = app_with_claude_agents(0);
+        let rows = screen(&app, 100, 20);
+        let agent_area: Vec<String> = rows.iter().map(|r| part(r, 28, 100)).collect();
+        for (i, line) in crate::look::GNOME.iter().enumerate() {
+            assert!(agent_area[1 + i].starts_with(&format!("  {line}")), "{:?}", agent_area[1 + i]);
+        }
+        let text = agent_area.join("\n");
+        assert!(agent_area[1].contains("No agents yet. Press n to start one."), "{text}");
+        assert!(text.contains("Lillignode runs several AI coding agents at once"), "{text}");
+        assert!(text.contains("never asks for your keys."), "{text}");
+        assert!(text.contains("Ctrl+Q or F12 opens Lillignode's menu."), "{text}");
+        assert_eq!(part(&rows[1], 0, 27), " No agents yet. Press n.");
+
+        // The narrowest window: the key to start is still whole, and first.
+        let rows = screen(&app, crate::ui::MIN_COLS, crate::ui::MIN_ROWS);
+        let text: String =
+            rows[..9].iter().map(|r| part(r, 43, 80).trim().to_string()).collect::<Vec<_>>().join(" ");
+        assert!(text.contains("No agents yet. Press n to start one."), "{text}");
+        assert!(rows[11].starts_with("Ctrl+Q or F12: menu   n new agent   q quit"), "{}", rows[11]);
+    }
+
+    /// A window wide enough for two agents side by side.
+    const WIDE: Rect = Rect { x: 0, y: 0, width: 130, height: 30 };
+
+    #[test]
+    fn a_settings_mistake_leads_with_its_fix_and_is_never_cut_before_it() {
+        let dir = std::env::temp_dir().join(format!("lillignode-test-settings-fix-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(crate::config::FILE), r#"{"cost_warning_tokens": 500000}"#).unwrap();
+        let (config, problem) = crate::config::load(&dir);
+        std::fs::remove_dir_all(&dir).ok();
+        let fix = "To fix your settings file: add \"cost\": true, or take out \"cost_warning_tokens\", which needs it.";
+        assert!(problem.as_deref().unwrap().starts_with(fix), "{problem:?}");
+        let mut app = App::launch(
+            Fake::default(),
+            Size { rows: 5, cols: 40 },
+            Err("tests save nothing".into()),
+            std::env::temp_dir(),
+            config,
+            problem,
+        );
+        // Another notice after it, and someone needing you before it, in the
+        // narrowest window: the fix is still whole.
+        app.ws.start_new("claude", std::env::temp_dir()).unwrap();
+        app.ws.start_new("claude", std::env::temp_dir()).unwrap();
+        report(&mut app, 1, "?");
+        report(&mut app, 2, "?");
+        let behind = 1 - app.ws.focused_index().unwrap() as u32;
+        report(&mut app, behind + 1, PERMISSION);
+        app.notice = Some(
+            "Claude Code (b) stopped with an error (exit code 3). It is still in your workspace. Switch to \
+             it, then r to start it again or x to remove it."
+                .into(),
+        );
+        let rows = screen(&app, crate::ui::MIN_COLS, crate::ui::MIN_ROWS);
+        let text = rows.iter().map(|r| r.trim().to_string()).collect::<Vec<_>>().join(" ");
+        assert!(text.contains(fix), "{text}");
+        let waiting = app.ws.entries()[behind as usize].label();
+        let (who, at_fix) = (text.find(waiting.as_str()), text.find(fix));
+        assert!(who.is_some() && who < at_fix, "who needs you is still first: {text}");
+        assert!(text.contains("Ctrl+Q then Tab to go to it."), "{text}");
+
+        // It has been seen once a menu key is used; it is still said on the way out.
+        app.on_key(press(KeyCode::F(12)));
+        app.on_key(press(KeyCode::Esc));
+        assert!(!app.notice_text().unwrap_or_default().contains("settings file"));
+        assert!(app.start_problems[0].starts_with(fix));
+    }
+
+    #[test]
+    fn the_menu_key_pressed_twice_closes_the_menu_and_never_quits() {
+        let mut app = app_with_claude_agents(2);
+        for id in 1..=2 {
+            report(&mut app, id, "state=idle:app=claude-code");
+        }
+        for menu_key in [KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL), press(KeyCode::F(12))] {
+            app.on_key(menu_key);
+            assert!(matches!(app.mode, Mode::Menu));
+            app.on_key(menu_key);
+            assert!(matches!(app.mode, Mode::Normal), "the menu key again closes the menu");
+            assert!(!app.quit, "and does not quit");
+        }
+        // A key held with Ctrl or Alt is not a command.
+        app.on_key(press(KeyCode::F(12)));
+        app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
+        assert!(matches!(app.mode, Mode::Normal));
+        assert_eq!(app.ws.entries().len(), 2);
+    }
+
+    #[test]
+    fn typing_at_a_stopped_agent_goes_nowhere_and_never_removes_or_quits() {
+        let mut app = app_with_claude_agents(2);
+        report(&mut app, 2, "state=idle:app=claude-code");
+        let front = app.ws.focused_index().unwrap() as u32 + 1;
+        app.on_agent_event(AgentEvent::Exited(AgentId(front), crate::agent::Exit { code: 0 }));
+        app.notice = None;
+        // Shell habits: "exit", "quit", Enter.
+        for c in "exit quit".chars() {
+            app.on_key(press(KeyCode::Char(c)));
+        }
+        app.on_key(press(KeyCode::Enter));
+        assert_eq!(app.ws.entries().len(), 2, "nothing was removed");
+        assert!(!app.quit, "nothing quit");
+        assert!(matches!(app.mode, Mode::Normal), "no question was opened");
+        let notice = app.notice.clone().unwrap();
+        assert!(notice.contains("has stopped, so typing goes nowhere. Nothing was sent."), "{notice}");
+        assert!(app.bar().starts_with("Ctrl+Q or F12: menu, then r start again"), "{}", app.bar());
+
+        // Removing it is asked, even though it has stopped.
+        app.on_key(press(KeyCode::F(12)));
+        app.on_key(press(KeyCode::Char('x')));
+        assert!(app.bar().starts_with("Remove "), "{}", app.bar());
+        assert!(app.bar().contains("? y / n"), "{}", app.bar());
+        app.on_key(press(KeyCode::Char('n')));
+        assert_eq!(app.ws.entries().len(), 2);
+        app.on_key(press(KeyCode::F(12)));
+        app.on_key(press(KeyCode::Char('x')));
+        app.on_key(press(KeyCode::Char('y')));
+        assert_eq!(app.ws.entries().len(), 1);
+    }
+
+    #[test]
+    fn a_refusal_goes_at_the_next_menu_action_and_stops_crowding_who_needs_you() {
+        let mut app = app_with_claude_agents(2);
+        app.set_window(Rect::new(0, 0, 108, 30));
+        app.on_key(press(KeyCode::F(12)));
+        app.on_key(press(KeyCode::Char('v')));
+        assert!(app.notice.clone().unwrap().starts_with("This window is too narrow"));
+        let behind = 1 - app.ws.focused_index().unwrap() as u32;
+        report(&mut app, behind + 1, PERMISSION);
+        assert!(app.notice_text().unwrap().contains("This window is too narrow"), "still up until a key");
+
+        // The next menu action takes the refusal away; who needs you stays.
+        app.on_key(press(KeyCode::F(12)));
+        app.on_key(press(KeyCode::Esc));
+        assert_eq!(app.notice, None);
+        let shown = app.notice_text().unwrap();
+        assert!(shown.contains("needs you: permission"), "{shown}");
+        assert!(!shown.contains("too narrow"), "{shown}");
+
+        // A notice that replaced the refusal is not taken away with it.
+        app.on_key(press(KeyCode::F(12)));
+        app.on_key(press(KeyCode::Char('v')));
+        app.notice = Some("Could not save your workspace (disk full).".into());
+        app.on_key(press(KeyCode::F(12)));
+        app.on_key(press(KeyCode::Esc));
+        assert_eq!(app.notice.as_deref(), Some("Could not save your workspace (disk full)."));
+    }
+
+    #[test]
+    fn two_side_by_side_is_refused_with_the_reason_when_it_cannot_be_shown() {
+        // One agent.
+        let (mut app, _) = app_with_agent();
+        app.set_window(WIDE);
+        let size = app.ws.size();
+        app.on_key(press(KeyCode::F(12)));
+        assert!(!app.bar().contains("v "), "the key is not offered where it would be refused: {}", app.bar());
+        app.on_key(press(KeyCode::Char('v')));
+        let notice = app.notice.clone().unwrap();
+        assert!(notice.starts_with("Two agents side by side takes two agents, and one is open."), "{notice}");
+        assert!(notice.contains("Nothing was changed."), "{notice}");
+        assert!(notice.ends_with("Ctrl+Q then n starts another."), "{notice}");
+        assert_eq!((app.ws.pair(), app.ws.size()), (None, size));
+
+        // Two agents, a window too narrow.
+        let mut app = app_with_claude_agents(2);
+        app.set_window(Rect::new(0, 0, 108, 30));
+        let size = app.ws.size();
+        app.on_key(press(KeyCode::F(12)));
+        app.on_key(press(KeyCode::Char('v')));
+        let notice = app.notice.clone().unwrap();
+        assert!(
+            notice.starts_with(
+                "This window is too narrow for two agents side by side: it is 108 columns wide and that \
+                 takes 109."
+            ),
+            "{notice}"
+        );
+        assert!(notice.ends_with("Widen the window, then Ctrl+Q then v."), "{notice}");
+        assert_eq!((app.ws.pair(), app.ws.size()), (None, size));
+        assert!(matches!(app.mode, Mode::Normal));
+
+        // A window too small to show agents at all.
+        app.set_window(Rect::new(0, 0, 60, 10));
+        app.on_key(press(KeyCode::F(12)));
+        app.on_key(press(KeyCode::Char('v')));
+        assert!(app.notice.clone().unwrap().starts_with("This window is too small to show agents at all"));
+        assert_eq!(app.ws.pair(), None);
+    }
+
+    #[test]
+    fn v_puts_two_side_by_side_each_sized_to_its_half_and_v_again_goes_back() {
+        let mut app = app_with_claude_agents(3);
+        app.set_window(WIDE);
+        let whole = app.ws.size();
+        assert_eq!(whole, Size { rows: 27, cols: 102 });
+        app.on_key(press(KeyCode::F(12)));
+        assert!(app.bar().ends_with("v two side by side"), "{}", app.bar());
+        app.on_key(press(KeyCode::Char('v')));
+        // The agent in front (c) on the left, the next (a) beside it.
+        assert_eq!(app.ws.pair(), Some(crate::workspace::Pair { left: 2, right: 0 }));
+        // Half the width less the rule between them, and a row for the heading.
+        assert_eq!(app.ws.size(), Size { rows: 26, cols: 50 });
+        for entry in app.ws.entries() {
+            let (rows, cols) = entry.term.screen().size();
+            assert_eq!((rows.get(), cols.get()), (26, 50), "every agent's terminal is the new size");
+        }
+        let notice = app.notice.clone().unwrap();
+        assert!(notice.starts_with("Claude Code (c) and Claude Code (a) are side by side"), "{notice}");
+        assert!(notice.contains("typing goes to the one on the left"), "{notice}");
+        assert!(notice.ends_with("If one draws badly, Ctrl+Q then v goes back to one."), "{notice}");
+        assert!(app.bar().ends_with("Typing goes to Claude Code (c), on the left."), "{}", app.bar());
+
+        // Tab to the one beside it: the keyboard moves, nothing is resized.
+        app.on_key(press(KeyCode::F(12)));
+        app.on_key(press(KeyCode::Tab));
+        app.on_key(press(KeyCode::Esc));
+        assert!(app.bar().ends_with("Typing goes to Claude Code (a), on the right."), "{}", app.bar());
+        assert_eq!(app.ws.size(), Size { rows: 26, cols: 50 });
+
+        app.on_key(press(KeyCode::F(12)));
+        assert!(app.bar().ends_with("v one agent"), "{}", app.bar());
+        app.on_key(press(KeyCode::Char('v')));
+        assert_eq!((app.ws.pair(), app.ws.size()), (None, whole));
+        assert_eq!(
+            app.notice.as_deref(),
+            Some("One agent on screen: Claude Code (a). Every agent was told its new size.")
+        );
+        assert!(app.bar().ends_with("Typing goes to Claude Code (a)."), "{}", app.bar());
+    }
+
+    #[test]
+    fn a_window_made_too_narrow_shows_one_agent_says_why_and_comes_back_when_widened() {
+        let mut app = app_with_claude_agents(2);
+        app.set_window(WIDE);
+        app.on_key(press(KeyCode::F(12)));
+        app.on_key(press(KeyCode::Char('v')));
+        assert!(app.two_shown());
+        app.set_window(Rect::new(0, 0, 100, 30));
+        assert!(!app.two_shown());
+        // The user's choice is kept; the agents have the whole area for now.
+        assert!(app.ws.pair().is_some());
+        assert_eq!(app.ws.size(), Size { rows: 27, cols: 72 });
+        assert_eq!(
+            app.notice.as_deref(),
+            Some(
+                "Too narrow for two agents now, so only Claude Code (b) is shown. Claude Code (a) was not \
+                 stopped or closed. Widen to 109 columns for both, or Ctrl+Q then v to stay with one."
+            )
+        );
+        assert!(app.bar().ends_with("Typing goes to Claude Code (b)."), "no side is named: {}", app.bar());
+        // Narrower still says nothing new.
+        app.notice = None;
+        app.set_window(Rect::new(0, 0, 90, 30));
+        assert_eq!(app.notice, None);
+        app.set_window(WIDE);
+        assert!(app.two_shown());
+        assert_eq!(app.ws.size(), Size { rows: 26, cols: 50 });
+        assert_eq!(
+            app.notice.as_deref(),
+            Some(
+                "There is room again: two agents are side by side. Typing goes to Claude Code (b), on the \
+                 left."
+            )
+        );
+        // Narrow again, and this time choose to stay with one: nothing is
+        // resized, no question is asked, and widening brings nothing back.
+        app.set_window(Rect::new(0, 0, 100, 30));
+        let size = app.ws.size();
+        app.on_key(press(KeyCode::F(12)));
+        app.on_key(press(KeyCode::Char('v')));
+        assert!(matches!(app.mode, Mode::Normal));
+        assert_eq!(
+            app.notice.as_deref(),
+            Some(
+                "One agent on screen. Two side by side will not come back when the window is widened. \
+                 No agent was resized."
+            )
+        );
+        assert_eq!((app.ws.pair(), app.ws.size()), (None, size));
+        app.set_window(WIDE);
+        assert!(!app.two_shown());
+    }
+
+    #[test]
+    fn changing_the_view_while_an_agent_needs_you_asks_first() {
+        let mut app = app_with_claude_agents(2);
+        app.set_window(WIDE);
+        let whole = app.ws.size();
+        report(&mut app, 1, PERMISSION);
+        app.on_key(press(KeyCode::F(12)));
+        app.on_key(press(KeyCode::Char('v')));
+        assert!(matches!(app.mode, Mode::Confirm(Confirm::View)));
+        let narrow = app.bar().chars().take(usize::from(crate::ui::MIN_COLS)).collect::<String>();
+        assert!(
+            narrow.starts_with("Resize every agent now? y / n   Waiting for you: Claude Code (a)."),
+            "{narrow}"
+        );
+        assert_eq!((app.ws.pair(), app.ws.size()), (None, whole), "nothing happens before the answer");
+        app.on_key(press(KeyCode::Char('n')));
+        assert_eq!((app.ws.pair(), app.ws.size()), (None, whole));
+        assert_eq!(app.notice.as_deref(), Some("The view was left as it was. No agent was resized."));
+
+        app.on_key(press(KeyCode::F(12)));
+        app.on_key(press(KeyCode::Char('v')));
+        app.on_key(press(KeyCode::Char('y')));
+        assert!(app.two_shown());
+        // Going back is asked about too: it is the same resize.
+        app.on_key(press(KeyCode::F(12)));
+        app.on_key(press(KeyCode::Char('v')));
+        assert!(matches!(app.mode, Mode::Confirm(Confirm::View)));
+        app.on_key(press(KeyCode::Char('y')));
+        assert_eq!((app.ws.pair(), app.ws.size()), (None, whole));
+
+        // A change that would be refused anyway is refused without a question.
+        app.set_window(Rect::new(0, 0, 100, 30));
+        app.on_key(press(KeyCode::F(12)));
+        app.on_key(press(KeyCode::Char('v')));
+        assert!(matches!(app.mode, Mode::Normal));
+        assert!(app.notice.clone().unwrap().starts_with("This window is too narrow"));
+    }
+
+    #[test]
+    fn two_side_by_side_are_drawn_with_a_heading_saying_where_typing_goes() {
+        use ratatui::style::Color;
+        let mut app = app_with_claude_agents(2);
+        let sent = app.ws.entries().len();
+        assert_eq!(sent, 2);
+        app.set_window(WIDE);
+        app.on_key(press(KeyCode::F(12)));
+        app.on_key(press(KeyCode::Char('v')));
+        app.on_agent_event(AgentEvent::Output(AgentId(2), b"words from b".to_vec()));
+        app.on_agent_event(AgentEvent::Output(AgentId(1), b"words from a".to_vec()));
+        let rows = screen(&app, 130, 30);
+        // b is in front, on the left; a is beside it. 28 columns of
+        // sidebar, 50 for each agent, one for the rule between them.
+        assert_eq!(part(&rows[0], 28, 78), " > TYPING GOES HERE  Claude Code (b)");
+        assert_eq!(part(&rows[0], 79, 129), " - not typing here  Claude Code (a)");
+        // It says so only while it is true. With the menu open, keys are
+        // Lillignode's, and the heading stops claiming them for the agent.
+        app.on_key(press(KeyCode::F(12)));
+        let menu_open = screen(&app, 130, 30);
+        assert_eq!(part(&menu_open[0], 28, 78), " > IN FRONT - keys are Lillignode's now  Claude C…");
+        app.on_key(press(KeyCode::Esc));
+        // The narrowest each side can be: the words about typing are whole,
+        // and it is the name that gives way.
+        let narrowest = screen(&app, 109, 30);
+        assert_eq!(part(&narrowest[0], 28, 68), " > TYPING GOES HERE  Claude Code (b)");
+        assert_eq!(part(&narrowest[0], 69, 109), " - not typing here  Claude Code (a)");
+        assert_eq!(part(&rows[1], 28, 78), "words from b");
+        assert_eq!(part(&rows[1], 79, 129), "words from a");
+        assert!(rows.iter().take(27).all(|r| part(r, 78, 79) == "│"), "a rule between them");
+
+        // The agent beside the one in front starts needing you. Its
+        // heading becomes the block and says typing is not going there.
+        report(&mut app, 1, PERMISSION);
+        let rows = screen(&app, 130, 30);
+        assert_eq!(part(&rows[0], 79, 129), " ! NEEDS YOU - you are NOT typing here  Claude Co…");
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(130, 30)).unwrap();
+        term.draw(|f| crate::ui::draw(f, &app)).unwrap();
+        let buf = term.backend().buffer();
+        assert_eq!(buf[(100, 0)].bg, Color::Yellow);
+        assert_ne!(buf[(40, 0)].bg, Color::Yellow, "the heading of the agent in front is not the block");
+        // The notice still names it and how to reach it, and typing still
+        // goes where the bar says: nothing is held.
+        assert!(app
+            .notice_text()
+            .unwrap()
+            .starts_with("Claude Code (a) needs you: permission. Ctrl+Q then Tab"));
+        assert!(app.bar().ends_with("Typing goes to Claude Code (b), on the left."), "{}", app.bar());
+        // In front and needing you: the block says typing goes here.
+        app.on_key(press(KeyCode::F(12)));
+        app.on_key(press(KeyCode::Tab));
+        app.on_key(press(KeyCode::Esc));
+        let rows = screen(&app, 130, 30);
+        assert_eq!(part(&rows[0], 79, 129), " > NEEDS YOU - you are typing here  Claude Code (…");
+        assert_eq!(part(&rows[0], 28, 78), " - not typing here  Claude Code (b)");
+        // The agent in front stops. Its heading no longer says typing goes
+        // there: with nothing running in front, keys are Lillignode's, and
+        // x would remove it.
+        report(&mut app, 1, "state=idle:app=claude-code");
+        app.on_agent_event(AgentEvent::Exited(AgentId(1), crate::agent::Exit { code: 0 }));
+        let rows = screen(&app, 130, 30);
+        assert_eq!(part(&rows[0], 79, 129), " > STOPPED - menu, then r start again, x remove  …");
+        // And beside the one in front, a stopped agent's last screen is
+        // not left looking live.
+        app.on_key(press(KeyCode::F(12)));
+        app.on_key(press(KeyCode::Tab));
+        app.on_key(press(KeyCode::Esc));
+        let rows = screen(&app, 130, 30);
+        assert_eq!(part(&rows[0], 79, 129), " - stopped, its last screen  Claude Code (a)");
+        assert_eq!(part(&rows[0], 28, 78), " > TYPING GOES HERE  Claude Code (b)");
+        // r on an agent that is running says so, and does nothing.
+        app.on_key(press(KeyCode::F(12)));
+        app.on_key(press(KeyCode::Char('r')));
+        assert_eq!(
+            app.notice.as_deref(),
+            Some("Claude Code (b) is already running, so it was not started again. Nothing was changed.")
+        );
+    }
+
+    #[test]
+    fn closing_one_of_two_gives_the_other_the_whole_screen_and_says_so() {
+        let mut app = app_with_claude_agents(2);
+        app.set_window(WIDE);
+        let whole = app.ws.size();
+        app.on_key(press(KeyCode::F(12)));
+        app.on_key(press(KeyCode::Char('v')));
+        assert_ne!(app.ws.size(), whole);
+        app.on_key(press(KeyCode::F(12)));
+        app.on_key(press(KeyCode::Char('x')));
+        app.on_key(press(KeyCode::Char('y')));
+        assert_eq!(
+            app.notice.as_deref(),
+            Some(
+                "Closed Claude Code (b) and removed it from your workspace. Claude Code (a) has the whole \
+                 screen again."
+            )
+        );
+        assert_eq!((app.ws.pair(), app.ws.size()), (None, whole));
+    }
+
+    #[test]
+    fn everything_lillignode_draws_is_ascii_or_one_of_two_listed_characters() {
+        // What Lillignode draws must exist in the fonts Windows terminals
+        // use. An agent's own screen is not Lillignode's and is left out.
+        let check = |rows: Vec<String>, what: &str| {
+            for (y, row) in rows.iter().enumerate() {
+                for c in row.chars() {
+                    assert!(
+                        c.is_ascii() || crate::look::NOT_ASCII.contains(&c),
+                        "{what}, row {y}: {c:?} in {row}"
+                    );
+                }
+            }
+        };
+        let mut app = app_with_claude_agents(0);
+        check(screen(&app, 100, 20), "welcome");
+        check(screen(&app, 40, 8), "too small");
+        app = app_with_claude_agents(6);
+        app.ws.start_new("cmd", std::env::temp_dir().join("a-folder-with-a-long-name")).unwrap();
+        app.ws.start_new("nosuch", std::env::temp_dir()).unwrap();
+        report(&mut app, 1, "state=working:app=claude-code");
+        report(&mut app, 2, PERMISSION);
+        report(&mut app, 3, "state=done:app=claude-code");
+        report(&mut app, 4, "state=idle:app=claude-code");
+        report(&mut app, 5, "state=error:app=claude-code:msg=Ym9vbQ==");
+        app.on_agent_event(AgentEvent::Exited(AgentId(6), crate::agent::Exit { code: 3 }));
+        app.ws.read_cost_from(None);
+        app.notice = Some(format!("{}. Then press r.", "word ".repeat(80).trim_end()));
+        for clock in 0..2 {
+            app.clock = clock;
+            check(screen(&app, 80, 30), "sidebar");
+        }
+        // Two side by side, one of them needing you.
+        app.set_window(WIDE);
+        app.on_key(press(KeyCode::F(12)));
+        app.on_key(press(KeyCode::Char('v')));
+        app.on_key(press(KeyCode::Char('y')));
+        assert!(app.two_shown());
+        check(screen(&app, 130, 30), "two side by side");
+        app.set_window(Rect::new(0, 0, 80, 30));
+        for key in ['s', 'q', 'x', 'n'] {
+            app.on_key(press(KeyCode::F(12)));
+            check(screen(&app, 80, 30), "menu");
+            app.on_key(press(KeyCode::Char(key)));
+            check(screen(&app, 80, 30), &format!("after {key}"));
+            app.on_key(press(KeyCode::Esc));
+        }
+    }
+
+    #[test]
+    fn a_too_small_window_names_the_menu_keys_first_and_still_says_who_needs_you() {
         let mut app = app_with_claude_agents(2);
         app.too_small = true;
         assert_eq!(app.bar(), "Ctrl+Q or F12: menu, then q to quit");
         report(&mut app, 1, PERMISSION);
-        assert!(app.bar().starts_with("1 agent needs you.  Ctrl+Q or F12: menu"), "{}", app.bar());
+        assert!(
+            app.bar().starts_with("Ctrl+Q or F12: menu, then Tab goes to who needs you"),
+            "{}",
+            app.bar()
+        );
+        assert!(app.bar().ends_with("1 agent needs you."), "{}", app.bar());
         report(&mut app, 2, PERMISSION);
-        assert!(app.bar().starts_with("2 agents need you."), "{}", app.bar());
+        assert!(app.bar().ends_with("2 agents need you."), "{}", app.bar());
     }
 }

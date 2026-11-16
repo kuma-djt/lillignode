@@ -1,13 +1,25 @@
 //! The user's settings: one small JSON file beside the saved workspace.
 //!
-//!   { "menu_keys": ["ctrl+q", "f12"], "bell": true, "billing": "key" }
+//!   { "menu_keys": ["ctrl+q", "f12"], "bell": true, "cost": true,
+//!     "cost_warning_tokens": 500000, "billing": "key" }
 //!
 //! `bell`: ring the terminal bell once when an agent starts needing you.
 //! On unless set to false.
 //!
+//! `cost`: show what each Claude Code conversation has used. Off unless set
+//! to true. While it is off Lillignode reads none of Claude Code's records.
+//!
+//! `cost_warning_tokens`: a count of tokens. A conversation that reaches it
+//! is marked in the sidebar and named once in a notice. It is a warning
+//! only: nothing is stopped. Needs `cost` to be true.
+//!
 //! `billing`: "key" if Claude Code is paid for by API key, "subscription" if
 //! by a subscription. With "key" the sidebar shows an estimate in dollars;
 //! otherwise it shows tokens. Left out, Lillignode does not assume either.
+//!
+//! `colors`: "auto" (the default: Lillignode works it out from the terminal),
+//! "full", "256", "16" or "none". For a terminal whose colours come out
+//! wrong.
 //!
 //! A missing file means the defaults. A file that cannot be used also means
 //! the defaults, with a message saying what was wrong: a mistake in this
@@ -17,6 +29,8 @@ use std::path::Path;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde::Deserialize;
+
+use crate::look::Colors;
 
 pub const FILE: &str = "config.json";
 pub const DEFAULT_MENU_KEYS: [&str; 2] = ["ctrl+q", "f12"];
@@ -32,7 +46,7 @@ impl MenuKey {
     pub fn parse(spec: &str) -> Result<MenuKey, String> {
         let lower = spec.trim().to_ascii_lowercase();
         let bad = || {
-            format!("\"{spec}\" is not a key Lillignode can use (use ctrl+letter, alt+letter, or f1 to f12)")
+            format!("change \"{spec}\" to ctrl+letter, alt+letter or f1 to f12; Lillignode cannot use it as a key")
         };
         if let Some(n) = lower.strip_prefix('f').and_then(|n| n.parse::<u8>().ok()) {
             return if (1..=12).contains(&n) {
@@ -51,7 +65,7 @@ impl MenuKey {
         // These reach a terminal program as Enter, Tab, Backspace, or are the
         // keys every agent relies on to interrupt and to end input.
         if modifiers == KeyModifiers::CONTROL && "cdhijm".contains(c) {
-            return Err(format!("\"{spec}\" cannot be a menu key because agents need it"));
+            return Err(format!("pick another menu key than \"{spec}\"; agents need it"));
         }
         Ok(MenuKey { code: KeyCode::Char(c), modifiers })
     }
@@ -84,8 +98,14 @@ pub struct Config {
     pub menu_keys: Vec<MenuKey>,
     /// Ring the terminal bell once each time an agent starts needing you.
     pub bell: bool,
+    /// Show what each conversation has used. Off unless the user asks.
+    pub cost: bool,
+    /// The count of tokens at which a conversation is marked. A warning only.
+    pub cost_warning_tokens: Option<u64>,
     /// How the user pays for Claude Code, if they have said.
     pub billing: Billing,
+    /// How many colours to draw with, if the user has said.
+    pub colors: Colors,
 }
 
 /// How the user pays, which decides whether a dollar figure means anything
@@ -109,7 +129,10 @@ impl Default for Config {
                 .map(|k| MenuKey::parse(k).expect("defaults are valid"))
                 .collect(),
             bell: true,
+            cost: false,
+            cost_warning_tokens: None,
             billing: Billing::Unsaid,
+            colors: Colors::Auto,
         }
     }
 }
@@ -144,60 +167,89 @@ pub fn terminal_takes_ctrl_keys(term_program: Option<&str>) -> bool {
 struct File {
     menu_keys: Option<Vec<String>>,
     bell: Option<bool>,
+    cost: Option<bool>,
+    cost_warning_tokens: Option<u64>,
     billing: Option<String>,
+    colors: Option<String>,
 }
 
 fn parse(text: &str) -> Result<Config, String> {
-    let file: File = serde_json::from_str(text).map_err(|e| e.to_string())?;
+    let file: File = serde_json::from_str(text).map_err(|e| json_fix(&e))?;
     let mut config = Config::default();
     if let Some(bell) = file.bell {
         config.bell = bell;
     }
+    config.cost = file.cost.unwrap_or(false);
+    config.cost_warning_tokens = match file.cost_warning_tokens {
+        None => None,
+        Some(0) => {
+            return Err(
+                "give \"cost_warning_tokens\" a count above 0, or leave it out for no warning".to_string()
+            );
+        }
+        // Said, so the user does not wait for a warning that cannot come.
+        Some(_) if !config.cost => {
+            return Err("add \"cost\": true, or take out \"cost_warning_tokens\", which needs it".to_string());
+        }
+        Some(count) => Some(count),
+    };
     config.billing = match file.billing.as_deref() {
         None => Billing::Unsaid,
         Some("key") => Billing::Key,
         Some("subscription") => Billing::Subscription,
         Some(other) => {
-            return Err(format!("\"billing\" is \"{other}\"; it can be \"key\" or \"subscription\""));
+            return Err(format!("make \"billing\" \"key\" or \"subscription\"; it is \"{other}\""));
         }
     };
+    if let Some(colors) = &file.colors {
+        config.colors = Colors::parse(colors)?;
+    }
     let Some(specs) = file.menu_keys else { return Ok(config) };
     if specs.is_empty() {
-        return Err("\"menu_keys\" is empty, which would leave no way into the menu".to_string());
+        return Err(
+            "name at least one key in \"menu_keys\"; with none there is no way into the menu".to_string()
+        );
     }
     config.menu_keys = specs.iter().map(|s| MenuKey::parse(s)).collect::<Result<Vec<_>, _>>()?;
     Ok(config)
 }
 
+/// What to do about a settings file that is not valid JSON or does not
+/// match the settings, said first, then what was found and where.
+fn json_fix(e: &serde_json::Error) -> String {
+    let full = e.to_string();
+    // serde_json ends its message with " at line L column C".
+    let what = full.rsplit_once(" at line ").map_or(full.as_str(), |(what, _)| what);
+    let at = format!("line {}, column {}", e.line(), e.column());
+    if let Some(rest) = what.strip_prefix("unknown field `") {
+        let name = rest.split('`').next().unwrap_or(rest);
+        return format!("take out or correct \"{name}\" at {at}; Lillignode has no such setting");
+    }
+    format!("correct {at}: {what}")
+}
+
 /// Returns the settings to use and, if the file was there but unusable, what
-/// to tell the user.
+/// to tell the user. The file stays strict: one mistake and none of it is
+/// used. The message leads with how to fix it, so a message cut short for
+/// lack of room keeps the fix (`App::notice_parts`).
 pub fn load(dir: &Path) -> (Config, Option<String>) {
     let path = dir.join(FILE);
-    let text = match std::fs::read_to_string(&path) {
-        Ok(text) => text,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return (Config::default(), None),
-        Err(e) => {
-            let config = Config::default();
-            let problem = format!(
-                "Your settings file {} could not be read ({e}). Using the defaults: {} opens the menu.",
-                path.display(),
-                config.menu_keys_label()
-            );
-            return (config, Some(problem));
-        }
+    let config = Config::default();
+    let fix = match std::fs::read_to_string(&path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return (config, None),
+        Err(e) => format!("make it readable ({e})"),
+        Ok(text) => match parse(&text) {
+            Ok(config) => return (config, None),
+            Err(fix) => fix,
+        },
     };
-    match parse(&text) {
-        Ok(config) => (config, None),
-        Err(why) => {
-            let config = Config::default();
-            let problem = format!(
-                "Your settings file {} was not used: {why}. Using the defaults: {} opens the menu. The file was not changed.",
-                path.display(),
-                config.menu_keys_label()
-            );
-            (config, Some(problem))
-        }
-    }
+    let problem = format!(
+        "To fix your settings file: {fix}. Until then none of it is used: every setting is at its default \
+         ({} opens the menu), and the file was not changed. It is {}.",
+        config.menu_keys_label(),
+        path.display()
+    );
+    (config, Some(problem))
 }
 
 #[cfg(test)]
@@ -251,12 +303,34 @@ mod tests {
     }
 
     #[test]
+    fn cost_is_off_unless_asked_for_and_a_warning_needs_it_on() {
+        let c = Config::default();
+        assert!(!c.cost);
+        assert_eq!(c.cost_warning_tokens, None);
+        assert!(!parse(r#"{"bell": false}"#).unwrap().cost);
+        let c = parse(r#"{"cost": true}"#).unwrap();
+        assert!(c.cost);
+        assert_eq!(c.cost_warning_tokens, None);
+        let c = parse(r#"{"cost": true, "cost_warning_tokens": 500000}"#).unwrap();
+        assert_eq!(c.cost_warning_tokens, Some(500_000));
+
+        let problem = parse(r#"{"cost_warning_tokens": 500000}"#).unwrap_err();
+        assert!(problem.starts_with("add \"cost\": true"), "{problem}");
+        assert!(parse(r#"{"cost": false, "cost_warning_tokens": 5}"#).is_err());
+        let problem = parse(r#"{"cost": true, "cost_warning_tokens": 0}"#).unwrap_err();
+        assert!(problem.contains("leave it out for no warning"), "{problem}");
+        assert!(parse(r#"{"cost": true, "cost_warning_tokens": -5}"#).is_err());
+        assert!(parse(r#"{"cost": true, "cost_warning_tokens": "500k"}"#).is_err());
+        assert!(parse(r#"{"cost": "yes"}"#).is_err());
+    }
+
+    #[test]
     fn billing_is_unsaid_unless_the_user_says_and_a_misspelling_is_reported() {
         assert_eq!(Config::default().billing, Billing::Unsaid);
         assert_eq!(parse(r#"{"billing": "key"}"#).unwrap().billing, Billing::Key);
         assert_eq!(parse(r#"{"billing": "subscription"}"#).unwrap().billing, Billing::Subscription);
         let problem = parse(r#"{"billing": "api"}"#).unwrap_err();
-        assert!(problem.contains("it can be \"key\" or \"subscription\""), "{problem}");
+        assert!(problem.starts_with("make \"billing\" \"key\" or \"subscription\""), "{problem}");
         assert!(parse(r#"{"billing": true}"#).is_err());
     }
 
@@ -280,7 +354,29 @@ mod tests {
         let (config, problem) = load(&dir);
         assert_eq!(config, Config::default());
         let problem = problem.unwrap();
+        // How to fix it comes first.
+        assert!(
+            problem.starts_with(
+                "To fix your settings file: pick another menu key than \"ctrl+c\"; agents need it."
+            ),
+            "{problem}"
+        );
         assert!(problem.contains("Ctrl+Q or F12 opens the menu"), "{problem}");
         assert!(problem.contains("was not changed"), "{problem}");
+
+        // Not JSON, or a setting that does not exist: the place is named.
+        std::fs::write(dir.join(FILE), "{\n  \"colours\": \"none\"\n}").unwrap();
+        let problem = load(&dir).1.unwrap();
+        assert!(
+            problem.starts_with(
+                "To fix your settings file: take out or correct \"colours\" at line 2, column 11; Lillignode \
+                 has no such setting."
+            ),
+            "{problem}"
+        );
+        std::fs::write(dir.join(FILE), "{\"bell\": off}").unwrap();
+        let problem = load(&dir).1.unwrap();
+        assert!(problem.starts_with("To fix your settings file: correct line 1, column 10: "), "{problem}");
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
