@@ -12,7 +12,7 @@ use crate::agent::{AgentBackend, AgentEvent, AgentId, AgentSpec, Exit, Size, Sta
 use crate::cost::{self, Cost};
 use crate::kind::AgentKind;
 use crate::state::{SavedAgent, SavedWorkspace, VERSION};
-use crate::status::{AgentStatus, Kind, Track, Why};
+use crate::status::{AgentStatus, Kind, NoSource, Track, Why};
 use crate::terminal::{StatusMessage, Terminal};
 
 /// A resumed agent that stops with an error this soon, before the user has
@@ -96,15 +96,7 @@ impl Entry {
     /// reported, or Unknown for any other agent. None once its program
     /// is not running: then the program state is all there is to show.
     pub fn reported(&self) -> Option<AgentStatus> {
-        if !self.is_running() {
-            None
-        } else if self.is_claude_code() {
-            Some(self.track.shown.clone())
-        } else if kind_is_known(&self.saved) {
-            Some(AgentStatus::Unknown(Why::NotClaudeCode))
-        } else {
-            Some(AgentStatus::Unknown(Why::KindNotKnown))
-        }
+        self.is_running().then(|| self.track.shown.clone())
     }
 
     /// What the agent's conversation has used so far, or why that is not
@@ -187,6 +179,16 @@ fn launch_args(saved: &SavedAgent, conversation: Conversation) -> Vec<String> {
         args.extend(kind_of(saved).conversation_args(id, conversation == Conversation::Continue));
     }
     args
+}
+
+/// The terminal a saved agent runs in and the tracker of its status, both
+/// new, as its kind has them. An agent saved with a kind this Lillignode
+/// does not know gets a plain program's, and says that is why.
+fn terminal_and_track(saved: &SavedAgent, size: Size) -> (Terminal, Track) {
+    let kind = kind_of(saved);
+    let source =
+        if kind_is_known(saved) { kind.status_source() } else { Box::new(NoSource::new(Why::KindNotKnown)) };
+    (Terminal::with_status(size.rows, size.cols, kind.status_messages()), Track::new(Instant::now(), source))
 }
 
 /// The reader of a saved agent's cost, for an agent that has one to read.
@@ -435,13 +437,14 @@ impl<B: AgentBackend> Workspace<B> {
         let how = if continuing { Conversation::Continue } else { Conversation::New };
         let (status, id) = self.try_start(&saved, how);
         let resuming_since = (continuing && id.is_some()).then(Instant::now);
+        let (term, track) = terminal_and_track(&saved, self.size);
         let entry = Entry {
             key,
             usage: usage_reader(&saved),
             saved,
             status,
-            term: Terminal::new(self.size.rows, self.size.cols),
-            track: Track::new(Instant::now()),
+            term,
+            track,
             id,
             resuming_since,
             cost_warned: false,
@@ -484,13 +487,14 @@ impl<B: AgentBackend> Workspace<B> {
             AgentSpec { command: command.to_string(), args: launch_args(&saved, Conversation::New), folder };
         let id = self.backend.start(&spec, self.size)?;
         let key = self.new_key();
+        let (term, track) = terminal_and_track(&saved, self.size);
         self.entries.push(Entry {
             key,
             usage: usage_reader(&saved),
             saved,
             status: Status::Running,
-            term: Terminal::new(self.size.rows, self.size.cols),
-            track: Track::new(Instant::now()),
+            term,
+            track,
             id: Some(id),
             resuming_since: None,
             cost_warned: false,
@@ -700,11 +704,10 @@ impl<B: AgentBackend> Workspace<B> {
                         // A new conversation has a new record, and its own cost.
                         entry.usage = usage_reader(&saved);
                         entry.cost_warned = false;
+                        (entry.term, entry.track) = terminal_and_track(&saved, self.size);
                         entry.saved = saved;
                         entry.status = Status::Running;
                         entry.id = id;
-                        entry.term = Terminal::new(self.size.rows, self.size.cols);
-                        entry.track = Track::new(Instant::now());
                         Some(Happened::StartedNewConversation { label })
                     }
                     Status::NotStarted(why) => Some(Happened::CouldNotContinue { label, why }),
@@ -714,11 +717,12 @@ impl<B: AgentBackend> Workspace<B> {
         }
     }
 
-    /// True if any Claude Code agent changed into Needs you since the last
-    /// call: the bell rings once for each such change.
+    /// True if any agent changed into Needs you since the last call: the
+    /// bell rings once for each such change. Only an agent whose status is
+    /// read can change into it.
     pub fn take_began_needing_you(&mut self) -> bool {
         let mut any = false;
-        for entry in self.entries.iter_mut().filter(|e| e.is_running() && e.is_claude_code()) {
+        for entry in self.entries.iter_mut().filter(|e| e.is_running()) {
             any |= entry.track.take_began_needing_you();
         }
         any
@@ -1116,19 +1120,25 @@ mod tests {
         assert_eq!(ws.focused().unwrap().reported(), None);
         ws.restart_focused();
         assert_eq!(ws.focused().unwrap().reported(), Some(AgentStatus::Starting));
-        assert!(ws.focused().unwrap().track.last.is_none());
+        assert!(ws.focused().unwrap().track.trace().last.is_none());
     }
 
     #[test]
     fn only_claude_code_gets_a_reported_status() {
         let mut ws = Workspace::new(Fake::default(), SIZE);
-        ws.restore(saved(vec![agent("claude", "a")], Some(0)));
         // Same backend, but an agent that is not Claude Code.
-        ws.entries[0].saved.command = "codex".into();
-        ws.entries[0].saved.kind = Some("program".into());
+        let mut other = agent("claude", "a");
+        other.kind = Some("program".into());
+        ws.restore(saved(vec![other], Some(0)));
+        let started = log(&ws).len();
         // Even if it sends something that looks like a report.
         ws.handle(AgentEvent::Output(AgentId(1), b"\x1b]7501;?\x07".to_vec()));
         ws.handle(AgentEvent::Output(AgentId(1), b"\x1b]7501;state=blocked:app=claude-code\x07".to_vec()));
+        // Its question is not answered: nothing was sent back to it.
+        assert_eq!(log(&ws).len(), started, "{:?}", log(&ws));
+        assert_eq!(ws.focused().unwrap().reported(), Some(AgentStatus::Unknown(Why::NotClaudeCode)));
+        // And it stays so: there is no deadline to pass for it.
+        assert!(!ws.tick(Instant::now() + crate::status::STARTING_DEADLINE));
         assert_eq!(ws.focused().unwrap().reported(), Some(AgentStatus::Unknown(Why::NotClaudeCode)));
         assert!(!ws.take_began_needing_you(), "no bell for an agent whose status is not read");
         assert!(!ws.focused().unwrap().is_settled());
@@ -1208,9 +1218,9 @@ mod tests {
     fn cost_is_read_for_claude_code_only_and_is_unknown_until_lillignode_is_told_where_to_look() {
         use crate::cost::{Cost, Waiting, WhyNot};
         let mut ws = Workspace::new(Fake::default(), SIZE);
-        ws.restore(saved(vec![agent("claude", "a"), agent("claude", "b")], Some(0)));
-        ws.entries[1].saved.command = "codex".into();
-        ws.entries[1].saved.kind = Some("program".into());
+        let mut other = agent("claude", "b");
+        other.kind = Some("program".into());
+        ws.restore(saved(vec![agent("claude", "a"), other], Some(0)));
         assert_eq!(ws.entries[0].cost(), Cost::Pending(Waiting::NotLooked));
         assert_eq!(ws.entries[1].cost(), Cost::Unknown(WhyNot::NotClaudeCode));
         // The readout is off until the program switches it on: no look.
@@ -1486,5 +1496,68 @@ mod tests {
         let kept = &ws.to_saved().agents[0];
         assert_eq!(kept.kind.as_deref(), Some("something-newer"));
         assert_eq!(kept.conversation.as_deref(), Some(ID));
+    }
+
+    /// Have agent `id` ask the status question; what was sent back to it.
+    fn ask(ws: &mut Workspace<Fake>, id: u32) -> Vec<String> {
+        let before = log(ws).len();
+        ws.handle(AgentEvent::Output(AgentId(id), b"\x1b]7501;?\x07".to_vec()));
+        log(ws)[before..].to_vec()
+    }
+
+    fn yes(id: u32) -> Vec<String> {
+        vec![format!("send {id} {:?}", "\x1b]7501;?\x07")]
+    }
+
+    #[test]
+    fn claude_code_is_answered_and_read_however_it_was_started() {
+        let mut ws = Workspace::new(Fake::default(), SIZE);
+        ws.restore(saved(vec![agent("claude", "a")], Some(0)));
+        assert_eq!(ask(&mut ws, 1), yes(1));
+
+        // It cannot continue, so it is started with a new conversation.
+        ws.handle(AgentEvent::Exited(AgentId(1), Exit { code: 1 }));
+        assert_eq!(ws.focused().unwrap().reported(), Some(AgentStatus::Starting));
+        assert_eq!(ask(&mut ws, 2), yes(2));
+        ws.handle(AgentEvent::Output(AgentId(2), b"\x1b]7501;state=idle:app=claude-code\x07".to_vec()));
+        assert_eq!(ws.focused().unwrap().reported(), Some(AgentStatus::Idle));
+
+        // It exits and the user starts it again.
+        ws.handle(AgentEvent::Exited(AgentId(2), Exit { code: 0 }));
+        ws.restart_focused();
+        assert_eq!(ask(&mut ws, 3), yes(3));
+
+        // A new size is the same terminal, still answering.
+        ws.resize(Size { rows: 30, cols: 100 });
+        assert_eq!(ask(&mut ws, 3), yes(3));
+
+        // And a new one, started by the user.
+        ws.start_new("claude", root("b")).unwrap();
+        assert_eq!(ask(&mut ws, 4), yes(4));
+    }
+
+    #[test]
+    fn a_silent_claude_code_agent_says_which_silence_it_was() {
+        let mut ws = Workspace::new(Fake::default(), SIZE);
+        ws.restore(saved(vec![agent("claude", "a"), agent("claude", "b")], Some(0)));
+        // The second asks and is answered; neither reports.
+        assert_eq!(ask(&mut ws, 2), yes(2));
+        assert!(ws.tick(Instant::now() + crate::status::STARTING_DEADLINE));
+        assert_eq!(ws.entries()[0].reported(), Some(AgentStatus::Unknown(Why::NotAsked)));
+        assert_eq!(ws.entries()[1].reported(), Some(AgentStatus::Unknown(Why::NoReport)));
+    }
+
+    #[test]
+    fn an_agent_of_a_kind_not_known_is_not_answered_and_nothing_it_sends_is_kept() {
+        let mut newer = agent("claude", "api");
+        newer.kind = Some("something-newer".into());
+        let mut ws = Workspace::new(Fake::default(), SIZE);
+        ws.restore(saved(vec![newer], Some(0)));
+        assert!(ask(&mut ws, 1).is_empty());
+        ws.handle(AgentEvent::Output(AgentId(1), b"\x1b]7501;state=blocked:app=claude-code\x07".to_vec()));
+        let entry = ws.focused().unwrap();
+        assert_eq!(entry.reported(), Some(AgentStatus::Unknown(Why::KindNotKnown)));
+        assert_eq!(entry.track.trace().reports, 0);
+        assert!(!ws.take_began_needing_you());
     }
 }

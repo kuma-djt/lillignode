@@ -380,35 +380,146 @@ pub struct LastReport {
     pub after_question: bool,
 }
 
-/// Everything Lillignode knows about one agent's status since it was started.
-/// Begins again whenever the agent is started; nothing is carried over.
-#[derive(Clone, Debug)]
-pub struct Track {
-    started: Instant,
+/// What a source has heard from its agent, kept for the status report
+/// panel. In memory only.
+#[derive(Clone, Debug, Default)]
+pub struct Trace {
     /// How long after starting the agent asked the status question.
     pub asked_after: Option<Duration>,
-    pub shown: AgentStatus,
     pub reports: u32,
     pub task_reports: u32,
     pub last: Option<LastReport>,
+}
+
+/// Where an agent's status comes from. Which source an agent has depends
+/// on what kind of agent it is. A source repeats what the agent said,
+/// exactly or not at all; the timing around it (`Track`) is the same for
+/// every source.
+pub trait StatusSource {
+    /// What is shown from the moment the agent starts, before it has said
+    /// anything.
+    fn at_start(&self) -> AgentStatus;
+    /// The agent asked whether its terminal takes status reports, this
+    /// long after it started.
+    fn asked(&mut self, after: Duration);
+    /// A report arrived: everything after `7501;`. Returns the status to
+    /// show, if this report changes it.
+    fn received(&mut self, body: &[u8], now: SystemTime) -> Option<AgentStatus>;
+    /// Why there is no status to show for an agent that is still Starting
+    /// when the deadline passes.
+    fn why_silent(&self) -> Why;
+    fn trace(&self) -> &Trace;
+}
+
+/// Claude Code's own status report, used only once it has asked the
+/// status question.
+#[derive(Default)]
+pub struct ClaudeReport {
+    trace: Trace,
+}
+
+impl StatusSource for ClaudeReport {
+    fn at_start(&self) -> AgentStatus {
+        AgentStatus::Starting
+    }
+
+    fn asked(&mut self, after: Duration) {
+        if self.trace.asked_after.is_none() {
+            self.trace.asked_after = Some(after);
+        }
+    }
+
+    fn received(&mut self, body: &[u8], now: SystemTime) -> Option<AgentStatus> {
+        let reading = if body.len() > LONGEST_REPORT {
+            Reading::NotUnderstood(format!(
+                "it is {} characters long, far longer than Claude Code sends",
+                body.len()
+            ))
+        } else {
+            read(body)
+        };
+        let after_question = self.trace.asked_after.is_some();
+        self.trace.reports = self.trace.reports.saturating_add(1);
+        if reading == Reading::Task {
+            self.trace.task_reports = self.trace.task_reports.saturating_add(1);
+        }
+        // No report, no status: one that arrives unasked is kept for the
+        // panel but not shown.
+        let shown = if after_question { reading.shown() } else { None };
+        let kept = &body[..body.len().min(LONGEST_REPORT)];
+        let mut raw = Vec::with_capacity(5 + kept.len());
+        raw.extend_from_slice(b"7501;");
+        raw.extend_from_slice(kept);
+        self.trace.last = Some(LastReport { raw, at: now, reading, after_question });
+        shown
+    }
+
+    fn why_silent(&self) -> Why {
+        if self.trace.asked_after.is_some() {
+            Why::NoReport
+        } else {
+            Why::NotAsked
+        }
+    }
+
+    fn trace(&self) -> &Trace {
+        &self.trace
+    }
+}
+
+/// An agent whose status Lillignode cannot read at all. It shows Unknown,
+/// with the reason, from the start, and nothing it sends changes that.
+pub struct NoSource {
+    why: Why,
+    trace: Trace,
+}
+
+impl NoSource {
+    pub fn new(why: Why) -> Self {
+        Self { why, trace: Trace::default() }
+    }
+}
+
+impl StatusSource for NoSource {
+    fn at_start(&self) -> AgentStatus {
+        AgentStatus::Unknown(self.why)
+    }
+
+    fn asked(&mut self, _: Duration) {}
+
+    fn received(&mut self, _: &[u8], _: SystemTime) -> Option<AgentStatus> {
+        None
+    }
+
+    fn why_silent(&self) -> Why {
+        self.why
+    }
+
+    fn trace(&self) -> &Trace {
+        &self.trace
+    }
+}
+
+/// Everything Lillignode knows about one agent's status since it was started.
+/// Begins again whenever the agent is started; nothing is carried over.
+pub struct Track {
+    started: Instant,
+    pub shown: AgentStatus,
     /// When the agent last drew anything.
     last_output: Instant,
     /// Set when the status changes into Needs you, until taken.
     began_needing_you: bool,
+    source: Box<dyn StatusSource>,
 }
 
 impl Track {
-    pub fn new(started: Instant) -> Self {
-        Self {
-            started,
-            asked_after: None,
-            shown: AgentStatus::Starting,
-            reports: 0,
-            task_reports: 0,
-            last: None,
-            last_output: started,
-            began_needing_you: false,
-        }
+    pub fn new(started: Instant, source: Box<dyn StatusSource>) -> Self {
+        Self { started, shown: source.at_start(), last_output: started, began_needing_you: false, source }
+    }
+
+    /// What the agent's source has heard, for the status report panel.
+    pub fn trace(&self) -> &Trace {
+        self.source.trace()
     }
 
     fn show(&mut self, status: AgentStatus) {
@@ -439,46 +550,21 @@ impl Track {
     }
 
     pub fn asked(&mut self, now: Instant) {
-        if self.asked_after.is_none() {
-            self.asked_after = Some(now.saturating_duration_since(self.started));
-        }
+        self.source.asked(now.saturating_duration_since(self.started));
     }
 
     /// A report arrived. `body` is everything after `7501;`.
     pub fn received(&mut self, body: &[u8], now: SystemTime) {
-        let reading = if body.len() > LONGEST_REPORT {
-            Reading::NotUnderstood(format!(
-                "it is {} characters long, far longer than Claude Code sends",
-                body.len()
-            ))
-        } else {
-            read(body)
-        };
-        let after_question = self.asked_after.is_some();
-        self.reports = self.reports.saturating_add(1);
-        if reading == Reading::Task {
-            self.task_reports = self.task_reports.saturating_add(1);
+        if let Some(status) = self.source.received(body, now) {
+            self.show(status);
         }
-        // No report, no status: one that arrives unasked is kept for the
-        // panel but not shown.
-        if after_question {
-            if let Some(status) = reading.shown() {
-                self.show(status);
-            }
-        }
-        let kept = &body[..body.len().min(LONGEST_REPORT)];
-        let mut raw = Vec::with_capacity(5 + kept.len());
-        raw.extend_from_slice(b"7501;");
-        raw.extend_from_slice(kept);
-        self.last = Some(LastReport { raw, at: now, reading, after_question });
     }
 
     /// Call regularly. True if the status changed.
     pub fn tick(&mut self, now: Instant) -> bool {
         match self.shown {
             AgentStatus::Starting if now.saturating_duration_since(self.started) >= STARTING_DEADLINE => {
-                let why = if self.asked_after.is_some() { Why::NoReport } else { Why::NotAsked };
-                self.show(AgentStatus::Unknown(why));
+                self.show(AgentStatus::Unknown(self.source.why_silent()));
                 true
             }
             // Still Working: that is what Claude Code last said, and only it
@@ -519,6 +605,11 @@ pub fn visible(raw: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The tracker of a Claude Code agent.
+    fn claude(started: Instant) -> Track {
+        Track::new(started, Box::new(ClaudeReport::default()))
+    }
 
     fn b64(text: &str) -> String {
         // Test-only encoder, so the decoder is checked against something else.
@@ -620,24 +711,24 @@ mod tests {
 
     #[test]
     fn a_huge_report_is_refused_unread_and_only_its_start_kept() {
-        let mut t = Track::new(Instant::now());
+        let mut t = claude(Instant::now());
         t.asked(Instant::now());
         let body = format!("state=working:app=claude-code:msg={}", "A".repeat(LONGEST_REPORT * 4));
         t.received(body.as_bytes(), SystemTime::now());
         assert_eq!(t.shown, AgentStatus::Unknown(Why::NotUnderstood));
-        assert_eq!(t.last.as_ref().unwrap().raw.len(), 5 + LONGEST_REPORT);
+        assert_eq!(t.trace().last.as_ref().unwrap().raw.len(), 5 + LONGEST_REPORT);
     }
 
     #[test]
     fn a_report_before_the_question_is_not_used_and_one_after_it_is() {
         let t0 = Instant::now();
-        let mut t = Track::new(t0);
+        let mut t = claude(t0);
         t.received(b"state=working:app=claude-code", SystemTime::now());
         assert_eq!(t.shown, AgentStatus::Starting);
         t.asked(t0);
         t.received(b"state=done:app=claude-code", SystemTime::now());
         assert_eq!(t.shown, AgentStatus::Done);
-        assert!(t.last.as_ref().unwrap().after_question);
+        assert!(t.trace().last.as_ref().unwrap().after_question);
     }
 
     #[test]
@@ -674,33 +765,33 @@ mod tests {
     #[test]
     fn a_track_shows_starting_then_what_was_reported() {
         let t0 = Instant::now();
-        let mut t = Track::new(t0);
+        let mut t = claude(t0);
         assert_eq!(t.shown, AgentStatus::Starting);
         t.asked(t0 + Duration::from_millis(300));
         t.received(b"state=idle:app=claude-code", SystemTime::now());
         assert_eq!(t.shown, AgentStatus::Idle);
         t.received(b"state=working:app=claude-code:id=t1", SystemTime::now());
         assert_eq!(t.shown, AgentStatus::Idle, "a background task does not change the agent's status");
-        assert_eq!((t.reports, t.task_reports), (2, 1));
+        assert_eq!((t.trace().reports, t.trace().task_reports), (2, 1));
         t.received(b"state=pondering:app=claude-code", SystemTime::now());
         assert_eq!(t.shown, AgentStatus::Unknown(Why::NotUnderstood));
         t.received(b"state=clear", SystemTime::now());
         assert_eq!(t.shown, AgentStatus::Unknown(Why::Withdrawn));
-        assert_eq!(t.last.as_ref().unwrap().raw, b"7501;state=clear");
+        assert_eq!(t.trace().last.as_ref().unwrap().raw, b"7501;state=clear");
     }
 
     #[test]
     fn a_report_that_comes_unasked_is_kept_but_not_shown() {
-        let mut t = Track::new(Instant::now());
+        let mut t = claude(Instant::now());
         t.received(b"state=working:app=claude-code", SystemTime::now());
         assert_eq!(t.shown, AgentStatus::Starting);
-        assert!(!t.last.as_ref().unwrap().after_question);
+        assert!(!t.trace().last.as_ref().unwrap().after_question);
     }
 
     #[test]
     fn no_question_by_the_deadline_is_unknown() {
         let t0 = Instant::now();
-        let mut t = Track::new(t0);
+        let mut t = claude(t0);
         assert!(!t.tick(t0 + Duration::from_secs(14)));
         assert_eq!(t.shown, AgentStatus::Starting);
         assert!(t.tick(t0 + STARTING_DEADLINE));
@@ -709,7 +800,7 @@ mod tests {
 
         // Asked and answered, but the answer never reached it: Unknown too,
         // with its own reason, never Starting for ever.
-        let mut t = Track::new(t0);
+        let mut t = claude(t0);
         t.asked(t0 + Duration::from_secs(1));
         assert!(!t.tick(t0 + Duration::from_secs(2)));
         assert!(t.tick(t0 + STARTING_DEADLINE));
@@ -723,7 +814,7 @@ mod tests {
     #[test]
     fn a_quiet_working_agent_stays_working_and_shows_how_long_it_has_been_quiet() {
         let t0 = Instant::now();
-        let mut t = Track::new(t0);
+        let mut t = claude(t0);
         t.asked(t0);
         t.output(t0);
         t.received(b"state=working:app=claude-code", SystemTime::now());
@@ -750,7 +841,7 @@ mod tests {
     #[test]
     fn quiet_is_shown_only_for_working() {
         let t0 = Instant::now();
-        let mut t = Track::new(t0);
+        let mut t = claude(t0);
         t.asked(t0);
         for body in [&b"state=done:app=claude-code"[..], b"state=blocked:app=claude-code:kind=permission"] {
             t.received(body, SystemTime::now());
@@ -763,7 +854,7 @@ mod tests {
     #[test]
     fn needing_you_is_announced_once_per_change_into_it() {
         let t0 = Instant::now();
-        let mut t = Track::new(t0);
+        let mut t = claude(t0);
         t.asked(t0);
         assert!(!t.take_began_needing_you());
         t.received(b"state=blocked:app=claude-code:kind=permission", SystemTime::now());
@@ -803,5 +894,21 @@ mod tests {
     fn shows_control_characters_by_name() {
         assert_eq!(visible(b"7501;?\x07"), "ESC ]7501;?BEL");
         assert_eq!(visible(b"a\x01"), "ESC ]a\\x01");
+    }
+
+    #[test]
+    fn an_agent_with_no_source_is_unknown_from_the_start_whatever_it_sends() {
+        let t0 = Instant::now();
+        let mut t = Track::new(t0, Box::new(NoSource::new(Why::NotClaudeCode)));
+        assert_eq!(t.shown, AgentStatus::Unknown(Why::NotClaudeCode));
+        t.asked(t0);
+        t.received(b"state=blocked:app=claude-code", SystemTime::now());
+        t.output(t0);
+        assert!(!t.tick(t0 + STARTING_DEADLINE + SILENCE));
+        assert_eq!(t.shown, AgentStatus::Unknown(Why::NotClaudeCode));
+        assert!(!t.take_began_needing_you());
+        // Nothing of what it sent is kept.
+        assert_eq!(t.trace().reports, 0);
+        assert!(t.trace().asked_after.is_none() && t.trace().last.is_none());
     }
 }

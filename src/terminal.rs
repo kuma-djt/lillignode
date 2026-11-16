@@ -23,10 +23,23 @@ pub enum StatusMessage {
     Report(Vec<u8>),
 }
 
+/// What an agent's terminal does with status messages. It depends on what
+/// kind of agent runs in it: a program Lillignode does not read the status
+/// of is not told that its status is wanted.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum StatusMessages {
+    /// The status question is not answered and nothing is handed over.
+    #[default]
+    Ignored,
+    /// The status question is answered yes, and reports are handed over.
+    Answered,
+}
+
 #[derive(Default)]
 struct Replies {
     pending: Vec<u8>,
     status: Vec<StatusMessage>,
+    status_messages: StatusMessages,
 }
 
 impl vt100::Callbacks for Replies {
@@ -55,7 +68,7 @@ impl vt100::Callbacks for Replies {
 
     fn unhandled_osc(&mut self, _: &mut vt100::Screen, params: &[&[u8]]) {
         let Some((&code, rest)) = params.split_first() else { return };
-        if code != status::CODE {
+        if code != status::CODE || self.status_messages == StatusMessages::Ignored {
             return;
         }
         if rest == [b"?"] {
@@ -82,10 +95,14 @@ fn nz(n: u16) -> NonZeroU16 {
 }
 
 impl Terminal {
+    /// A terminal for a program whose status is not read.
     pub fn new(rows: u16, cols: u16) -> Self {
-        Self {
-            parser: vt100::Parser::new_with_callbacks(nz(rows), nz(cols), HISTORY_ROWS, Replies::default()),
-        }
+        Self::with_status(rows, cols, StatusMessages::Ignored)
+    }
+
+    pub fn with_status(rows: u16, cols: u16, status_messages: StatusMessages) -> Self {
+        let replies = Replies { status_messages, ..Replies::default() };
+        Self { parser: vt100::Parser::new_with_callbacks(nz(rows), nz(cols), HISTORY_ROWS, replies) }
     }
 
     /// Take in output from the agent. Returns anything that must be sent
@@ -221,7 +238,7 @@ mod tests {
 
     #[test]
     fn answers_the_status_question_in_order_and_hands_over_reports() {
-        let mut t = Terminal::new(24, 80);
+        let mut t = Terminal::with_status(24, 80, StatusMessages::Answered);
         // Claude Code asks, then asks what kind of terminal this is. The
         // status answer must come first.
         assert_eq!(t.feed(b"\x1b]7501;?\x07\x1b[c"), b"\x1b]7501;?\x07\x1b[?1;2c");
@@ -245,15 +262,26 @@ mod tests {
 
     #[test]
     fn a_long_report_arrives_whole() {
-        let mut t = Terminal::new(24, 80);
+        let mut t = Terminal::with_status(24, 80, StatusMessages::Answered);
         let body = format!("state=working:app=claude-code:msg={}", "QUJD".repeat(700));
         let _ = t.feed(format!("\x1b]7501;{body}\x07").as_bytes());
         assert_eq!(t.take_status(), vec![StatusMessage::Report(body.into_bytes())]);
     }
 
     #[test]
-    fn other_terminal_messages_are_not_status() {
+    fn a_program_whose_status_is_not_read_is_not_answered_and_nothing_is_kept() {
         let mut t = Terminal::new(24, 80);
+        // Only the question every terminal answers gets an answer.
+        assert_eq!(t.feed(b"\x1b]7501;?\x07\x1b[c"), b"\x1b[?1;2c");
+        let _ = t.feed(b"\x1b]7501;state=blocked:app=claude-code\x07x");
+        assert!(t.take_status().is_empty());
+        // And it is still not drawn.
+        assert_eq!(t.screen().rows(0, 80).next().unwrap(), "x");
+    }
+
+    #[test]
+    fn other_terminal_messages_are_not_status() {
+        let mut t = Terminal::with_status(24, 80, StatusMessages::Answered);
         let _ = t.feed(b"\x1b]0;title\x07\x1b]9;4;1;50\x07\x1b]75010;?\x07");
         assert!(t.take_status().is_empty());
     }

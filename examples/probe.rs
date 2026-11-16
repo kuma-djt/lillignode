@@ -158,7 +158,12 @@ fn main() {
 
     let mut p = Probe {
         rx,
-        term: lillignode::terminal::Terminal::new(rows, cols),
+        // Answers the status question too, as Lillignode does for Claude Code.
+        term: lillignode::terminal::Terminal::with_status(
+            rows,
+            cols,
+            lillignode::terminal::StatusMessages::Answered,
+        ),
         writer,
         raw: Vec::new(),
         exit: None,

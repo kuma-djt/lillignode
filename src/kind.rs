@@ -9,6 +9,9 @@
 
 use std::path::Path;
 
+use crate::status::{ClaudeReport, NoSource, StatusSource, Why};
+use crate::terminal::StatusMessages;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AgentKind {
     /// Claude Code: the one agent Lillignode supports by name.
@@ -82,6 +85,22 @@ impl AgentKind {
                 vec![flag.to_string(), id.to_string()]
             }
             AgentKind::Program => Vec::new(),
+        }
+    }
+
+    /// Where the status of an agent of this kind comes from.
+    pub fn status_source(self) -> Box<dyn StatusSource> {
+        match self {
+            AgentKind::ClaudeCode => Box::new(ClaudeReport::default()),
+            AgentKind::Program => Box::new(NoSource::new(Why::NotClaudeCode)),
+        }
+    }
+
+    /// What the terminal of an agent of this kind does with status messages.
+    pub fn status_messages(self) -> StatusMessages {
+        match self {
+            AgentKind::ClaudeCode => StatusMessages::Answered,
+            AgentKind::Program => StatusMessages::Ignored,
         }
     }
 

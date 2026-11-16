@@ -1324,6 +1324,7 @@ impl<B: AgentBackend> App<B> {
     pub fn status_report_text(&self) -> String {
         let Some(e) = self.ws.focused() else { return "No agent is open.".to_string() };
         let t = &e.track;
+        let heard = t.trace();
         let mut out = format!("Status report for {}\n\n", e.label());
         // The status in full, with its reason: the sidebar shows it short.
         match e.reported() {
@@ -1355,7 +1356,7 @@ impl<B: AgentBackend> App<B> {
             );
         }
         if e.is_running() {
-            out += &match t.asked_after {
+            out += &match heard.asked_after {
                 Some(after) => format!(
                     "Status question: asked {:.1} seconds after it started. Lillignode answered yes.\n",
                     after.as_secs_f32()
@@ -1366,13 +1367,15 @@ impl<B: AgentBackend> App<B> {
                 ),
             };
         }
-        out += &format!("Reports received since it started: {}", t.reports);
-        if t.task_reports > 0 {
-            out +=
-                &format!(" ({} about its background tasks, which do not change its status)", t.task_reports);
+        out += &format!("Reports received since it started: {}", heard.reports);
+        if heard.task_reports > 0 {
+            out += &format!(
+                " ({} about its background tasks, which do not change its status)",
+                heard.task_reports
+            );
         }
         out += ".\n\n";
-        match &t.last {
+        match &heard.last {
             None => out += "No report has been received.\n",
             Some(last) => {
                 let ago = last.at.elapsed().unwrap_or(Duration::ZERO).as_secs();
