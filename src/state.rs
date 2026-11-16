@@ -30,6 +30,12 @@ pub struct SavedAgent {
     /// What the user sees in the sidebar, for example "Claude Code".
     pub name: String,
     pub command: String,
+    /// What kind of agent this is, for example "claude-code". Absent in a
+    /// workspace saved before kinds were recorded: the kind is then worked
+    /// out from the command and saved from then on. A word this Lillignode
+    /// does not know is kept as it was written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
     #[serde(default)]
     pub args: Vec<String>,
     pub folder: PathBuf,
@@ -220,12 +226,36 @@ mod tests {
             agents: vec![SavedAgent {
                 name: name.into(),
                 command: "claude".into(),
+                kind: Some("claude-code".into()),
                 args: vec![],
                 folder: PathBuf::from("C:/work"),
                 conversation: Some("0b0e7f0a-0000-4000-8000-000000000001".into()),
             }],
             focused: Some(0),
         }
+    }
+
+    #[test]
+    fn a_workspace_saved_before_kinds_were_recorded_still_loads() {
+        let dir = temp_dir("no-kind");
+        let text = r#"{"version":1,"agents":[{"name":"Claude Code","command":"claude","args":[],
+            "folder":"C:/work","conversation":"0b0e7f0a-0000-4000-8000-000000000001"}],"focused":0}"#;
+        fs::write(file_in(&dir), text).unwrap();
+        let loaded = load(&dir);
+        assert_eq!(loaded.outcome, LoadOutcome::Loaded);
+        assert_eq!(loaded.workspace.agents[0].kind, None);
+        // And an agent with no kind is written without one, as before.
+        save(&dir, &loaded.workspace).unwrap();
+        assert!(!fs::read_to_string(file_in(&dir)).unwrap().contains("kind"));
+    }
+
+    #[test]
+    fn a_kind_is_saved_and_read_back_as_written_even_one_not_known_here() {
+        let dir = temp_dir("kind-kept");
+        let mut ws = one("Claude Code");
+        ws.agents[0].kind = Some("from-a-newer-lillignode".into());
+        save(&dir, &ws).unwrap();
+        assert_eq!(load(&dir).workspace, ws);
     }
 
     #[test]

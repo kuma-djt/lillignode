@@ -73,6 +73,8 @@ pub enum Why {
     Withdrawn,
     /// Not Claude Code, so there is no report to read.
     NotClaudeCode,
+    /// Saved as a kind of agent this Lillignode does not know.
+    KindNotKnown,
 }
 
 impl Why {
@@ -81,7 +83,7 @@ impl Why {
     pub fn is_breakage(self) -> bool {
         match self {
             Why::NotAsked | Why::NoReport | Why::NotUnderstood => true,
-            Why::Withdrawn | Why::NotClaudeCode => false,
+            Why::Withdrawn | Why::NotClaudeCode | Why::KindNotKnown => false,
         }
     }
 }
@@ -141,6 +143,7 @@ fn why_short(why: Why) -> &'static str {
         Why::NotUnderstood => "not understood",
         Why::Withdrawn => "withdrawn",
         Why::NotClaudeCode => "not Claude Code",
+        Why::KindNotKnown => "kind not known",
     }
 }
 
@@ -152,6 +155,7 @@ pub fn why_long(why: Why) -> &'static str {
         Why::NotUnderstood => "Claude Code sent a status Lillignode does not understand",
         Why::Withdrawn => "Claude Code withdrew its status and has not reported a new one",
         Why::NotClaudeCode => "Lillignode shows what an agent is doing only for Claude Code. For any other agent it can tell only whether its program is running",
+        Why::KindNotKnown => "This agent was saved as a kind of agent this Lillignode does not know, most likely by a newer Lillignode. It runs as a plain program, and Lillignode can tell only whether it is running. What was saved about it is kept",
     }
 }
 
@@ -779,9 +783,17 @@ mod tests {
             Why::NotAsked.is_breakage() && Why::NoReport.is_breakage() && Why::NotUnderstood.is_breakage()
         );
         assert!(!Why::Withdrawn.is_breakage() && !Why::NotClaudeCode.is_breakage());
+        assert!(!Why::KindNotKnown.is_breakage());
         // Every short reason fits the sidebar's 24 columns after "Unknown: ",
         // and so does a quiet of up to 99 minutes.
-        for why in [Why::NotAsked, Why::NoReport, Why::NotUnderstood, Why::Withdrawn, Why::NotClaudeCode] {
+        for why in [
+            Why::NotAsked,
+            Why::NoReport,
+            Why::NotUnderstood,
+            Why::Withdrawn,
+            Why::NotClaudeCode,
+            Why::KindNotKnown,
+        ] {
             assert!(AgentStatus::Unknown(why).text().chars().count() <= 24, "{why:?}");
         }
         assert!(AgentStatus::WorkingQuiet(99).text().chars().count() <= 24);

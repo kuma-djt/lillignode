@@ -10,6 +10,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crate::agent::{AgentBackend, AgentEvent, AgentId, AgentSpec, Exit, Size, StartError};
 use crate::cost::{self, Cost};
+use crate::kind::AgentKind;
 use crate::state::{SavedAgent, SavedWorkspace, VERSION};
 use crate::status::{AgentStatus, Kind, Track, Why};
 use crate::terminal::{StatusMessage, Terminal};
@@ -83,8 +84,12 @@ impl Entry {
         self.status == Status::Running
     }
 
+    pub fn kind(&self) -> AgentKind {
+        kind_of(&self.saved)
+    }
+
     pub fn is_claude_code(&self) -> bool {
-        is_claude_code(&self.saved.command)
+        self.kind() == AgentKind::ClaudeCode
     }
 
     /// What the sidebar shows a running agent doing: what Claude Code
@@ -95,8 +100,10 @@ impl Entry {
             None
         } else if self.is_claude_code() {
             Some(self.track.shown.clone())
-        } else {
+        } else if kind_is_known(&self.saved) {
             Some(AgentStatus::Unknown(Why::NotClaudeCode))
+        } else {
+            Some(AgentStatus::Unknown(Why::KindNotKnown))
         }
     }
 
@@ -149,20 +156,18 @@ fn folder_name(folder: &Path) -> String {
         .unwrap_or_else(|| folder.display().to_string())
 }
 
-/// True for the one agent Lillignode supports by name.
-pub fn is_claude_code(command: &str) -> bool {
-    std::path::Path::new(command)
-        .file_stem()
-        .is_some_and(|s| s.to_string_lossy().eq_ignore_ascii_case("claude"))
+/// The kind of a saved agent: what was saved with it, or, for one saved
+/// before kinds were recorded, what its command says.
+fn kind_of(saved: &SavedAgent) -> AgentKind {
+    AgentKind::of_saved(saved.kind.as_deref(), &saved.command)
 }
 
-/// The name shown for a command. Only agents Lillignode knows by name get one;
-/// anything else is shown as typed.
-pub fn display_name(command: &str) -> String {
-    if is_claude_code(command) {
-        "Claude Code".to_string()
-    } else {
-        command.to_string()
+/// False for an agent saved with a kind this Lillignode does not know. It
+/// runs as a plain program, and says why.
+fn kind_is_known(saved: &SavedAgent) -> bool {
+    match saved.kind.as_deref() {
+        Some(word) => AgentKind::from_saved(word).is_some(),
+        None => true,
     }
 }
 
@@ -173,20 +178,20 @@ enum Conversation {
     Continue,
 }
 
-/// The arguments to start an agent with. Claude Code is told which
-/// conversation to use; anything else gets only what was saved.
+/// The arguments to start an agent with. An agent of a kind that keeps
+/// conversations is told which one to use; anything else gets only what
+/// was saved.
 fn launch_args(saved: &SavedAgent, conversation: Conversation) -> Vec<String> {
     let mut args = saved.args.clone();
-    if let (true, Some(id)) = (is_claude_code(&saved.command), &saved.conversation) {
-        let flag = if conversation == Conversation::Continue { "--resume" } else { "--session-id" };
-        args.extend([flag.to_string(), id.clone()]);
+    if let Some(id) = &saved.conversation {
+        args.extend(kind_of(saved).conversation_args(id, conversation == Conversation::Continue));
     }
     args
 }
 
 /// The reader of a saved agent's cost, for an agent that has one to read.
 fn usage_reader(saved: &SavedAgent) -> Option<cost::Reader> {
-    let id = saved.conversation.as_deref().filter(|_| is_claude_code(&saved.command))?;
+    let id = saved.conversation.as_deref().filter(|_| kind_of(saved).has_cost_record())?;
     Some(cost::Reader::new(id))
 }
 
@@ -416,8 +421,14 @@ impl<B: AgentBackend> Workspace<B> {
     /// Start a saved agent, continuing its conversation if it has one.
     /// Returns the entry and whether it was asked to continue.
     fn open(&mut self, key: AgentKey, mut saved: SavedAgent) -> (Entry, bool) {
-        let continuing = is_claude_code(&saved.command) && saved.conversation.is_some();
-        if is_claude_code(&saved.command) && saved.conversation.is_none() {
+        if saved.kind.is_none() {
+            // Saved before kinds were recorded: work it out once. From now
+            // on it is saved with the agent.
+            saved.kind = Some(AgentKind::of_command(&saved.command).saved_word().to_string());
+        }
+        let keeps_conversations = kind_of(&saved).keeps_conversations();
+        let continuing = keeps_conversations && saved.conversation.is_some();
+        if keeps_conversations && saved.conversation.is_none() {
             // Saved before conversations were tracked: begin tracking now.
             saved.conversation = Some(new_conversation_id());
         }
@@ -460,12 +471,14 @@ impl<B: AgentBackend> Workspace<B> {
 
     /// Start a new agent and put it in front. On failure nothing is added.
     pub fn start_new(&mut self, command: &str, folder: PathBuf) -> Result<(), StartError> {
+        let kind = AgentKind::of_command(command);
         let saved = SavedAgent {
-            name: self.distinct_name(&display_name(command), &folder),
+            name: self.distinct_name(&kind.name(command), &folder),
             command: command.to_string(),
+            kind: Some(kind.saved_word().to_string()),
             args: Vec::new(),
             folder: folder.clone(),
-            conversation: is_claude_code(command).then(new_conversation_id),
+            conversation: kind.keeps_conversations().then(new_conversation_id),
         };
         let spec =
             AgentSpec { command: command.to_string(), args: launch_args(&saved, Conversation::New), folder };
@@ -793,12 +806,14 @@ mod tests {
     }
 
     fn agent(command: &str, folder: &str) -> SavedAgent {
+        let kind = AgentKind::of_command(command);
         SavedAgent {
-            name: display_name(command),
+            name: kind.name(command),
             command: command.into(),
+            kind: None,
             args: vec![],
             folder: root(folder),
-            conversation: is_claude_code(command).then(|| ID.to_string()),
+            conversation: kind.keeps_conversations().then(|| ID.to_string()),
         }
     }
 
@@ -1108,8 +1123,9 @@ mod tests {
     fn only_claude_code_gets_a_reported_status() {
         let mut ws = Workspace::new(Fake::default(), SIZE);
         ws.restore(saved(vec![agent("claude", "a")], Some(0)));
-        // Same backend, but saved under another command name.
+        // Same backend, but an agent that is not Claude Code.
         ws.entries[0].saved.command = "codex".into();
+        ws.entries[0].saved.kind = Some("program".into());
         // Even if it sends something that looks like a report.
         ws.handle(AgentEvent::Output(AgentId(1), b"\x1b]7501;?\x07".to_vec()));
         ws.handle(AgentEvent::Output(AgentId(1), b"\x1b]7501;state=blocked:app=claude-code\x07".to_vec()));
@@ -1194,6 +1210,7 @@ mod tests {
         let mut ws = Workspace::new(Fake::default(), SIZE);
         ws.restore(saved(vec![agent("claude", "a"), agent("claude", "b")], Some(0)));
         ws.entries[1].saved.command = "codex".into();
+        ws.entries[1].saved.kind = Some("program".into());
         assert_eq!(ws.entries[0].cost(), Cost::Pending(Waiting::NotLooked));
         assert_eq!(ws.entries[1].cost(), Cost::Unknown(WhyNot::NotClaudeCode));
         // The readout is off until the program switches it on: no look.
@@ -1376,5 +1393,98 @@ mod tests {
         ws.start_new("claude", root("new")).unwrap();
         let new = ws.focused().unwrap().key();
         assert!(!keys.contains(&new));
+    }
+
+    #[test]
+    fn an_agent_saved_without_a_kind_gets_one_from_its_command_and_it_is_saved() {
+        let mut ws = Workspace::new(Fake::default(), SIZE);
+        ws.restore(saved(vec![agent("claude", "api"), agent("codex", "web")], Some(0)));
+        assert_eq!(ws.entries()[0].kind(), AgentKind::ClaudeCode);
+        assert_eq!(ws.entries()[1].kind(), AgentKind::Program);
+        // Recorded for the one that could not be started too.
+        let kinds =
+            |ws: &Workspace<Fake>| ws.to_saved().agents.into_iter().map(|a| a.kind).collect::<Vec<_>>();
+        let both = [Some("claude-code".to_string()), Some("program".to_string())];
+        assert_eq!(kinds(&ws), both);
+        // Nothing else about it changed: it was asked to continue, as before.
+        assert_eq!(log(&ws), [format!("start 1 --resume {ID}")]);
+
+        // It stops at once with an error, so it is given a new conversation:
+        // still Claude Code, and told the new id the way Claude Code is.
+        assert_eq!(
+            ws.handle(AgentEvent::Exited(AgentId(1), Exit { code: 1 })),
+            Some(Happened::StartedNewConversation { label: "Claude Code (api)".into() })
+        );
+        assert_eq!(kinds(&ws), both);
+        let new_id = ws.focused().unwrap().saved.conversation.clone().unwrap();
+        assert_eq!(log(&ws).last().unwrap(), &format!("start 2 --session-id {new_id}"));
+
+        // Stopped and started again: the same kind, continuing by its id.
+        ws.handle(AgentEvent::Exited(AgentId(2), Exit { code: 0 }));
+        assert_eq!(ws.restart_focused(), Some(true));
+        assert_eq!(kinds(&ws), both);
+        assert_eq!(log(&ws).last().unwrap(), &format!("start 3 --resume {new_id}"));
+    }
+
+    #[test]
+    fn a_new_agent_is_saved_with_its_kind() {
+        let mut ws = Workspace::new(Fake::default(), SIZE);
+        ws.start_new("claude", root("api")).unwrap();
+        assert_eq!(ws.to_saved().agents[0].kind.as_deref(), Some("claude-code"));
+    }
+
+    #[test]
+    fn the_saved_kind_decides_not_the_name_of_the_program() {
+        // A program named claude that was saved as a plain program is one:
+        // no conversation is passed, and none is made up for it.
+        let mut plain = agent("claude", "api");
+        plain.kind = Some("program".into());
+        plain.conversation = None;
+        // The same, but with a conversation saved beside it: it is not
+        // passed on, not read for cost, and not thrown away.
+        let mut with_id = agent("claude", "web");
+        with_id.kind = Some("program".into());
+        let mut ws = Workspace::new(Fake::default(), SIZE);
+        let report = ws.restore(saved(vec![plain, with_id], Some(0)));
+        assert_eq!(
+            report.restored,
+            vec![
+                Restored { label: "Claude Code (api)".into(), continuing: false },
+                Restored { label: "Claude Code (web)".into(), continuing: false },
+            ]
+        );
+        assert_eq!(log(&ws), ["start 1 ", "start 2 "]);
+        assert!(ws.entries()[1].usage.is_none());
+        assert_eq!(ws.entries()[1].cost(), Cost::Unknown(cost::WhyNot::NotClaudeCode));
+        assert_eq!(ws.to_saved().agents[1].conversation.as_deref(), Some(ID));
+        let entry = ws.focused().unwrap();
+        assert!(!entry.is_claude_code());
+        assert_eq!(entry.saved.conversation, None);
+        assert_eq!(entry.reported(), Some(AgentStatus::Unknown(Why::NotClaudeCode)));
+        assert_eq!(entry.cost(), Cost::Unknown(cost::WhyNot::NotClaudeCode));
+    }
+
+    #[test]
+    fn a_kind_from_a_newer_lillignode_runs_as_a_plain_program_and_is_kept() {
+        let mut newer = agent("claude", "api");
+        newer.kind = Some("something-newer".into());
+        let mut ws = Workspace::new(Fake::default(), SIZE);
+        let report = ws.restore(saved(vec![newer], Some(0)));
+
+        // Started, with nothing added to its arguments and not asked to
+        // continue: this Lillignode does not know how that kind does it.
+        assert_eq!(report.restored, vec![Restored { label: "Claude Code (api)".into(), continuing: false }]);
+        assert_eq!(log(&ws), ["start 1 "]);
+        let entry = ws.focused().unwrap();
+        assert_eq!(entry.kind(), AgentKind::Program);
+        // It says why its status is not shown, and it is not the usual reason.
+        assert_eq!(entry.reported(), Some(AgentStatus::Unknown(Why::KindNotKnown)));
+        // Its cost is not read either.
+        assert!(entry.usage.is_none());
+        assert_eq!(entry.cost(), Cost::Unknown(cost::WhyNot::NotClaudeCode));
+        // What the newer Lillignode saved is still there for it to read.
+        let kept = &ws.to_saved().agents[0];
+        assert_eq!(kept.kind.as_deref(), Some("something-newer"));
+        assert_eq!(kept.conversation.as_deref(), Some(ID));
     }
 }
