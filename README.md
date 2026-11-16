@@ -4,7 +4,7 @@ Lillignode runs several AI coding agents at once in one terminal window. Each ag
 
 The name is said "Lilli-node": the g is silent, as in gnome.
 
-![Lillignode with three Claude Code agents: one working, one waiting for permission, one done](assets/screenshot.png)
+![Lillignode with four Claude Code agents: one waiting for you, one done, two idle](assets/screenshot.png)
 
 **Status: v0.1, rough.** Built and tested on Windows 11. It builds and its unit tests pass on Linux; nobody has run an agent in it there, and macOS is untested. Expect sharp edges.
 
@@ -44,18 +44,16 @@ Lillignode works out how many colours your terminal shows and uses fewer where i
 
 The bottom line always starts with the menu keys. After them it says where your typing goes.
 
-## Build and run
+## Get it (Windows)
 
-You need the [Rust toolchain](https://rustup.rs) and, to do anything useful, [Claude Code](https://claude.com/claude-code) installed and signed in.
+1. Download `lillignode-0.1.0-windows-x64.zip` from the [latest release](https://github.com/kuma-djt/lillignode/releases/latest). The release page lists the zip's SHA-256, so you can check the download (`Get-FileHash lillignode-0.1.0-windows-x64.zip` in PowerShell).
+2. Unzip it anywhere. It unpacks into one folder.
+3. Open Windows Terminal in that folder and run `.\lillignode.exe`.
+4. Press `n` to start an agent: Enter for Claude Code, then type the folder it should work in and press Enter. (Enter alone uses the folder Lillignode was started in.)
 
-```
-git clone https://github.com/kuma-djt/lillignode
-cd lillignode
-cargo build --release
-target\release\lillignode.exe
-```
+You need [Claude Code](https://claude.com/claude-code) installed and signed in. The program is not signed, so Windows may warn you the first time you run it.
 
-On macOS or Linux the last line is `target/release/lillignode`, and you are in untested territory.
+## Using it
 
 **On Windows, use Windows Terminal.** In the classic console window, pasting into Claude Code does not work (with or without Lillignode). In VS Code's terminal Ctrl+Q belongs to VS Code, so use F12.
 
@@ -79,9 +77,22 @@ lillignode --help
 lillignode --version
 ```
 
+## Build from source
+
+You need the [Rust toolchain](https://rustup.rs) and, to do anything useful, [Claude Code](https://claude.com/claude-code) installed and signed in.
+
+```
+git clone https://github.com/kuma-djt/lillignode
+cd lillignode
+cargo build --release
+target\release\lillignode.exe
+```
+
+On macOS or Linux the last line is `target/release/lillignode`, and you are in untested territory.
+
 ### On Windows, one extra step for status
 
-Claude Code's status only reaches Lillignode through Microsoft's newer pseudo-terminal, two files (`conpty.dll` and `OpenConsole.exe`) that must sit beside `lillignode.exe`. Without them agents run normally and every status shows Unknown. This script downloads them from Microsoft's Windows Terminal release, checks their hashes and Microsoft's signature, and puts them in place:
+Claude Code's status only reaches Lillignode through Microsoft's newer pseudo-terminal, two files (`conpty.dll` and `OpenConsole.exe`) that must sit beside `lillignode.exe`. The release zip has them; a build from source does not. Without them agents run normally and every status shows Unknown. This script downloads them from Microsoft's Windows Terminal release, checks their hashes and Microsoft's signature, and puts them in place:
 
 ```
 powershell -ExecutionPolicy Bypass -File scripts\package-windows.ps1 -BesideBuild
@@ -100,7 +111,7 @@ Menu key, then `v`. The agent in front goes on the left with the next agent besi
 - **Changing the view resizes every agent,** shown or not, and each redraws at its new size. While Lillignode knows an agent is waiting for you, it asks first. It cannot know that for an agent whose status is Unknown (every agent that is not Claude Code): those are resized without a question.
 - **What a narrower size costs.** Anything on an agent's screen beyond the new width is gone until the agent draws it again. Lines already in its history are kept whole.
 
-Checked by hand with Claude Code 2.1.325: both agents redraw cleanly at half width. Not yet checked: resizing while Claude Code is showing a permission prompt. If an agent looks wrong after a change, `v` goes back to one; most agents also redraw on Ctrl+L.
+Checked by hand with Claude Code 2.1.325: both agents redraw cleanly at half width, and on November 16, 2026, in Windows Terminal, a resize while Claude Code was showing a permission prompt left the prompt whole and answerable. If an agent looks wrong after a change, `v` goes back to one; most agents also redraw on Ctrl+L.
 
 ## Cost (experimental, off by default)
 
@@ -175,12 +186,16 @@ cargo run --release --example e2e
 
 The last one drives the real program against a stand-in agent and takes about two minutes. On Windows, run the packaging script with `-BesideBuild` first so it covers status. See [CONTRIBUTING.md](CONTRIBUTING.md) before sending a change, including the rule that tests never touch a real Claude Code setup.
 
+## How it is built
+
+Most of Lillignode's code is written by an AI coding agent, Claude Code, directed by a person. Every change passes the five checks above and independent reviews, and each release is checked by hand by a person against real Claude Code. What has not been checked yet is listed under [Known limits in 0.1](#known-limits-in-01).
+
 ## Licence
 
 Copyright (C) 2026 Turnbow Analytics LLC.
 
 Lillignode is free software under the [GNU Affero General Public License, version 3](LICENSE). It comes with no warranty.
 
-If the AGPL does not suit your use, Turnbow Analytics LLC can offer a commercial licence. Contributions are accepted under a contributor licence agreement so that this stays possible; see [CONTRIBUTING.md](CONTRIBUTING.md).
+If the AGPL does not suit your use, Turnbow Analytics LLC may offer a commercial licence. Contributions are accepted under a contributor licence agreement so that this stays possible; see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 The two Microsoft files the Windows packaging script downloads are Microsoft's, under the MIT licence: [packaging/windows/LICENSE-Microsoft-ConPTY.txt](packaging/windows/LICENSE-Microsoft-ConPTY.txt). They are not in this repository. The icon in `assets/` is Lillignode's own, under the same licence as the rest.

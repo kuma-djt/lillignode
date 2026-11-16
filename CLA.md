@@ -4,7 +4,7 @@ Version 0.1. **Draft: not yet reviewed by a lawyer.** It will be replaced by a r
 
 This agreement is between you ("You") and Turnbow Analytics LLC ("Turnbow Analytics"). It covers everything You submit to the Lillignode project, now or later, for inclusion in it: code, documentation, tests, and anything else ("Contributions").
 
-It exists for one reason. Lillignode is published under the GNU Affero General Public License, version 3, and Turnbow Analytics also offers it under commercial licences. To do both, Turnbow Analytics needs the right to license every Contribution under terms of its choosing. You keep ownership of what You write.
+It exists for one reason. Lillignode is published under the GNU Affero General Public License, version 3, and Turnbow Analytics may also offer it under commercial licences. To do both, Turnbow Analytics needs the right to license every Contribution under terms of its choosing. You keep ownership of what You write.
 
 ## 1. You keep your copyright
 
@@ -20,7 +20,7 @@ You grant Turnbow Analytics, and everyone who receives Lillignode from Turnbow A
 
 ## 4. What Turnbow Analytics commits to
 
-Turnbow Analytics will keep making Your Contribution, as included in Lillignode, available under the GNU Affero General Public License version 3 or another licence approved by the Open Source Initiative, in addition to any other terms it offers.
+Turnbow Analytics will keep making Your Contribution, as included in Lillignode, available under the GNU Affero General Public License version 3 or another licence approved by the Open Source Initiative, in addition to any other terms it may offer.
 
 ## 5. What You confirm
 

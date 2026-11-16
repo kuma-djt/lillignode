@@ -9,7 +9,7 @@ Thank you for looking. Lillignode is at v0.1 and rough, so bug reports are as we
 
 ## The contributor licence agreement
 
-Lillignode is published under the AGPL-3.0, and Turnbow Analytics LLC also sells commercial licences to people who cannot use the AGPL. That only works if Turnbow Analytics has the right to license every line of the code both ways.
+Lillignode is published under the AGPL-3.0, and Turnbow Analytics LLC may also offer commercial licences to people who cannot use the AGPL. That only works if Turnbow Analytics has the right to license every line of the code both ways.
 
 So **every contribution needs a signed contributor licence agreement**, [CLA.md](CLA.md), before it can be merged. In short: you keep the copyright in your contribution, and you give Turnbow Analytics LLC the right to use it and to license it to others under any terms, including commercial ones. Read the whole thing; the summary is not the agreement.
 
