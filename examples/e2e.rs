@@ -496,7 +496,7 @@ fn side_by_side(sb: &Sandbox, standin: &Path) {
     s.expect("now the menu offers it", "v two side by side");
     s.keys(b"v");
     s.expect("v says which two", "sizer 2 (work) and sizer (work) are side by side");
-    s.expect("and where typing goes", "typing goes to the one on the left");
+    s.never("the notice does not say where typing goes", "typing goes to the one");
     s.expect("and the way back", "If one draws badly, Ctrl+Q then v goes back to one.");
     s.expect("the agent in front has a heading that says so", " > TYPING GOES HERE  sizer 2 (work)");
     s.expect("the bar names the side", "Typing goes to sizer 2 (work), on the left.");
@@ -642,7 +642,7 @@ fn main() {
     s.expect("sidebar marks it", "Exited (error 3)");
     s.expect("bar offers what to do", "r start again");
     s.keys(b"r");
-    s.expect("a bare key at a stopped agent is not a command", "has stopped, so typing goes nowhere");
+    s.expect("a bare key at a stopped agent is not a command", "has stopped, so what you typed was not sent");
     s.raw(CTRL_Q);
     s.keys(b"r");
     s.expect("r starts it again", &format!("Started {shell} 2 (work) again."));

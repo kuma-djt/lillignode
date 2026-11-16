@@ -357,7 +357,7 @@ impl<B: AgentBackend> App<B> {
                 if matches!(key.code, KeyCode::Char(_) | KeyCode::Enter) {
                     let menu = self.config.menu_keys.first().map(|k| k.label()).unwrap_or_default();
                     self.notice = Some(format!(
-                        "{} has stopped, so typing goes nowhere. Nothing was sent. {menu} then r starts 
+                        "{} has stopped, so what you typed was not sent. {menu} then r starts
                          it again, or {menu} then x removes it.",
                         self.focused_label()
                     ));
@@ -619,11 +619,9 @@ impl<B: AgentBackend> App<B> {
                 ui::TWO_MIN_COLS
             ));
         } else if !two_before && self.two_shown() {
-            self.notice = Some(format!(
-                "There is room again: two agents are side by side. Typing goes to {}{}.",
-                self.focused_label(),
-                self.side_in_front()
-            ));
+            // Where typing goes is said by the headings and the bottom bar,
+            // which follow every change. A notice stays up after it is true.
+            self.notice = Some("There is room again: two agents are side by side.".to_string());
         }
     }
 
@@ -695,8 +693,10 @@ impl<B: AgentBackend> App<B> {
                 self.apply_size();
                 let label = |i: usize| self.ws.entries().get(i).map(Entry::label).unwrap_or_default();
                 self.notice = Some(format!(
-                    "{} and {} are side by side, and typing goes to the one on the left. Every agent was \
-                     told its new size. If one draws badly, {menu} then v goes back to one.",
+                    // Not where typing goes: that changes with Tab, and a
+                    // notice stays up. The headings and the bar say it.
+                    "{} and {} are side by side. Every agent was told its new size. If one draws badly, \
+                     {menu} then v goes back to one.",
                     label(pair.left),
                     label(pair.right)
                 ));
@@ -2654,7 +2654,7 @@ Cost",
         assert!(!app.quit, "nothing quit");
         assert!(matches!(app.mode, Mode::Normal), "no question was opened");
         let notice = app.notice.clone().unwrap();
-        assert!(notice.contains("has stopped, so typing goes nowhere. Nothing was sent."), "{notice}");
+        assert!(notice.contains("has stopped, so what you typed was not sent."), "{notice}");
         assert!(app.bar().starts_with("Ctrl+Q or F12: menu, then r start again"), "{}", app.bar());
 
         // Removing it is asked, even though it has stopped.
@@ -2668,6 +2668,37 @@ Cost",
         app.on_key(press(KeyCode::Char('x')));
         app.on_key(press(KeyCode::Char('y')));
         assert_eq!(app.ws.entries().len(), 1);
+    }
+
+    #[test]
+    fn no_notice_says_where_typing_goes_so_none_goes_stale_after_tab() {
+        // Found in the hand check: after Tab to the right, the notice still
+        // said typing went to the left. Where typing goes is for the
+        // headings and the bar, which follow every change.
+        let mut app = app_with_claude_agents(3);
+        app.set_window(WIDE);
+        let says_where = |app: &App<Fake>| {
+            app.notice_text().unwrap_or_default().to_lowercase().contains("typing goes")
+                || app.notice_text().unwrap_or_default().contains(", on the ")
+        };
+        app.on_key(press(KeyCode::F(12)));
+        app.on_key(press(KeyCode::Char('v')));
+        assert!(app.two_shown());
+        assert!(!says_where(&app), "{:?}", app.notice_text());
+        assert!(app.bar().ends_with(", on the left."), "{}", app.bar());
+
+        // Tab to the right: the bar follows, and no notice is left saying left.
+        app.on_key(press(KeyCode::F(12)));
+        app.on_key(press(KeyCode::Tab));
+        app.on_key(press(KeyCode::Esc));
+        assert!(app.bar().ends_with(", on the right."), "{}", app.bar());
+        assert!(!says_where(&app), "{:?}", app.notice_text());
+
+        // Narrowed and widened again: the notice says two are back, not where typing goes.
+        app.set_window(Rect::new(0, 0, 100, 30));
+        app.set_window(WIDE);
+        assert_eq!(app.notice.as_deref(), Some("There is room again: two agents are side by side."));
+        assert!(app.bar().ends_with(", on the right."), "{}", app.bar());
     }
 
     #[test]
@@ -2758,7 +2789,10 @@ Cost",
         }
         let notice = app.notice.clone().unwrap();
         assert!(notice.starts_with("Claude Code (c) and Claude Code (a) are side by side"), "{notice}");
-        assert!(notice.contains("typing goes to the one on the left"), "{notice}");
+        assert!(
+            !notice.to_lowercase().contains("typing"),
+            "where typing goes is not a notice's to say: {notice}"
+        );
         assert!(notice.ends_with("If one draws badly, Ctrl+Q then v goes back to one."), "{notice}");
         assert!(app.bar().ends_with("Typing goes to Claude Code (c), on the left."), "{}", app.bar());
 
@@ -2807,13 +2841,7 @@ Cost",
         app.set_window(WIDE);
         assert!(app.two_shown());
         assert_eq!(app.ws.size(), Size { rows: 26, cols: 50 });
-        assert_eq!(
-            app.notice.as_deref(),
-            Some(
-                "There is room again: two agents are side by side. Typing goes to Claude Code (b), on the \
-                 left."
-            )
-        );
+        assert_eq!(app.notice.as_deref(), Some("There is room again: two agents are side by side."));
         // Narrow again, and this time choose to stay with one: nothing is
         // resized, no question is asked, and widening brings nothing back.
         app.set_window(Rect::new(0, 0, 100, 30));
