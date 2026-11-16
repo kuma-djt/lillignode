@@ -4,7 +4,7 @@ Lillignode runs several AI coding agents at once in one terminal window. Each ag
 
 The name is said "Lilli-node": the g is silent, as in gnome.
 
-![Lillignode with four Claude Code agents: one waiting for you, one done, two idle](assets/screenshot.png)
+![Lillignode with four Claude Code agents: one working, one waiting for you, two idle](assets/screenshot.png)
 
 **Status: v0.1, rough.** Built and tested on Windows 11. It builds and its unit tests pass on Linux; nobody has run an agent in it there, and macOS is untested. Expect sharp edges.
 
