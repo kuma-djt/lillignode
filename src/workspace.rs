@@ -42,7 +42,14 @@ impl Status {
     }
 }
 
+/// Names one agent for as long as Lillignode runs. Its place in the list
+/// changes when another agent is closed, and its `AgentId` changes each time
+/// it is started; its key does neither, and is never given to another agent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct AgentKey(u64);
+
 pub struct Entry {
+    key: AgentKey,
     pub saved: SavedAgent,
     pub status: Status,
     pub term: Terminal,
@@ -59,6 +66,10 @@ pub struct Entry {
 }
 
 impl Entry {
+    pub fn key(&self) -> AgentKey {
+        self.key
+    }
+
     /// "Claude Code (api-refactor)": the name plus the folder's last part.
     pub fn label(&self) -> String {
         format!("{} ({})", self.saved.name, self.folder_name())
@@ -235,6 +246,8 @@ pub enum NoPair {
 pub struct Workspace<B: AgentBackend> {
     backend: B,
     entries: Vec<Entry>,
+    /// The key the next agent gets. Only ever counts up.
+    next_key: u64,
     focused: usize,
     /// Set while the user has asked for two agents side by side. Whether
     /// the window has room for them is the caller's to decide.
@@ -256,6 +269,7 @@ impl<B: AgentBackend> Workspace<B> {
         Self {
             backend,
             entries: Vec::new(),
+            next_key: 0,
             focused: 0,
             pair: None,
             size,
@@ -323,6 +337,22 @@ impl<B: AgentBackend> Workspace<B> {
         &self.entries
     }
 
+    /// Where the agent with this key is in the list now. None once it has
+    /// been closed.
+    pub fn index_of(&self, key: AgentKey) -> Option<usize> {
+        self.entries.iter().position(|e| e.key == key)
+    }
+
+    pub fn by_key(&self, key: AgentKey) -> Option<&Entry> {
+        self.entries.iter().find(|e| e.key == key)
+    }
+
+    fn new_key(&mut self) -> AgentKey {
+        let key = AgentKey(self.next_key);
+        self.next_key += 1;
+        key
+    }
+
     pub fn focused_index(&self) -> Option<usize> {
         (!self.entries.is_empty()).then_some(self.focused)
     }
@@ -385,7 +415,7 @@ impl<B: AgentBackend> Workspace<B> {
 
     /// Start a saved agent, continuing its conversation if it has one.
     /// Returns the entry and whether it was asked to continue.
-    fn open(&mut self, mut saved: SavedAgent) -> (Entry, bool) {
+    fn open(&mut self, key: AgentKey, mut saved: SavedAgent) -> (Entry, bool) {
         let continuing = is_claude_code(&saved.command) && saved.conversation.is_some();
         if is_claude_code(&saved.command) && saved.conversation.is_none() {
             // Saved before conversations were tracked: begin tracking now.
@@ -395,6 +425,7 @@ impl<B: AgentBackend> Workspace<B> {
         let (status, id) = self.try_start(&saved, how);
         let resuming_since = (continuing && id.is_some()).then(Instant::now);
         let entry = Entry {
+            key,
             usage: usage_reader(&saved),
             saved,
             status,
@@ -414,7 +445,8 @@ impl<B: AgentBackend> Workspace<B> {
         for mut agent in saved.agents {
             // A workspace saved before names were numbered may hold twins.
             agent.name = self.distinct_name(&agent.name, &agent.folder);
-            let (entry, continuing) = self.open(agent);
+            let key = self.new_key();
+            let (entry, continuing) = self.open(key, agent);
             match &entry.status {
                 Status::NotStarted(why) => report.not_restored.push((entry.label(), why.clone())),
                 _ => report.restored.push(Restored { label: entry.label(), continuing }),
@@ -438,7 +470,9 @@ impl<B: AgentBackend> Workspace<B> {
         let spec =
             AgentSpec { command: command.to_string(), args: launch_args(&saved, Conversation::New), folder };
         let id = self.backend.start(&spec, self.size)?;
+        let key = self.new_key();
         self.entries.push(Entry {
+            key,
             usage: usage_reader(&saved),
             saved,
             status: Status::Running,
@@ -461,7 +495,8 @@ impl<B: AgentBackend> Workspace<B> {
             return None;
         }
         let conversation = entry.saved.conversation.clone();
-        let (mut entry, continuing) = self.open(entry.saved.clone());
+        // Started again, it is still the same agent.
+        let (mut entry, continuing) = self.open(entry.key, entry.saved.clone());
         if entry.saved.conversation == conversation {
             // The same conversation, so the same record: what it had used
             // when Lillignode started, and whether its warning was given,
@@ -1311,5 +1346,35 @@ mod tests {
         assert_eq!(ws.focused().unwrap().term.scrolled_back(), 5);
         ws.send_to_focused(b"x");
         assert_eq!(ws.focused().unwrap().term.scrolled_back(), 0);
+    }
+
+    #[test]
+    fn an_agents_key_outlives_closing_another_and_starting_it_again() {
+        let mut ws = Workspace::new(Fake::default(), SIZE);
+        ws.restore(saved(
+            vec![agent("claude", "api"), agent("claude", "web"), agent("claude", "docs")],
+            Some(0),
+        ));
+        let keys: Vec<AgentKey> = ws.entries().iter().map(Entry::key).collect();
+        assert!(keys[0] != keys[1] && keys[1] != keys[2] && keys[0] != keys[2]);
+
+        // Closing the first moves the others up the list. Their keys stay.
+        assert_eq!(ws.close_focused().as_deref(), Some("Claude Code (api)"));
+        assert_eq!(ws.index_of(keys[0]), None);
+        assert!(ws.by_key(keys[0]).is_none());
+        assert_eq!(ws.index_of(keys[1]), Some(0));
+        assert_eq!(ws.index_of(keys[2]), Some(1));
+        assert_eq!(ws.by_key(keys[2]).unwrap().label(), "Claude Code (docs)");
+
+        // The agent in front stops and is started again: the same agent.
+        let id = ws.focused().unwrap().id.unwrap();
+        ws.handle(AgentEvent::Exited(id, Exit { code: 0 }));
+        assert_eq!(ws.restart_focused(), Some(true));
+        assert_eq!(ws.focused().unwrap().key(), keys[1]);
+
+        // A new agent never gets a key that was used before, the closed one's included.
+        ws.start_new("claude", root("new")).unwrap();
+        let new = ws.focused().unwrap().key();
+        assert!(!keys.contains(&new));
     }
 }
