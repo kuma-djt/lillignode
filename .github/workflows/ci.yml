@@ -1,12 +1,18 @@
-# Builds Lillignode, runs its unit tests, and runs the lint, on Windows and
-# Linux on every push. The format check runs once, on Linux.
+# Builds Lillignode, runs its unit tests and the lint, on Windows, Linux
+# and macOS on every push. The format check runs once, on Linux.
 #
-# What this does not do: it does not run the end-to-end check and it does not
-# run on macOS. docs/ci-coverage.md lists what has to run before any system is
-# called supported.
+# On Linux and macOS it also runs the end-to-end check, which drives the
+# real program against the stand-in agent. On Windows that check needs
+# Microsoft's two pseudo-terminal files beside the program to cover status,
+# so it is still run by hand there (docs/ci-coverage.md).
+#
+# The macOS runner is Apple Silicon. Its release build is kept as a
+# download of the run, for anyone who wants to try it: it is not a release,
+# is not signed, and has not been run by a person.
 #
 # Nothing here starts a real agent or reads a real Claude Code setup: unit
-# tests use fakes and throwaway folders only.
+# tests use fakes and throwaway folders, and the end-to-end check uses the
+# stand-in in a throwaway folder.
 
 name: CI
 
@@ -24,12 +30,12 @@ jobs:
   test:
     name: Build, unit tests and lint (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    timeout-minutes: 30
     strategy:
-      # One system failing must not hide what the other does.
+      # One system failing must not hide what the others do.
       fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-latest]
+        os: [windows-latest, ubuntu-latest, macos-latest]
     steps:
       # Pinned to a commit, not a tag, so the code that runs cannot change
       # under the same name. This is actions/checkout v4.4.0.
@@ -49,3 +55,22 @@ jobs:
       - name: Format
         if: runner.os == 'Linux'
         run: cargo fmt --check
+      - name: Release build
+        if: runner.os != 'Windows'
+        run: cargo build --release --all-targets --locked
+      - name: End-to-end check against the stand-in
+        if: runner.os != 'Windows'
+        run: cargo run --release --locked --example e2e
+      # Kept whether or not the checks above passed, so a build that fails
+      # a check can still be looked at. This is actions/upload-artifact v7.0.2.
+      - name: Keep the macOS build
+        if: runner.os == 'macOS' && !cancelled()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: lillignode-macos-arm64-untested
+          path: |
+            target/release/lillignode
+            LICENSE
+            README.md
+          if-no-files-found: error
+          retention-days: 30

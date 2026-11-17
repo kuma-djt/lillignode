@@ -140,13 +140,17 @@ mod tests {
 
     #[test]
     fn a_program_is_known_by_the_name_of_its_file_and_by_nothing_looser() {
-        for command in
-            ["claude", "claude.cmd", "CLAUDE.EXE", "C:\\tools\\claude.exe", "/usr/local/bin/claude"]
-        {
+        for command in ["claude", "claude.cmd", "CLAUDE.EXE", "/usr/local/bin/claude"] {
             assert_eq!(AgentKind::of_command(command), AgentKind::ClaudeCode, "{command}");
         }
-        for command in ["codex", "codex.cmd", "Codex.EXE", "C:\\npm\\codex.cmd", "/usr/local/bin/codex"] {
+        for command in ["codex", "codex.cmd", "Codex.EXE", "/usr/local/bin/codex"] {
             assert_eq!(AgentKind::of_command(command), AgentKind::Codex, "{command}");
+        }
+        // A path is split by the rules of the system Lillignode runs on, so
+        // a Windows path is a path only there.
+        if cfg!(windows) {
+            assert_eq!(AgentKind::of_command("C:\\tools\\claude.exe"), AgentKind::ClaudeCode);
+            assert_eq!(AgentKind::of_command("C:\\npm\\codex.cmd"), AgentKind::Codex);
         }
         for command in
             ["aider", "claude-wrapper", "cc.cmd", "myclaude", "", "claude code", "codex-cli", "xcodex"]

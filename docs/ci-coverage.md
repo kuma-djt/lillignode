@@ -1,6 +1,6 @@
 # What CI must cover
 
-Status: 2026-11-16. CI builds Lillignode, runs its unit tests and the lint on Windows and Linux, and the format check on Linux, on every push (`.github/workflows/ci.yml`). That is item 1 below, in a debug build, and nothing more: no end-to-end check, no probe, and no macOS. Everything else on this page has only been run by hand on one Windows 11 machine. macOS and Linux are untested and must not be called supported until the checks below run there.
+Status: 2026-11-17. CI builds Lillignode, runs its unit tests and the lint on Windows, Linux and macOS (Apple Silicon), and the format check on Linux, on every push (`.github/workflows/ci.yml`). On Linux and macOS it also runs the end-to-end check (item 2) in a release build, and the macOS release build is kept as a download of each run, unsigned and untested by a person. Not run anywhere automatically: the end-to-end check on Windows (it needs Microsoft's two files beside the program to cover status) and the probe (item 3). Everything else on this page has only been run by hand on one Windows 11 machine. macOS and Linux must not be called supported until a person has run an agent there.
 
 ## Why the other platforms are not a formality
 
