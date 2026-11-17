@@ -1004,9 +1004,23 @@ impl<B: AgentBackend> App<B> {
             ),
             Mode::Confirm(Confirm::Quit) => {
                 let running = self.ws.running_labels().len();
+                // Codex is never asked to continue a conversation, so what
+                // it was doing is not picked up when it comes back.
+                let fresh: Vec<String> = self
+                    .ws
+                    .entries()
+                    .iter()
+                    .filter(|e| e.is_running() && e.kind() == AgentKind::Codex)
+                    .map(Entry::label)
+                    .collect();
+                let fresh = match fresh.as_slice() {
+                    [] => String::new(),
+                    [one] => format!(" {one} starts a new conversation next time."),
+                    many => format!(" {} start new conversations next time.", many.join(", ")),
+                };
                 format!(
                     "Quit and stop {}? y / n   Not finished or not known: {}. {} back next time you \
-                     start Lillignode.",
+                     start Lillignode.{fresh}",
                     plural(running, "running agent", "running agents"),
                     self.unfinished().join(", "),
                     if running == 1 { "It comes" } else { "They come" },
@@ -3491,6 +3505,37 @@ Cost",
 
     fn codex_reports(app: &mut App<Fake>, id: u32, body: &str) {
         app.on_agent_event(AgentEvent::Output(AgentId(id), format!("\x1b]7501;{body}\x1b\\").into_bytes()));
+    }
+
+    #[test]
+    fn the_quit_question_says_a_codex_agent_starts_a_new_conversation_next_time() {
+        let mut app = app_with_claude_and_codex();
+        report(&mut app, 1, "state=working:app=claude-code");
+        codex_reports(&mut app, 2, "state=idle:app=codex");
+        app.on_key(press(KeyCode::F(12)));
+        app.on_key(press(KeyCode::Char('q')));
+        let bar = app.bar();
+        assert!(bar.starts_with("Quit and stop 2 running agents? y / n"), "{bar}");
+        assert!(bar.ends_with("They come back next time you start Lillignode. Codex (web) starts a new conversation next time."), "{bar}");
+        // Said of Codex only: Claude Code continues its conversation.
+        assert!(!bar.contains("Claude Code (a) starts"), "{bar}");
+
+        // Two Codex agents: both named, in one sentence.
+        app.on_key(press(KeyCode::Char('n')));
+        app.ws.start_new("codex", std::env::temp_dir().join("api")).unwrap();
+        app.on_key(press(KeyCode::F(12)));
+        app.on_key(press(KeyCode::Char('q')));
+        assert!(
+            app.bar().ends_with("Codex (web), Codex (api) start new conversations next time."),
+            "{}",
+            app.bar()
+        );
+
+        // None running: nothing said about it.
+        let mut app = app_with_claude_agents(1);
+        app.on_key(press(KeyCode::F(12)));
+        app.on_key(press(KeyCode::Char('q')));
+        assert!(app.bar().ends_with("It comes back next time you start Lillignode."), "{}", app.bar());
     }
 
     #[test]
