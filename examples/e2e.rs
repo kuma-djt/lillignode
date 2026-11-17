@@ -836,15 +836,26 @@ fn start_options(sb: &Sandbox, standin: &Path) {
         );
         s.keys(ESC);
 
-        // A launcher in a folder whose path holds an & starts: its path
-        // reaches the interpreter in quotes.
+        // A launcher in a folder with a space, given an option with a
+        // space: its path reaches the interpreter in quotes, and both hold.
+        let spaced = sb.root.join("two words");
+        std::fs::create_dir_all(&spaced).unwrap();
+        launcher(&spaced, standin, "teller", "args");
+        s.raw(CTRL_Q);
+        s.keys(b"n");
+        s.keys(format!("{}\r\"a b\" c\r\ry", spaced.join("teller").display()).as_bytes());
+        s.expect("a launcher in a folder with a space starts, its options whole", "STANDIN ARGS [a b][c]");
+
+        // In a folder whose path holds an &, npm's launchers would cut
+        // their own folder at it: refused before anything starts.
         let rd = sb.root.join("R&D");
         std::fs::create_dir_all(&rd).unwrap();
         launcher(&rd, standin, "teller", "args");
         s.raw(CTRL_Q);
         s.keys(b"n");
-        s.keys(format!("{}\rone\r\ry", rd.join("teller").display()).as_bytes());
-        s.expect("a launcher in a folder named R&D starts", "STANDIN ARGS [one]");
+        s.keys(format!("{}\rone\r\r", rd.join("teller").display()).as_bytes());
+        s.expect("a launcher in a folder named R&D is refused, and why", "the launcher's path holds \"&\"");
+        s.keys(ESC);
     }
     drop(s.quit("quit", true));
     let saved = std::fs::read_to_string(state.join("workspace.json")).unwrap();

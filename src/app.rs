@@ -11,7 +11,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Rect;
 
 use crate::action::Action;
-use crate::agent::{AgentBackend, AgentEvent, Size};
+use crate::agent::{AgentBackend, AgentEvent, Size, StartError};
 use crate::config::{Billing, Config};
 use crate::cost::{self, Cost, Usage, Waiting, WhyNot};
 use crate::input::Pasted;
@@ -1000,6 +1000,13 @@ impl<B: AgentBackend> App<B> {
                 self.notice =
                     self.ws.focused().map(|e| format!("Started {} in {}.", e.saved.name, folder.display()));
                 self.save_or_say();
+            }
+            // Refused for what was typed, not the folder: to the last line,
+            // whose n goes back to change it.
+            Err(why @ StartError::Refused(_)) => {
+                self.notice = Some(format!("Could not start {}: {why}. Nothing was started.", form.command));
+                form.step = Step::Check;
+                form.input.clear();
             }
             Err(why) => {
                 // Back to the folder, with what was typed, so it can be corrected.
@@ -3392,6 +3399,19 @@ Cost",
             bar.contains(r#"Options [-m]["two words]. There is a " with no partner; it was kept as part of the last option. n:"#),
             "{bar}"
         );
+    }
+
+    #[test]
+    fn a_start_refused_for_another_reason_than_the_folder_does_not_send_you_to_the_folder() {
+        let mut app = app_with_claude_agents(0);
+        for i in 0..crate::state::MOST_AGENTS {
+            app.ws.start_as_named("cmd", std::env::temp_dir().join(format!("f{i}"))).unwrap();
+        }
+        answer_form(&mut app, &["cmd", "", ""]);
+        let notice = app.notice.clone().unwrap();
+        assert!(notice.contains("keeps at most 64 agents"), "{notice}");
+        assert!(!notice.contains("Correct the folder"), "{notice}");
+        assert!(app.bar().starts_with("Start it as a plain program? y / n / k"), "{}", app.bar());
     }
 
     #[test]
