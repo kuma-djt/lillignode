@@ -1057,6 +1057,16 @@ fn main() {
     s.expect("still no Enter presses", "STATUS enters=0 pastes=2");
     s.keys(b"\r");
     s.expect("a typed Enter is still an Enter", "STATUS enters=1 pastes=2");
+    // Not on Windows: its pseudo-terminal splits what is written to it at a
+    // control character, so the text before it arrives as typing and the
+    // control key on its own. Lillignode cannot tell that from typing there.
+    if !cfg!(windows) {
+        s.raw(b"\x1b[200~ab\x04cd\rx\x1b[201~");
+        s.expect("a Ctrl+D inside a paste does not reach the agent", "PASTE 2 lines: abcd\\rx");
+        s.expect("and the user is told it was left out", "1 control character was left out (Ctrl+D).");
+        s.raw(b"\x1b[200~ef\x04gh\x1b[201~");
+        s.expect("on one line too", "PASTE 1 lines: efgh");
+    }
 
     s.new_agent("plain");
     s.expect("an agent that does not take pastes whole", "STANDIN READY echo-plain");

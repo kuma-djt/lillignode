@@ -13,6 +13,7 @@ use ratatui::layout::Rect;
 use crate::agent::{AgentBackend, AgentEvent, Size};
 use crate::config::{Billing, Config};
 use crate::cost::{self, Cost, Usage, Waiting, WhyNot};
+use crate::input::Pasted;
 use crate::keys;
 use crate::kind::AgentKind;
 use crate::look::Depth;
@@ -141,7 +142,7 @@ pub struct App<B: AgentBackend> {
     /// The window, as last told by `set_window`. Decides whether two
     /// agents fit side by side, and what size agents are given.
     window: Rect,
-    held_paste: Option<String>,
+    held_paste: Option<HeldPaste>,
     /// Where the workspace is saved, or why it cannot be.
     state_dir: Result<PathBuf, String>,
     /// The folder Lillignode was started in: the default for a new agent.
@@ -157,6 +158,51 @@ pub struct App<B: AgentBackend> {
     /// Windows only: Microsoft's newer pseudo-terminal is not beside
     /// `lillignode.exe`, so Claude Code's status cannot get through.
     pub newer_pty_missing: bool,
+}
+
+/// A paste waiting for the user to agree to it being sent line by line,
+/// and what to say about it once it is.
+#[derive(Default)]
+struct HeldPaste {
+    /// Tabs already turned into spaces.
+    text: String,
+    /// The sentence about control characters taken out, or empty.
+    left_out: String,
+    tabs: bool,
+}
+
+/// What a tab becomes in a paste sent as typed keys.
+const TAB_AS_SPACES: &str = "    ";
+/// Said after a paste whose tabs became spaces.
+const TABS_SAID: &str = " Its tabs were sent as spaces, so none was taken as a press of Tab.";
+
+/// "Ctrl+C, Ctrl+D", up to three different ones, then how many more.
+fn control_names(left_out: &[char]) -> String {
+    let mut names: Vec<String> = Vec::new();
+    for c in left_out {
+        let name = crate::input::control_name(*c);
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    let more = names.len().saturating_sub(3);
+    names.truncate(3);
+    let names = names.join(", ");
+    if more > 0 {
+        format!("{names} and {more} more")
+    } else {
+        names
+    }
+}
+
+/// " 2 control characters were left out (Ctrl+C, Ctrl+D).", or empty
+/// when none were. Starts with a space, to follow a sentence.
+fn left_out_sentence(left_out: &[char]) -> String {
+    match left_out.len() {
+        0 => String::new(),
+        1 => format!(" 1 control character was left out ({}).", control_names(left_out)),
+        n => format!(" {n} control characters were left out ({}).", control_names(left_out)),
+    }
 }
 
 fn plural(n: usize, one: &str, many: &str) -> String {
@@ -389,10 +435,14 @@ impl<B: AgentBackend> App<B> {
                         self.notice = Some("The view was left as it was. No agent was resized.".to_string());
                     }
                     Confirm::Paste => {
-                        let text = self.held_paste.take().unwrap_or_default();
+                        let HeldPaste { text, left_out, tabs } = self.held_paste.take().unwrap_or_default();
                         if yes {
                             self.ws.send_to_focused(text.replace('\n', "\r").as_bytes());
-                            self.notice = Some(format!("Pasted into {} line by line.", self.focused_label()));
+                            let tabs = if tabs { TABS_SAID } else { "" };
+                            self.notice = Some(format!(
+                                "Pasted into {} line by line.{left_out}{tabs}",
+                                self.focused_label()
+                            ));
                         } else {
                             self.notice = Some("Paste discarded. Nothing was sent.".to_string());
                         }
@@ -406,7 +456,12 @@ impl<B: AgentBackend> App<B> {
     /// Text arrived as a paste. It goes to the agent as one paste or, where
     /// that is impossible, only after the user agrees. Its line breaks are
     /// never passed on as Enter presses unasked.
-    pub fn on_paste(&mut self, text: String) {
+    ///
+    /// Control characters were already taken out (`input::Pasted`); what
+    /// was taken out is said. A paste sent as typed keys has its tabs
+    /// turned into spaces, so none is taken as a press of Tab.
+    pub fn on_paste(&mut self, pasted: Pasted) {
+        let Pasted { text, left_out } = pasted;
         if let Mode::NewAgent(form) = &mut self.mode {
             // A pasted folder path: take the first line only, and nothing
             // that draws no character. Such a character would put the
@@ -418,15 +473,33 @@ impl<B: AgentBackend> App<B> {
         }
         let can_take_it = self.focused_running() && !self.too_small;
         match self.mode {
+            Mode::Normal if can_take_it && text.is_empty() && !left_out.is_empty() => {
+                self.notice = Some(format!(
+                    "Nothing was pasted: the text was only control characters ({}). Nothing was sent.",
+                    control_names(&left_out)
+                ));
+            }
             Mode::Normal if can_take_it => {
                 let whole = self.ws.focused().is_some_and(|e| e.term.takes_pastes_whole());
+                let left_out = left_out_sentence(&left_out);
                 if whole {
                     let body = text.replace('\n', "\r");
                     self.ws.send_to_focused(format!("\x1b[200~{body}\x1b[201~").as_bytes());
-                } else if !text.contains('\n') {
+                    if !left_out.is_empty() {
+                        self.notice = Some(format!("Pasted into {}.{left_out}", self.focused_label()));
+                    }
+                    return;
+                }
+                let tabs = text.contains('\t');
+                let text = text.replace('\t', TAB_AS_SPACES);
+                if !text.contains('\n') {
                     self.ws.send_to_focused(text.as_bytes());
+                    if tabs || !left_out.is_empty() {
+                        let tabs = if tabs { TABS_SAID } else { "" };
+                        self.notice = Some(format!("Pasted into {}.{left_out}{tabs}", self.focused_label()));
+                    }
                 } else {
-                    self.held_paste = Some(text);
+                    self.held_paste = Some(HeldPaste { text, left_out, tabs });
                     self.mode = Mode::Confirm(Confirm::Paste);
                 }
             }
@@ -888,7 +961,7 @@ impl<B: AgentBackend> App<B> {
                 )
             }
             Mode::Confirm(Confirm::Paste) => {
-                let lines = self.held_paste.as_deref().map(|t| t.split('\n').count()).unwrap_or(0);
+                let lines = self.held_paste.as_ref().map(|p| p.text.split('\n').count()).unwrap_or(0);
                 format!(
                     "Paste {lines} lines into {} one line at a time? y / n   It does not take a paste as \
                      one block, so each line would be entered as if you pressed Enter after it.",
@@ -1713,6 +1786,77 @@ mod tests {
         app.on_paste("one\ntwo".into());
         app.on_key(press(KeyCode::Char('y')));
         assert_eq!(*sent.borrow(), vec!["one\rtwo".to_string()]);
+    }
+
+    #[test]
+    fn control_characters_never_reach_the_agent_and_the_user_is_told() {
+        // As typed keys: Ctrl+C would interrupt the agent.
+        let (mut app, sent) = app_with_agent();
+        app.on_paste("make\x03 test\x04".into());
+        assert_eq!(*sent.borrow(), vec!["make test".to_string()]);
+        let label = app.ws.focused().unwrap().label();
+        assert_eq!(
+            app.notice,
+            Some(format!("Pasted into {label}. 2 control characters were left out (Ctrl+C, Ctrl+D)."))
+        );
+
+        // Inside paste markers too, and an escape cannot end the paste.
+        let (mut app, sent) = app_with_agent();
+        output(&mut app, b"\x1b[?2004h");
+        app.on_paste("a\x1b[201~b\x1a".into());
+        assert_eq!(*sent.borrow(), vec!["\x1b[200~a[201~b\x1b[201~".to_string()]);
+        assert!(app
+            .notice
+            .as_deref()
+            .unwrap()
+            .ends_with("2 control characters were left out (Esc, Ctrl+Z)."));
+
+        // Only control characters: nothing is sent, and that is said.
+        let (mut app, sent) = app_with_agent();
+        app.on_paste("\x03\x03".into());
+        assert!(sent.borrow().is_empty());
+        assert_eq!(
+            app.notice.as_deref(),
+            Some("Nothing was pasted: the text was only control characters (Ctrl+C). Nothing was sent.")
+        );
+
+        // More than three different ones: the first three are named.
+        let (mut app, _) = app_with_agent();
+        app.on_paste("x\x01\x02\x03\x04\x05".into());
+        assert!(app.notice.as_deref().unwrap().ends_with("(Ctrl+A, Ctrl+B, Ctrl+C and 2 more)."));
+
+        // A clean paste says nothing, as before.
+        let (mut app, _) = app_with_agent();
+        app.notice = None;
+        app.on_paste("clean".into());
+        assert_eq!(app.notice, None);
+    }
+
+    #[test]
+    fn a_paste_sent_as_typed_keys_has_its_tabs_sent_as_spaces() {
+        let (mut app, sent) = app_with_agent();
+        app.on_paste("a\tb".into());
+        assert_eq!(*sent.borrow(), vec!["a    b".to_string()]);
+        assert!(app.notice.as_deref().unwrap().ends_with("so none was taken as a press of Tab."));
+
+        // Line by line: the count is said after the answer, and the
+        // question itself keeps its keys first.
+        let (mut app, sent) = app_with_agent();
+        app.on_paste("one\ttwo\x03\nthree".into());
+        assert!(app.bar().starts_with("Paste 2 lines into cmd"), "{}", app.bar());
+        app.on_key(press(KeyCode::Char('y')));
+        assert_eq!(*sent.borrow(), vec!["one    two\rthree".to_string()]);
+        let said = app.notice.clone().unwrap();
+        assert!(said.contains("line by line. 1 control character was left out (Ctrl+C)."), "{said}");
+        assert!(said.ends_with("press of Tab."), "{said}");
+
+        // Inside paste markers a tab is text, and is kept.
+        let (mut app, sent) = app_with_agent();
+        output(&mut app, b"\x1b[?2004h");
+        app.notice = None;
+        app.on_paste("a\tb".into());
+        assert_eq!(*sent.borrow(), vec!["\x1b[200~a\tb\x1b[201~".to_string()]);
+        assert_eq!(app.notice, None);
     }
 
     #[test]

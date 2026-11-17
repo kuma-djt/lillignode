@@ -16,7 +16,7 @@ The name is said "Lilli-node": the g is silent, as in gnome.
 - **Two side by side, when you want.** Menu key, then `v`: the agent in front on the left, the next one beside it, each half the width. `v` again goes back to one. See [Two side by side](#two-side-by-side).
 - **Come back to where you were.** Quit and start again: the same agents reopen in the same folders, and Claude Code continues each conversation. Any other agent, Codex included, is started again and begins a new conversation; Lillignode says which.
 - **Read back what scrolled away.** The last 5,000 lines per agent, with Shift+PgUp.
-- **Paste safely.** A multi-line paste reaches the agent as one paste, never as a string of Enter presses.
+- **Paste safely.** A multi-line paste reaches the agent as one paste, never as a string of Enter presses. Control characters are left out, and you are told when they were. Where a paste has to be sent as typed keys, its tabs are sent as spaces.
 - **Run any other command-line agent too.** If it reports its status in the open format, the sidebar shows it. If it does not, it runs all the same and its status shows Unknown.
 - **Cost, if you switch it on.** Experimental and off by default. See [Cost](#cost-experimental-off-by-default).
 
@@ -196,7 +196,7 @@ What to watch for:
 These are known and not yet fixed. Please do not report them as security problems.
 
 - **The saved workspace is trusted at launch.** When Lillignode starts, it runs the agents listed in its workspace file as they are written there: the command, its arguments, its folder and its conversation id. Anyone who can change that file can make Lillignode start a program the next time you open it. The file is in your own user folder (`lillignode --where` says where); keep it there and do not point `LILLIGNODE_STATE_DIR` at a shared folder.
-- **Pasted text keeps control characters.** Lillignode removes the escape character from a paste, so a paste cannot end itself early, but other control characters, such as Ctrl+C or Ctrl+D, reach the agent as they are. Paste only what you meant to type.
+- **A paste can still say anything in plain words.** Lillignode takes control characters (Ctrl+C, Ctrl+D, Escape and the like) out of every paste and says how many it left out, so a paste cannot interrupt an agent or speak to its terminal. Words that tell an agent to do something are passed on as they are. **On Windows this is not yet whole:** in a test through Windows' pseudo-terminal a paste arrived split at its control character, so the text before it was typed and the control key reached the agent. Paste only what you meant to type.
 - **Cost is experimental.** Its figures have not been compared with Claude Code's own `/usage`. Trust `/usage`.
 - **Only Windows has been run by a person.** Linux builds and passes the unit tests and the lint in CI. macOS is not built or tested at all. Nobody has started an agent in Lillignode on either. If you test it on one and it works, thanks. Please let me know.
 

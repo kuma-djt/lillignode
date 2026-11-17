@@ -21,12 +21,8 @@ use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifier
 #[derive(Debug, PartialEq)]
 pub enum Input {
     Key(KeyEvent),
-    /// Text that was pasted. Line breaks are `\n`. Never contains Escape.
-    Paste(String),
-    Resize {
-        cols: u16,
-        rows: u16,
-    },
+    Paste(Pasted),
+    Resize { cols: u16, rows: u16 },
 }
 
 const START: &str = "\x1b[200~";
@@ -51,6 +47,17 @@ fn as_text(key: &KeyEvent) -> Option<char> {
     }
 }
 
+/// The control character a key held with Ctrl stands for: Ctrl+D is 0x04.
+/// Inside pasted text a control character arrives as such a key.
+fn control_char(key: &KeyEvent) -> Option<char> {
+    match key.code {
+        KeyCode::Char(c) if key.modifiers.contains(KeyModifiers::CONTROL) && c.is_ascii_alphabetic() => {
+            Some(char::from(c.to_ascii_lowercase() as u8 - b'a' + 1))
+        }
+        _ => None,
+    }
+}
+
 /// The character a key contributes when matching a marker.
 fn marker_char(key: &KeyEvent) -> Option<char> {
     match key.code {
@@ -59,10 +66,56 @@ fn marker_char(key: &KeyEvent) -> Option<char> {
     }
 }
 
-fn clean(text: &str) -> String {
-    // Escape is removed so pasted text can never contain an end marker or
-    // any other instruction to the agent's terminal.
-    text.replace("\r\n", "\n").replace('\r', "\n").replace('\x1b', "")
+/// Text that was pasted, made safe to send. Line breaks are `\n`. It holds
+/// no control character but the line break and the tab: the rest were taken
+/// out, and are kept in `left_out`, in order, so the user can be told.
+///
+/// Taken out: everything below a space except line break and tab (Escape
+/// among them, so a paste can never end itself early or speak to the
+/// agent's terminal), Delete, and the one-character forms of the escape
+/// sequences (U+0080 to U+009F). Characters that change the direction of
+/// text are left in: they do nothing to the agent.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Pasted {
+    pub text: String,
+    pub left_out: Vec<char>,
+}
+
+impl From<&str> for Pasted {
+    fn from(raw: &str) -> Self {
+        let mut pasted = Pasted::default();
+        for c in raw.replace("\r\n", "\n").replace('\r', "\n").chars() {
+            if c.is_control() && c != '\n' && c != '\t' {
+                pasted.left_out.push(c);
+            } else {
+                pasted.text.push(c);
+            }
+        }
+        pasted
+    }
+}
+
+impl From<String> for Pasted {
+    fn from(raw: String) -> Self {
+        Pasted::from(raw.as_str())
+    }
+}
+
+/// How a control character is named to the user: by the key that types
+/// it where there is one, otherwise by its number.
+pub fn control_name(c: char) -> String {
+    match c {
+        '\x1b' => "Esc".to_string(),
+        '\x7f' => "Backspace".to_string(),
+        '\x00' => "Ctrl+@".to_string(),
+        '\x01'..='\x1a' => format!("Ctrl+{}", char::from(b'A' + c as u8 - 1)),
+        '\x1c'..='\x1f' => format!("Ctrl+{}", ['\\', ']', '^', '_'][c as usize - 0x1c]),
+        c => format!("U+{:04X}", c as u32),
+    }
+}
+
+fn clean(text: &str) -> Pasted {
+    Pasted::from(text)
 }
 
 #[derive(Default)]
@@ -105,7 +158,9 @@ impl PasteDetector {
                 Event::Key(key) if key.kind == KeyEventKind::Release => {}
                 Event::Key(key) => {
                     if let Some(text) = &mut self.paste {
-                        if let Some(c) = marker_char(&key) {
+                        // A control character is kept as the character, so
+                        // it is taken out and said with the rest.
+                        if let Some(c) = control_char(&key).or_else(|| marker_char(&key)) {
                             text.push(c);
                             if text.ends_with(END) {
                                 text.truncate(text.len() - END.len());
@@ -149,10 +204,20 @@ fn ends_with_marker(run: &[KeyEvent], n: usize) -> bool {
 
 /// Deliver a run of keys read together: as a paste if it can only have been
 /// one, otherwise key by key.
+///
+/// Text with a line break cannot be typing. Nor can text with a control key
+/// in it: a terminal that does not mark pastes sends the paste's control
+/// characters as keys held with Ctrl, in the same burst. Control keys alone
+/// (Ctrl+C held down, repeating) are still keys.
 fn flush_run(run: &mut Vec<KeyEvent>, out: &mut Vec<Input>) {
-    let text: Option<String> = run.iter().map(as_text).collect();
+    let text: Option<String> = run.iter().map(|k| control_char(k).or_else(|| as_text(k))).collect();
+    let pasted = |text: &str| {
+        let control = text.chars().any(|c| c.is_control() && c != '\n' && c != '\t');
+        let words = text.chars().any(|c| !c.is_control());
+        text.contains('\n') || (control && words)
+    };
     match text {
-        Some(text) if run.len() >= 2 && text.contains('\n') => out.push(Input::Paste(clean(&text))),
+        Some(text) if run.len() >= 2 && pasted(&text) => out.push(Input::Paste(clean(&text))),
         _ => out.extend(run.iter().copied().map(Input::Key)),
     }
     run.clear();
@@ -211,7 +276,10 @@ mod tests {
     }
 
     fn pastes(inputs: &[Input]) -> Vec<&str> {
-        inputs.iter().filter_map(|i| if let Input::Paste(t) = i { Some(t.as_str()) } else { None }).collect()
+        inputs
+            .iter()
+            .filter_map(|i| if let Input::Paste(t) = i { Some(t.text.as_str()) } else { None })
+            .collect()
     }
 
     fn enter_keys(inputs: &[Input]) -> usize {
@@ -291,7 +359,57 @@ mod tests {
     fn pasted_text_cannot_carry_an_escape() {
         let mut d = PasteDetector::default();
         let out = d.push_batch(vec![Event::Paste("a\x1b[201~b\r\nc".into())]);
-        assert_eq!(out, vec![Input::Paste("a[201~b\nc".into())]);
+        assert_eq!(out, vec![Input::Paste(Pasted { text: "a[201~b\nc".into(), left_out: vec!['\x1b'] })]);
+    }
+
+    #[test]
+    fn a_control_key_inside_a_marked_paste_is_counted_as_left_out() {
+        let mut d = PasteDetector::default();
+        let mut events = typed("\x1b[200~ab");
+        events.push(Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)));
+        events.extend(typed("cd\x1b[201~"));
+        let out = d.push_batch(events);
+        assert_eq!(out, vec![Input::Paste(Pasted { text: "abcd".into(), left_out: vec!['\x03'] })]);
+    }
+
+    #[test]
+    fn an_unmarked_burst_with_a_control_key_is_a_paste_and_the_key_is_left_out() {
+        let ctrl = |c| Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL));
+        let mut d = PasteDetector::default();
+        // One line, so no line break gives it away: the control key does.
+        let mut events = typed("ab");
+        events.push(ctrl('d'));
+        events.extend(typed("cd"));
+        assert_eq!(
+            d.push_batch(events),
+            vec![Input::Paste(Pasted { text: "abcd".into(), left_out: vec!['\x04'] })]
+        );
+        // Several lines with a control key: still one paste, no Enter keys.
+        let mut events = typed("one");
+        events.push(ctrl('C'));
+        events.extend(typed("\ntwo"));
+        let out = d.push_batch(events);
+        assert_eq!(enter_keys(&out), 0);
+        assert_eq!(pastes(&out), vec!["one\ntwo"]);
+        // Ctrl+C held down is the key, every time, never a paste.
+        let out = d.push_batch(vec![ctrl('c'), ctrl('c'), ctrl('c')]);
+        assert_eq!(out.len(), 3);
+        assert!(pastes(&out).is_empty());
+    }
+
+    #[test]
+    fn control_characters_are_taken_out_and_kept_to_be_named() {
+        let p = Pasted::from("a\x03b\tc\x04\x7f\u{9b}d\u{202e}e\n");
+        assert_eq!(p.text, "ab\tcd\u{202e}e\n", "line break, tab and direction marks stay");
+        assert_eq!(p.left_out, ['\x03', '\x04', '\x7f', '\u{9b}']);
+        let names: Vec<String> = p.left_out.iter().copied().map(control_name).collect();
+        assert_eq!(names, ["Ctrl+C", "Ctrl+D", "Backspace", "U+009B"]);
+        assert_eq!(control_name('\x1b'), "Esc");
+        assert_eq!(control_name('\x00'), "Ctrl+@");
+        assert_eq!(control_name('\x1a'), "Ctrl+Z");
+        assert_eq!(control_name('\x1f'), "Ctrl+_");
+        // A carriage return is a line break, not a control left out.
+        assert_eq!(Pasted::from("a\rb\r\nc"), Pasted { text: "a\nb\nc".into(), left_out: vec![] });
     }
 
     #[test]
