@@ -6,7 +6,7 @@ The name is said "Lilli-node": the g is silent, as in gnome.
 
 ![Four Claude Code agents: one working, one waiting for you, two idle](assets/screenshot.png)
 
-**Status: v0.1, rough.** Built and tested on Windows 11. It builds and its unit tests pass on Linux; nobody has run an agent in it there, and macOS is untested. Expect sharp edges.
+**Status: v0.1, rough.** Built and tested on Windows 11. It builds and passes its automated checks on Linux and macOS; nobody has run an agent in it on either. Expect sharp edges.
 
 ## What v0.1 does
 
@@ -16,7 +16,7 @@ The name is said "Lilli-node": the g is silent, as in gnome.
 - **Two side by side, when you want.** Menu key, then `v`: the agent in front on the left, the next one beside it, each half the width. `v` again goes back to one. See [Two side by side](#two-side-by-side).
 - **Come back to where you were.** Quit and start again: the same agents reopen in the same folders, and Claude Code continues each conversation. Any other agent, Codex included, is started again and begins a new conversation; Lillignode says which.
 - **Read back what scrolled away.** The last 5,000 lines per agent, with Shift+PgUp.
-- **Paste safely.** A multi-line paste reaches the agent as one paste, never as a string of Enter presses. Control characters are left out, and you are told when they were. Where a paste has to be sent as typed keys, its tabs are sent as spaces.
+- **Paste safely.** A multi-line paste reaches the agent as one paste, never as a string of Enter presses. Control characters are left out, and you are told when they were (not yet in every case on Windows: see Known limits). Where a paste has to be sent as typed keys, its tabs are sent as spaces.
 - **Run any other command-line agent too.** If it reports its status in the open format, the sidebar shows it. If it does not, it runs all the same and its status shows Unknown.
 - **Cost, if you switch it on.** Experimental and off by default. See [Cost](#cost-experimental-off-by-default).
 
@@ -198,7 +198,7 @@ These are known and not yet fixed. Please do not report them as security problem
 - **The saved workspace is trusted at launch, within limits.** When Lillignode starts, it runs the agents listed in its workspace file as they are written there: the command, its arguments and its folder. It checks the file first and starts nothing it would never have written itself: a control character in a name, command, argument or folder, a conversation id that is not one it writes, an argument a `.cmd` or `.bat` launcher would act on (`& | < > ^ % "` or a line break), more than 64 agents, or a file over 1 MB. Each such agent stays in the sidebar, not started, with the reason. But a well-formed entry naming another program is started: anyone who can change that file can make Lillignode start a program the next time you open it. The file is in your own user folder (`lillignode --where` says where); keep it there and do not point `LILLIGNODE_STATE_DIR` at a shared folder.
 - **A paste can still say anything in plain words.** Lillignode takes control characters (Ctrl+C, Ctrl+D, Escape and the like) out of every paste and says how many it left out, so a paste cannot interrupt an agent or speak to its terminal. Words that tell an agent to do something are passed on as they are. **On Windows this is not yet whole:** in a test through Windows' pseudo-terminal a paste arrived split at its control character, so the text before it was typed and the control key reached the agent. Paste only what you meant to type.
 - **Cost is experimental.** Its figures have not been compared with Claude Code's own `/usage`. Trust `/usage`.
-- **Only Windows has been run by a person.** Linux builds and passes the unit tests and the lint in CI. macOS is not built or tested at all. Nobody has started an agent in Lillignode on either. If you test it on one and it works, thanks. Please let me know.
+- **Only Windows has been run by a person.** Linux and macOS (Apple Silicon) build and pass the unit tests, the lint and the end-to-end check against a stand-in agent in CI. Nobody has started an agent in Lillignode on either. If you test it on one and it works, thanks. Please let me know.
 
 ## Other limits
 

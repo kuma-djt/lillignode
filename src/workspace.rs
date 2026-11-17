@@ -8,7 +8,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
-use crate::agent::{AgentBackend, AgentEvent, AgentId, AgentSpec, Exit, Size, StartError};
+use crate::agent::{AgentBackend, AgentEvent, AgentId, AgentSpec, Exit, Size, StartError, FIX_IN_THE_FILE};
 use crate::cost::{self, Cost};
 use crate::kind::AgentKind;
 use crate::state::{SavedAgent, SavedWorkspace, VERSION};
@@ -157,23 +157,22 @@ pub fn printable(text: &str) -> String {
 fn not_as_written(saved: &SavedAgent) -> Option<String> {
     let control = |text: &str| text.chars().any(char::is_control);
     let what = if control(&saved.name) {
-        "name"
+        "name holds"
     } else if control(&saved.command) {
-        "command"
+        "command holds"
     } else if saved.args.iter().any(|a| control(a)) {
-        "arguments"
+        "arguments hold"
     } else if control(&saved.folder.to_string_lossy()) {
-        "folder"
+        "folder holds"
     } else {
         return saved.conversation.as_deref().filter(|id| !is_conversation_id(id)).map(|_| {
-            "its saved conversation id is not one Lillignode writes. It was left as written, and no new \
-             conversation was begun in its place"
-                .to_string()
+            format!(
+                "its saved conversation id is not one Lillignode writes. It was left as written, and no new \
+                 conversation was begun in its place. {FIX_IN_THE_FILE}"
+            )
         });
     };
-    Some(format!(
-        "its saved {what} holds a control character, which Lillignode never writes. Nothing was run"
-    ))
+    Some(format!("its saved {what} a control character, which Lillignode never writes. {FIX_IN_THE_FILE}"))
 }
 
 /// A conversation id as Lillignode writes one: a UUID in its usual form.
@@ -496,7 +495,8 @@ impl<B: AgentBackend> Workspace<B> {
         }
         let keeps_conversations = kind_of(&saved).keeps_conversations();
         let continuing = keeps_conversations && saved.conversation.is_some();
-        if keeps_conversations && saved.conversation.is_none() {
+        // An entry that will be refused is not given a conversation either.
+        if keeps_conversations && saved.conversation.is_none() && not_as_written(&saved).is_none() {
             // Saved before conversations were tracked: begin tracking now.
             saved.conversation = Some(new_conversation_id());
         }
@@ -541,6 +541,13 @@ impl<B: AgentBackend> Workspace<B> {
 
     /// Start a new agent and put it in front. On failure nothing is added.
     pub fn start_new(&mut self, command: &str, folder: PathBuf) -> Result<(), StartError> {
+        // A workspace with more would not be started at the next launch.
+        if self.entries.len() >= crate::state::MOST_AGENTS {
+            return Err(StartError::Refused(format!(
+                "Lillignode keeps at most {} agents in a workspace, and that many are open. Close one first",
+                crate::state::MOST_AGENTS
+            )));
+        }
         let kind = AgentKind::of_command(command);
         let saved = SavedAgent {
             name: self.distinct_name(&kind.name(command), &folder),
@@ -938,6 +945,32 @@ mod tests {
     }
 
     #[test]
+    fn no_more_agents_are_opened_than_a_saved_workspace_may_hold() {
+        let mut ws = Workspace::new(Fake::default(), SIZE);
+        for i in 0..crate::state::MOST_AGENTS {
+            ws.start_new("claude", root(&format!("f{i}"))).unwrap();
+        }
+        let refused = ws.start_new("claude", root("one-more")).unwrap_err().to_string();
+        assert!(refused.starts_with("Lillignode keeps at most 64 agents"), "{refused}");
+        assert_eq!(ws.entries().len(), crate::state::MOST_AGENTS, "nothing was added");
+    }
+
+    #[test]
+    fn a_refused_agent_is_not_given_a_conversation() {
+        let mut ws = Workspace::new(Fake::default(), SIZE);
+        let mut a = agent("claude", "api");
+        a.conversation = None;
+        a.name = "bad\x07".into();
+        ws.restore(saved(vec![a], Some(0)));
+        assert_eq!(ws.to_saved().agents[0].conversation, None);
+        let why = match &ws.entries()[0].status {
+            Status::NotStarted(why) => why.clone(),
+            other => panic!("{other:?}"),
+        };
+        assert!(why.ends_with("r will not help: x removes it, or quit Lillignode, correct workspace.json (lillignode --where says where it is) and start Lillignode again"), "{why}");
+    }
+
+    #[test]
     fn unknown_lines_survive_restore_restart_and_save() {
         let mut ws = Workspace::new(Fake::default(), SIZE);
         let mut a = agent("claude", "api");
@@ -976,11 +1009,12 @@ mod tests {
         let report = ws.restore(saved(agents, Some(0)));
         let why: Vec<&str> = report.not_restored.iter().map(|(_, why)| why.as_str()).collect();
         assert_eq!(why.len(), 6, "{why:?}");
-        for (i, what) in ["name", "command", "arguments", "folder"].iter().enumerate() {
+        for (i, what) in ["name holds", "command holds", "arguments hold", "folder holds"].iter().enumerate()
+        {
             assert_eq!(
                 why[i],
                 format!(
-                    "its saved {what} holds a control character, which Lillignode never writes. Nothing was run"
+                    "its saved {what} a control character, which Lillignode never writes. {FIX_IN_THE_FILE}"
                 )
             );
         }

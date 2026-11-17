@@ -2156,7 +2156,7 @@ Cost",
         let rows = side(&app);
         assert_eq!(rows[0], " Lillignode  1 NEEDS YOU");
         assert_eq!(rows[1], " 3 more above");
-        assert_eq!(rows[2], "  Claude Code NEEDS YOU");
+        assert_eq!(rows[2], "  Claude Code (a) NEEDS YOU");
         assert!(rows[7].starts_with(">/\\z Claude Code"), "{rows:#?}");
         assert_eq!(rows[8], "  f  Idle");
         // Tab round to a: the list follows it, and says what is below.

@@ -94,14 +94,16 @@ fn launcher_refusal(program: &Path, args: &[String]) -> Option<String> {
     if let Some(c) = program.to_string_lossy().chars().find(|c| NOT_FOR_A_LAUNCHER.contains(c)) {
         return Some(format!(
             "the path of its launcher holds {}, which Lillignode will not pass to the command \
-             interpreter. Nothing was run",
+             interpreter. Nothing was run. Start the program itself rather than its launcher, or move the \
+             launcher to a folder whose path has no such character",
             name(c)
         ));
     }
     let c = args.iter().flat_map(|a| a.chars()).find(|c| NOT_FOR_A_LAUNCHER.contains(c))?;
     Some(format!(
-        "its arguments hold {}, which Lillignode will not pass to a .cmd or .bat launcher. Nothing was run",
-        name(c)
+        "its arguments hold {}, which Lillignode will not pass to a .cmd or .bat launcher. {}",
+        name(c),
+        crate::agent::FIX_IN_THE_FILE
     ))
 }
 
@@ -226,11 +228,14 @@ mod tests {
         for bad in ["a&b", "a|b", "<", ">", "^", "%PATH%", "\"", "a\nb", "a\rb"] {
             let why = launcher_refusal(launcher, &args(&["ok", bad])).unwrap_or_default();
             assert!(why.starts_with("its arguments hold "), "{bad:?}: {why}");
-            assert!(why.ends_with(".cmd or .bat launcher. Nothing was run"), "{bad:?}: {why}");
+            assert!(why.contains(".cmd or .bat launcher. Nothing was run."), "{bad:?}: {why}");
         }
         assert_eq!(
             launcher_refusal(launcher, &args(&["x&y"])).unwrap(),
-            "its arguments hold \"&\", which Lillignode will not pass to a .cmd or .bat launcher. Nothing was run"
+            format!(
+                "its arguments hold \"&\", which Lillignode will not pass to a .cmd or .bat launcher. {}",
+                crate::agent::FIX_IN_THE_FILE
+            )
         );
         assert!(launcher_refusal(launcher, &args(&["a\nb"])).unwrap().contains("a line break"));
         // The launcher's own path goes through the interpreter too.

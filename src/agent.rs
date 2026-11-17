@@ -58,6 +58,12 @@ impl fmt::Display for StartError {
     }
 }
 
+/// What to do about a saved entry Lillignode refuses to start. Starting it
+/// again cannot help: the entry is the cause, and a running Lillignode would
+/// save its own copy over a fix made to the file meanwhile.
+pub const FIX_IN_THE_FILE: &str = "Nothing was run. r will not help: x removes it, or quit Lillignode, \
+    correct workspace.json (lillignode --where says where it is) and start Lillignode again";
+
 /// How an agent process ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Exit {

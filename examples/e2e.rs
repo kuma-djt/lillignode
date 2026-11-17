@@ -964,6 +964,7 @@ fn main() {
     )
     .unwrap();
     let mut s = Session::start_in(&sb, &refused_state);
+    s.expect("Lillignode is up", "Ctrl+Q or F12:");
     if cfg!(windows) {
         s.expect(
             "an argument a .cmd launcher would act on: not started, and why",

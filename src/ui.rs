@@ -193,7 +193,7 @@ fn more_rows(hidden: &[Entry], where_: &str, width: usize, p: Palette) -> Vec<Li
     let waiting: Vec<&Entry> = hidden.iter().filter(|e| e.needs_you().is_some()).collect();
     let who = match waiting.as_slice() {
         [] => return rows,
-        [one] => format!("{}{} NEEDS YOU", " ".repeat(DETAIL_AT), one.name()),
+        [one] => format!("{}{} NEEDS YOU", " ".repeat(DETAIL_AT), one.label()),
         many => format!("{}{} of them NEED YOU", " ".repeat(DETAIL_AT), many.len()),
     };
     rows.push(Line::from(Span::styled(format!("{:<width$}", clip(&who, width)), p.needs_you_block())));

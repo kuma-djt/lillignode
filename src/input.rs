@@ -205,23 +205,36 @@ fn ends_with_marker(run: &[KeyEvent], n: usize) -> bool {
 /// Deliver a run of keys read together: as a paste if it can only have been
 /// one, otherwise key by key.
 ///
-/// Text with a line break cannot be typing. Nor can text with a control key
-/// in it: a terminal that does not mark pastes sends the paste's control
-/// characters as keys held with Ctrl, in the same burst. Control keys alone
-/// (Ctrl+C held down, repeating) are still keys.
+/// Text keys with a line break cannot be typing. Nor can several words' worth
+/// of text with a control key in it: a terminal that does not mark pastes
+/// sends a paste's control characters as keys held with Ctrl, in the same
+/// burst. A control key read with a little typing (a letter, then Ctrl+C or
+/// the menu key, in one read over a slow link) is still keys.
 fn flush_run(run: &mut Vec<KeyEvent>, out: &mut Vec<Input>) {
-    let text: Option<String> = run.iter().map(|k| control_char(k).or_else(|| as_text(k))).collect();
+    let plain: Option<String> = run.iter().map(as_text).collect();
+    if let Some(text) = plain.filter(|t| run.len() >= 2 && t.contains('\n')) {
+        out.push(Input::Paste(clean(&text)));
+        run.clear();
+        return;
+    }
+    // Ctrl+I, Ctrl+J and Ctrl+M are Tab and Enter: as keys, not text.
+    let control = |k: &KeyEvent| control_char(k).filter(|c| !matches!(c, '\t' | '\n' | '\r'));
+    let text: Option<String> = run.iter().map(|k| control(k).or_else(|| as_text(k))).collect();
     let pasted = |text: &str| {
         let control = text.chars().any(|c| c.is_control() && c != '\n' && c != '\t');
-        let words = text.chars().any(|c| !c.is_control());
-        text.contains('\n') || (control && words)
+        let words = text.chars().filter(|c| !c.is_control()).count() >= PASTE_TEXT;
+        control && words
     };
     match text {
-        Some(text) if run.len() >= 2 && pasted(&text) => out.push(Input::Paste(clean(&text))),
+        Some(text) if pasted(&text) => out.push(Input::Paste(clean(&text))),
         _ => out.extend(run.iter().copied().map(Input::Key)),
     }
     run.clear();
 }
+
+/// How many characters of text a burst with a control key in it needs
+/// before it is taken as a paste.
+const PASTE_TEXT: usize = 4;
 
 /// Read the keyboard on its own thread and send what arrives, with the time
 /// it was read.
@@ -395,6 +408,22 @@ mod tests {
         let out = d.push_batch(vec![ctrl('c'), ctrl('c'), ctrl('c')]);
         assert_eq!(out.len(), 3);
         assert!(pastes(&out).is_empty());
+        // A letter and then Ctrl+C, or the menu key, read together: keys.
+        for key in ['c', 'q'] {
+            let mut events = typed("y");
+            events.push(ctrl(key));
+            let out = d.push_batch(events);
+            assert_eq!(out.len(), 2, "{key}");
+            assert!(pastes(&out).is_empty(), "{key}");
+        }
+        // Enter and then Ctrl+C: keys, as before.
+        let mut events = typed("\n");
+        events.push(ctrl('c'));
+        assert!(pastes(&d.push_batch(events)).is_empty());
+        // Ctrl+J is Enter: with a little text, keys, not a paste of two lines.
+        let mut events = typed("x");
+        events.push(ctrl('j'));
+        assert!(pastes(&d.push_batch(events)).is_empty());
     }
 
     #[test]
