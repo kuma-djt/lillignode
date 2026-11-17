@@ -10,6 +10,7 @@ use std::time::{Duration, Instant, SystemTime};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Rect;
 
+use crate::action::Action;
 use crate::agent::{AgentBackend, AgentEvent, Size};
 use crate::config::{Billing, Config};
 use crate::cost::{self, Cost, Usage, Waiting, WhyNot};
@@ -529,12 +530,34 @@ impl<B: AgentBackend> App<B> {
             KeyCode::Char('n') => {
                 self.mode = Mode::NewAgent(NewAgent { command: None, input: String::new() });
             }
-            KeyCode::Tab => self.ws.focus_next(),
-            KeyCode::BackTab => self.ws.focus_previous(),
+            KeyCode::Tab => self.act(Action::Next),
+            KeyCode::BackTab => self.act(Action::Previous),
             KeyCode::PageUp | KeyCode::PageDown | KeyCode::Home | KeyCode::Up | KeyCode::Down => {
                 self.history_key(key)
             }
-            KeyCode::Char('r') => {
+            KeyCode::Char('r') => self.act(Action::StartAgain),
+            KeyCode::Char('x') if self.ws.focused().is_some() => self.act(Action::Close),
+            KeyCode::Char('s') => {
+                if self.ws.focused().is_some() {
+                    self.mode = Mode::StatusReport;
+                } else {
+                    self.refuse("There is no agent to show a status report for.".to_string());
+                }
+            }
+            KeyCode::Char('v') if self.ws.pair().is_some() => self.act(Action::ShowOne),
+            KeyCode::Char('v') => self.act(Action::ShowTwo),
+            KeyCode::Char('q') => self.act(Action::Quit),
+            _ => {}
+        }
+    }
+
+    /// Do what the user asked for. The rules about when to ask first and
+    /// when to refuse are here; the keys that ask are in `command`.
+    fn act(&mut self, action: Action) {
+        match action {
+            Action::Next => self.ws.focus_next(),
+            Action::Previous => self.ws.focus_previous(),
+            Action::StartAgain => {
                 if let Some(continuing) = self.ws.restart_focused() {
                     self.notice = self.ws.focused().map(|e| match &e.status {
                         Status::NotStarted(why) => {
@@ -556,31 +579,22 @@ impl<B: AgentBackend> App<B> {
             }
             // Always asked: closing takes the agent and its conversation out
             // of the workspace, and it does not come back.
-            KeyCode::Char('x') if self.ws.focused().is_some() => self.mode = Mode::Confirm(Confirm::Close),
-            KeyCode::Char('s') => {
-                if self.ws.focused().is_some() {
-                    self.mode = Mode::StatusReport;
-                } else {
-                    self.refuse("There is no agent to show a status report for.".to_string());
-                }
+            Action::Close => self.mode = Mode::Confirm(Confirm::Close),
+            // Changing the view tells every agent a new size, and each
+            // redraws. While one is waiting for an answer, that is asked
+            // about first. A change that would be refused anyway is refused
+            // at once, without a question.
+            Action::ShowOne if !self.two_shown() => {
+                // Two were asked for and the window has no room, so one is
+                // on screen already. Nothing is resized: this only stops two
+                // coming back when the window is widened.
+                self.ws.show_one();
+                self.notice = Some(
+                    "One agent on screen. Two side by side will not come back when the window is widened. No agent was resized."
+                        .to_string(),
+                );
             }
-            KeyCode::Char('v') => {
-                // Changing the view tells every agent a new size, and each
-                // redraws. While one is waiting for an answer, that is asked
-                // about first. A change that would be refused anyway is
-                // refused at once, without a question.
-                if self.ws.pair().is_some() && !self.two_shown() {
-                    // Two were asked for and the window has no room, so one
-                    // is on screen already. Nothing is resized: this only
-                    // stops two coming back when the window is widened.
-                    self.ws.show_one();
-                    self.notice = Some(
-                        "One agent on screen. Two side by side will not come back when the window is \
-                         widened. No agent was resized."
-                            .to_string(),
-                    );
-                    return;
-                }
+            Action::ShowOne | Action::ShowTwo => {
                 let would_change = self.ws.pair().is_some() || self.can_show_two().is_ok();
                 if would_change && self.needs_you_count() > 0 {
                     self.mode = Mode::Confirm(Confirm::View);
@@ -588,7 +602,7 @@ impl<B: AgentBackend> App<B> {
                     self.change_view();
                 }
             }
-            KeyCode::Char('q') => {
+            Action::Quit => {
                 // Every running agent is stopped either way; the question is
                 // asked only when one may be stopped mid-request.
                 if self.unfinished().is_empty() {
@@ -597,7 +611,6 @@ impl<B: AgentBackend> App<B> {
                     self.mode = Mode::Confirm(Confirm::Quit);
                 }
             }
-            _ => {}
         }
     }
 
