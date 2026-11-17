@@ -835,12 +835,23 @@ fn start_options(sb: &Sandbox, standin: &Path) {
             "Esc: cancel   Take out the \"&\": this program is a launcher",
         );
         s.keys(ESC);
+
+        // A launcher in a folder whose path holds an & starts: its path
+        // reaches the interpreter in quotes.
+        let rd = sb.root.join("R&D");
+        std::fs::create_dir_all(&rd).unwrap();
+        launcher(&rd, standin, "teller", "args");
+        s.raw(CTRL_Q);
+        s.keys(b"n");
+        s.keys(format!("{}\rone\r\ry", rd.join("teller").display()).as_bytes());
+        s.expect("a launcher in a folder named R&D starts", "STANDIN ARGS [one]");
     }
     drop(s.quit("quit", true));
     let saved = std::fs::read_to_string(state.join("workspace.json")).unwrap();
     check("the options are saved as split", saved.contains("\"two three\""), &saved);
     check("and the stated kind", saved.contains("\"kind\": \"claude-code\""), &saved);
-    check("only two agents were started", saved.matches("\"command\"").count() == 2, &saved);
+    let started = if cfg!(windows) { 3 } else { 2 };
+    check("only the agents asked for were started", saved.matches("\"command\"").count() == started, &saved);
 }
 
 fn contains(hay: &[u8], needle: &[u8]) -> bool {
@@ -863,10 +874,9 @@ fn main() {
     assert!(standin.is_file(), "build the stand-in first: {}", standin.display());
     let shell = if cfg!(windows) { "cmd" } else { "sh" };
 
-    // macOS gives each user a long temporary folder, and a notice that
-    // names a file in it is shortened to fit. /tmp keeps paths short there.
-    let temp = if cfg!(target_os = "macos") { PathBuf::from("/tmp") } else { std::env::temp_dir() };
-    let root: PathBuf = temp.join(format!("lillignode-e2e-{}", std::process::id()));
+    // The system's own temporary folder, long as it is on macOS: a notice
+    // naming a file in it must still keep its reason.
+    let root: PathBuf = std::env::temp_dir().join(format!("lillignode-e2e-{}", std::process::id()));
     let sb = Sandbox {
         exe,
         state: root.join("state"),
@@ -995,7 +1005,7 @@ fn main() {
         "its own screen gives the reason",
         "nosuchagent (work) was not started: \"nosuchagent\" is not installed or not on PATH.",
     );
-    s.expect("and what to do", "then r to try again. Or the menu key, then x to remove it.");
+    s.expect("and what to do", "then r starts it again. Or the menu key, then x removes it.");
     s.keys(b"\t");
     s.expect("missing folder gets its own reason", "does not exist");
     std::fs::create_dir_all(&gone).unwrap();
@@ -1043,6 +1053,7 @@ fn main() {
         "a control character in a saved name: not started, and why",
         "bell  (work) was not started: its saved name holds a control character, which Lillignode never writes.",
     );
+    s.never("it gives no second way out that r would not take", "then r starts it again");
     s.keys(ESC);
     drop(s.quit("quit", cfg!(not(windows))));
     let saved = std::fs::read_to_string(&refused_file).unwrap();
@@ -1427,7 +1438,10 @@ fn main() {
     s.expect("and why it was not understood", "state \"pondering\" is one Lillignode does not know");
     s.expect("who sent the last report it could read", "Sent by: Claude Code.");
     s.expect("and counts background-task reports", "(1 about its background tasks");
-    s.expect("the bar says how to leave", "STATUS REPORT of Claude Code (work).  Any key: back to the agent");
+    s.expect(
+        "the bar says how to leave",
+        "STATUS REPORT  Any key: back to the agent.  Of Claude Code (work).",
+    );
     s.keys(b"z");
     s.expect("any key goes back to the agent", "Typing goes to Claude Code (work)");
     s.keys(b"c");

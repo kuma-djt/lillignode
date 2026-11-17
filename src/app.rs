@@ -289,18 +289,22 @@ fn ago(when: Option<SystemTime>) -> String {
 /// What to say about a saved workspace that could not be read. None when it
 /// was read normally or there was none.
 pub fn load_problem_text(outcome: &LoadOutcome) -> Option<String> {
+    // The kept file is named, not its whole path: a notice too long for its
+    // rows loses its middle, and a long folder would push the reason out.
+    // It sits beside the workspace file, which `lillignode --where` names.
+    let kept = |path: &Path| path.file_name().unwrap_or(path.as_os_str()).to_string_lossy().into_owned();
     match outcome {
         LoadOutcome::Nothing | LoadOutcome::Loaded => None,
         LoadOutcome::UsedPrevious { unreadable_kept_as, previous_saved, why } => Some(format!(
             "Your saved workspace could not be read: {why}. Loaded the previous copy, saved {}. \
-             The unreadable file was kept as {}.",
+             The unreadable file was kept beside it, as {}.",
             ago(*previous_saved),
-            unreadable_kept_as.display()
+            kept(unreadable_kept_as)
         )),
         LoadOutcome::Lost { unreadable_kept_as, why } => Some(format!(
             "Your saved workspace could not be read: {why}. There is no earlier copy, so the \
-             workspace starts empty. The unreadable file was kept as {}.",
-            unreadable_kept_as.display()
+             workspace starts empty. The unreadable file was kept beside it, as {}.",
+            kept(unreadable_kept_as)
         )),
     }
 }
@@ -702,8 +706,11 @@ impl<B: AgentBackend> App<B> {
     /// The status report scrolls with the history keys. Any other key
     /// closes it and is not passed on. A report that fits does not move.
     fn report_key(&mut self, key: KeyEvent) {
+        // A report that fits closes on any key, as the bar says.
         let view = ui::report_view(&self.status_report_text(), self.window);
-        let Some((lines, page)) = view.filter(|_| self.is_scroll_key(&key)) else {
+        let Some((lines, page)) =
+            view.filter(|(lines, page)| lines.len() > *page && self.is_scroll_key(&key))
+        else {
             self.mode = Mode::Normal;
             return;
         };
@@ -1072,18 +1079,20 @@ impl<B: AgentBackend> App<B> {
                 format!("{}  {} two side by side", menu_line(), key("v"))
             }
             Mode::Menu => menu_line(),
+            // The way back first, so a narrow window never cuts it off;
+            // the agent's name, which may be long, last.
             Mode::StatusReport if self.report_scrolls() => format!(
-                "{} of {}.  {} scroll   {}: back to the agent",
+                "{}  {}: back to the agent   {} scroll.  Of {}.",
                 mode("STATUS REPORT"),
-                self.focused_label(),
+                key("Any other key"),
                 ["PgUp", "PgDn", "Up", "Down", "Home"].map(key).join(" "),
-                key("any other key")
+                self.focused_label(),
             ),
             Mode::StatusReport => format!(
-                "{} of {}.  {}: back to the agent",
+                "{}  {}: back to the agent.  Of {}.",
                 mode("STATUS REPORT"),
+                key("Any key"),
                 self.focused_label(),
-                key("Any key")
             ),
             Mode::History => {
                 let back = self.ws.focused().map(|e| e.term.scrolled_back()).unwrap_or(0);
@@ -1158,13 +1167,14 @@ impl<B: AgentBackend> App<B> {
             ),
             Mode::Confirm(Confirm::Quit) => {
                 let running = self.ws.running_labels().len();
-                // Codex is never asked to continue a conversation, so what
-                // it was doing is not picked up when it comes back.
+                // Only Claude Code is asked to continue its conversation.
+                // Every other agent begins afresh, so what it was doing is
+                // not picked up when it comes back.
                 let fresh: Vec<String> = self
                     .ws
                     .entries()
                     .iter()
-                    .filter(|e| e.is_running() && e.kind() == AgentKind::Codex)
+                    .filter(|e| e.is_running() && !e.kind().keeps_conversations())
                     .map(Entry::label)
                     .collect();
                 let fresh = match fresh.as_slice() {
@@ -2177,7 +2187,7 @@ mod tests {
         app.on_key(press(KeyCode::F(12)));
         app.on_key(press(KeyCode::Char('s')));
         assert!(matches!(app.mode, Mode::StatusReport));
-        assert!(app.bar().starts_with("STATUS REPORT of cmd"), "{}", app.bar());
+        assert!(app.bar().starts_with("STATUS REPORT  Any key: back to the agent.  Of cmd"), "{}", app.bar());
         let text = app.status_report_text();
         assert!(text.contains("Cost: off."), "{text}");
         app.on_key(press(KeyCode::Char('z')));
@@ -2194,7 +2204,13 @@ mod tests {
         app.on_key(press(KeyCode::Char('s')));
         let (lines, page) = crate::ui::report_view(&app.status_report_text(), small).unwrap();
         assert!(lines.len() > page, "the test needs a report that does not fit");
-        assert!(app.bar().contains("PgUp PgDn Up Down Home scroll   any other key: back"), "{}", app.bar());
+        assert!(
+            app.bar().starts_with(
+                "STATUS REPORT  Any other key: back to the agent   PgUp PgDn Up Down Home scroll.  Of cmd"
+            ),
+            "{}",
+            app.bar()
+        );
         let foot = |app: &App<Fake>| screen(app, small.width, small.height)[8].trim().to_string();
         assert_eq!(foot(&app), format!("│  lines 1 to {page} of {}", lines.len()));
 
@@ -2224,12 +2240,13 @@ mod tests {
         app.on_key(press(KeyCode::Char('s')));
         assert_eq!(app.report_top, 0);
 
-        // A report that fits: the scroll keys do nothing and do not close it.
+        // A report that fits: any key closes it, the scroll keys too, as the
+        // bar says.
         app.set_window(Rect::new(0, 0, 200, 80));
-        assert!(app.bar().ends_with("Any key: back to the agent"), "{}", app.bar());
+        assert!(app.bar().starts_with("STATUS REPORT  Any key: back to the agent.  Of cmd"), "{}", app.bar());
         app.on_key(press(KeyCode::PageDown));
-        assert_eq!(app.report_top, 0);
-        assert!(matches!(app.mode, Mode::StatusReport));
+        assert!(matches!(app.mode, Mode::Normal));
+        assert!(sent.borrow().is_empty(), "the closing key reached the agent");
     }
 
     #[test]
@@ -2841,6 +2858,66 @@ Cost",
         assert_eq!(rows[14].trim_end(), " ALL AGENTS  11.5k tokens");
         assert_eq!(rows[15].trim_end(), "  not counted: 1 agent");
         assert_eq!(rows[16].trim_end(), EXPERIMENTAL);
+        let _ = std::fs::remove_dir_all(folder);
+    }
+
+    #[test]
+    fn a_notice_about_an_unreadable_workspace_keeps_its_reason_however_deep_the_folder() {
+        let deep: PathBuf = std::iter::repeat_n("a-rather-long-folder-name", 12)
+            .collect::<PathBuf>()
+            .join("workspace.unreadable-1.json");
+        let outcome = LoadOutcome::Lost { unreadable_kept_as: deep, why: "line 1: expected a value".into() };
+        let text = load_problem_text(&outcome).unwrap();
+        assert_eq!(
+            text,
+            "Your saved workspace could not be read: line 1: expected a value. There is no earlier copy, \
+             so the workspace starts empty. The unreadable file was kept beside it, as \
+             workspace.unreadable-1.json."
+        );
+        // Short enough that two rows of a 100-column notice hold it whole.
+        assert!(text.chars().count() < 200, "{text}");
+    }
+
+    #[test]
+    fn a_refused_agent_says_what_to_do_once_and_a_failed_one_gets_the_general_way_out() {
+        let mut app = app_with_claude_agents(0);
+        let agent = |name: &str, command: &str| crate::state::SavedAgent {
+            name: name.into(),
+            command: command.into(),
+            kind: Some("program".into()),
+            args: vec![],
+            folder: std::env::temp_dir(),
+            conversation: None,
+            other: Default::default(),
+        };
+        app.ws.restore(crate::state::SavedWorkspace {
+            version: crate::state::VERSION,
+            agents: vec![agent("bell\u{7}", "cmd")],
+            focused: Some(0),
+            other: Default::default(),
+        });
+        let shown = screen(&app, 140, 30).join("\n");
+        assert!(shown.contains("r will not help"), "{shown}");
+        assert!(!shown.contains("then r starts it again"), "no second way out that contradicts it: {shown}");
+        assert!(shown.contains("It is still in your workspace."), "{shown}");
+        assert!(crate::agent::FIX_IN_THE_FILE.starts_with(crate::agent::NOTHING_RUN));
+    }
+
+    #[test]
+    fn with_no_room_for_the_cost_total_the_sidebar_says_where_it_is() {
+        let folder = claude_folder("pointer");
+        let mut app = app_with_claude_agents(4);
+        app.ws.read_cost_from(Some(folder.clone()));
+        record_reply(&app, &folder, 0, "claude-opus-5-5", REPLY);
+        look(&mut app, 1);
+        // 12 rows: 9 for the sidebar below its heading, too few for four
+        // agents of three rows and the total.
+        let rows = screen(&app, 100, 12);
+        let side: Vec<String> = rows.iter().map(|r| r.chars().take(27).collect::<String>()).collect();
+        assert_eq!(side[side.len() - 4].trim_end(), " Total: menu key, then s", "{side:#?}");
+        assert!(!side.iter().any(|r| r.contains("ALL AGENTS")), "{side:#?}");
+        // The agent in front is still shown.
+        assert!(side.iter().any(|r| r.starts_with(">/\\")), "{side:#?}");
         let _ = std::fs::remove_dir_all(folder);
     }
 
@@ -3830,6 +3907,18 @@ Cost",
 
     fn codex_reports(app: &mut App<Fake>, id: u32, body: &str) {
         app.on_agent_event(AgentEvent::Output(AgentId(id), format!("\x1b]7501;{body}\x1b\\").into_bytes()));
+    }
+
+    #[test]
+    fn the_quit_question_names_every_agent_that_does_not_keep_its_conversation() {
+        let mut app = app_with_claude_and_codex();
+        report(&mut app, 1, "state=working:app=claude-code");
+        app.ws.start_as_named("aider", std::env::temp_dir().join("tools")).unwrap();
+        app.on_key(press(KeyCode::F(12)));
+        app.on_key(press(KeyCode::Char('q')));
+        let bar = app.bar();
+        assert!(bar.ends_with("Codex (web), aider (tools) start new conversations next time."), "{bar}");
+        assert!(!bar.contains("Claude Code (a) start"), "{bar}");
     }
 
     #[test]

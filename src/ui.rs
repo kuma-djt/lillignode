@@ -36,6 +36,8 @@ pub const MIN_COLS: u16 = 80;
 pub const MIN_ROWS: u16 = 12;
 const SIDEBAR: u16 = 28;
 const NOTICE_ROWS: u16 = 2;
+/// Drawn in place of the cost total when the sidebar has no room for it.
+const TOTAL_POINTER: &str = " Total: menu key, then s";
 
 /// Where an agent's name starts on its row: the marker for the agent in
 /// front, the hat, the sign, and a space.
@@ -263,10 +265,13 @@ fn draw_sidebar<B: AgentBackend>(frame: &mut Frame, area: Rect, app: &App<B>, p:
     let total = app.cost_total();
     let room = (area.height as usize).saturating_sub(1);
     let total_fits = entries.len() * per + total.len() <= room;
+    // With no room for the total, one dim row at the foot says where it is.
+    let pointer = !total.is_empty() && !total_fits;
+    let agent_room = if pointer { room.saturating_sub(1) } else { room };
     let needs: Vec<bool> = entries.iter().map(|e| e.needs_you().is_some()).collect();
     let front = app.ws.focused_index().unwrap_or(0);
     let beside = app.ws.pair().map(|pair| if pair.left == front { pair.right } else { pair.left });
-    let (first, last) = shown_agents(&needs, per, room, front, beside, app.sidebar_top.get());
+    let (first, last) = shown_agents(&needs, per, agent_room, front, beside, app.sidebar_top.get());
     app.sidebar_top.set(first);
     if first > 0 {
         lines.extend(more_rows(&entries[..first], "above", row, p));
@@ -296,10 +301,15 @@ fn draw_sidebar<B: AgentBackend>(frame: &mut Frame, area: Rect, app: &App<B>, p:
     }
     frame.render_widget(Paragraph::new(lines).style(panel), Rect { width: area.width - 1, ..area });
     // The total stays at the foot of the sidebar, below every agent row.
-    // With no room for it there it is not drawn; the status report has it.
-    let total = if total_fits { total } else { Vec::new() };
-    let total: Vec<Line> =
-        total.iter().map(|text| Line::from(format!("{:<row$}", clip(text, row)))).collect();
+    // With no room for it there, a dim row says where it is: the status
+    // report has it.
+    let total: Vec<Line> = if total_fits {
+        total.iter().map(|text| Line::from(format!("{:<row$}", clip(text, row)))).collect()
+    } else if pointer && room > 0 {
+        vec![Line::from(Span::styled(format!("{:<row$}", clip(TOTAL_POINTER, row)), p.dim()))]
+    } else {
+        Vec::new()
+    };
     let rows = (total.len() as u16).min(area.height);
     frame.render_widget(
         Paragraph::new(total).style(panel),
@@ -415,22 +425,28 @@ fn draw_welcome<B: AgentBackend>(frame: &mut Frame, area: Rect, app: &App<B>, p:
     );
 }
 
+/// What an agent that was not started shows in place of its screen. A
+/// reason that already says what to do is not followed by a second, generic
+/// way out that could contradict it.
+fn not_started_text(entry: &Entry, why: &str) -> String {
+    let next = if why.contains(crate::agent::NOTHING_RUN) {
+        "It is still in your workspace."
+    } else {
+        "Nothing was changed, and it is still in your workspace.\n\n\
+         Once the cause is fixed: the menu key, then r starts it again. Or the menu key, then x removes it."
+    };
+    format!(
+        "{} was not started: {why}.\n\n{next}\n\nCommand: {}\nFolder:  {}",
+        entry.label(),
+        printable(&entry.saved.command),
+        printable(&entry.saved.folder.display().to_string())
+    )
+}
+
 /// One agent's own screen, or why it has none.
 fn draw_entry(frame: &mut Frame, area: Rect, entry: &Entry) {
     match &entry.status {
-        Status::NotStarted(why) => message(
-            frame,
-            area,
-            format!(
-                "{} was not started: {why}.\n\n\
-                 Nothing was changed, and it is still in your workspace.\n\n\
-                 Fix the cause, then the menu key, then r to try again. Or the menu key, then x to remove it.\n\n\
-                 Command: {}\nFolder:  {}",
-                entry.label(),
-                printable(&entry.saved.command),
-                printable(&entry.saved.folder.display().to_string())
-            ),
-        ),
+        Status::NotStarted(why) => message(frame, area, not_started_text(entry, why)),
         // An exited agent keeps its last screen, so what it said before
         // stopping can still be read.
         _ => view::draw_screen(entry.term.screen(), area, frame.buffer_mut()),

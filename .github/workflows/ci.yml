@@ -1,13 +1,16 @@
 # Builds Lillignode, runs its unit tests and the lint, on Windows, Linux
 # and macOS on every push. The format check runs once, on Linux.
 #
-# On Linux and macOS it also runs the end-to-end check, which drives the
-# real program against the stand-in agent. On Windows that check needs
-# Microsoft's two pseudo-terminal files beside the program to cover status,
-# so it is still run by hand there (docs/ci-coverage.md).
+# On every system it also runs the end-to-end check, which drives the real
+# program against the stand-in agent. On Windows that check needs
+# Microsoft's two pseudo-terminal files beside the program to cover status;
+# the packaging script fetches them from the pinned Windows Terminal release
+# and refuses them unless both hashes match and both are signed by
+# Microsoft (docs/packaging-windows.md).
 #
 # The macOS runner is Apple Silicon. Its release build is kept as a
-# download of the run, for anyone who wants to try it: it is not a release,
+# download of the run, packed as a .tar.gz so the program keeps its
+# permission to run, for anyone who wants to try it: it is not a release,
 # is not signed, and has not been run by a person.
 #
 # Nothing here starts a real agent or reads a real Claude Code setup: unit
@@ -56,11 +59,20 @@ jobs:
         if: runner.os == 'Linux'
         run: cargo fmt --check
       - name: Release build
-        if: runner.os != 'Windows'
         run: cargo build --release --all-targets --locked
+      # Downloads the pinned package from Microsoft's Windows Terminal
+      # release and places the two files beside the program only if both
+      # match their recorded hashes and carry Microsoft's signature.
+      - name: Microsoft's pseudo-terminal files, checked
+        if: runner.os == 'Windows'
+        run: powershell -ExecutionPolicy Bypass -File scripts\package-windows.ps1 -BesideBuild
       - name: End-to-end check against the stand-in
-        if: runner.os != 'Windows'
         run: cargo run --release --locked --example e2e
+      # A .tar.gz keeps the program's permission to run, which the download
+      # of a run does not.
+      - name: Pack the macOS build
+        if: runner.os == 'macOS' && !cancelled()
+        run: tar -czf lillignode-macos-arm64-untested.tar.gz -C target/release lillignode -C "$GITHUB_WORKSPACE" LICENSE README.md
       # Kept whether or not the checks above passed, so a build that fails
       # a check can still be looked at. This is actions/upload-artifact v7.0.2.
       - name: Keep the macOS build
@@ -68,9 +80,6 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: lillignode-macos-arm64-untested
-          path: |
-            target/release/lillignode
-            LICENSE
-            README.md
+          path: lillignode-macos-arm64-untested.tar.gz
           if-no-files-found: error
           retention-days: 30

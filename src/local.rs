@@ -85,6 +85,14 @@ fn is_batch(program: &Path) -> bool {
 /// argument that holds one is refused.
 const NOT_FOR_A_LAUNCHER: &[char] = &['&', '|', '<', '>', '^', '%', '"', '\n', '\r'];
 
+/// What a launcher's own path may not hold. The path reaches the command
+/// interpreter in quotes (`command_for`), which keep `& | < > ^` as text;
+/// quotes do not keep `%` or `"`.
+const NOT_IN_A_LAUNCHER_PATH: &[char] = &['%', '"'];
+
+/// The variable the launcher's quoted path is handed over in.
+const LAUNCHER_VARIABLE: &str = "LILLIGNODE_LAUNCHER";
+
 /// What in a batch launcher's path or arguments the command interpreter
 /// would act on: the first such character, and where it is.
 enum LauncherProblem {
@@ -93,7 +101,7 @@ enum LauncherProblem {
 }
 
 fn launcher_problem(program: &Path, args: &[String]) -> Option<LauncherProblem> {
-    if let Some(c) = program.to_string_lossy().chars().find(|c| NOT_FOR_A_LAUNCHER.contains(c)) {
+    if let Some(c) = program.to_string_lossy().chars().find(|c| NOT_IN_A_LAUNCHER_PATH.contains(c)) {
         return Some(LauncherProblem::Path(c));
     }
     args.iter().flat_map(|a| a.chars()).find(|c| NOT_FOR_A_LAUNCHER.contains(c)).map(LauncherProblem::Arg)
@@ -143,11 +151,17 @@ fn launcher_refusal_typed(program: &Path, args: &[String]) -> Option<String> {
 
 /// Build the process to launch. Windows batch launchers (`.cmd`, `.bat`)
 /// cannot be started directly and go through the command interpreter.
+///
+/// The launcher's path reaches the interpreter in quotes, so a folder such
+/// as `C:\Users\R&D` works. The pseudo-terminal library cannot put quotes
+/// on the command line as the interpreter needs them, so the quoted path is
+/// handed over in a variable the interpreter expands before it reads the
+/// line: `cmd /d /c %LILLIGNODE_LAUNCHER% args`.
 fn command_for(program: &Path, args: &[String]) -> CommandBuilder {
     let mut cmd = if cfg!(windows) && is_batch(program) {
         let mut c = CommandBuilder::new("cmd.exe");
-        c.args(["/d", "/c"]);
-        c.arg(program);
+        c.args(["/d", "/c", &format!("%{LAUNCHER_VARIABLE}%")]);
+        c.env(LAUNCHER_VARIABLE, format!("\"{}\"", program.display()));
         c
     } else {
         CommandBuilder::new(program)
@@ -284,11 +298,30 @@ mod tests {
             )
         );
         assert!(launcher_refusal(launcher, &args(&["a\nb"])).unwrap().contains("a line break"));
-        // The launcher's own path goes through the interpreter too.
-        let why = launcher_refusal(Path::new("C:/a&b/claude.cmd"), &[]).unwrap();
-        assert!(why.starts_with("the path of its launcher holds \"&\""), "{why}");
+        // The launcher's own path goes through the interpreter in quotes,
+        // which keep & | < > ^ as text but not % or ".
+        for fine in
+            ["C:/Users/R&D/npm/claude.cmd", "C:/a|b<c>d^e/claude.cmd", "C:/Program Files/x/claude.cmd"]
+        {
+            assert_eq!(launcher_refusal(Path::new(fine), &[]), None, "{fine}");
+        }
+        let why = launcher_refusal(Path::new("C:/100%/claude.cmd"), &[]).unwrap();
+        assert!(why.starts_with("the path of its launcher holds \"%\""), "{why}");
         assert!(is_batch(Path::new("x.CMD")) && is_batch(Path::new("x.bat")));
         assert!(!is_batch(Path::new("x.exe")) && !is_batch(Path::new("cmd")));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_launcher_path_reaches_the_interpreter_in_quotes_through_a_variable() {
+        let cmd = command_for(Path::new(r"C:\Users\R&D\claude.cmd"), &["--x".to_string()]);
+        let argv: Vec<String> = cmd.get_argv().iter().map(|a| a.to_string_lossy().into_owned()).collect();
+        assert_eq!(argv, ["cmd.exe", "/d", "/c", "%LILLIGNODE_LAUNCHER%", "--x"]);
+        assert_eq!(cmd.get_env(LAUNCHER_VARIABLE).unwrap(), r#""C:\Users\R&D\claude.cmd""#);
+        // A program that is not a launcher is started as itself.
+        let cmd = command_for(Path::new(r"C:\tools\codex.exe"), &[]);
+        assert_eq!(cmd.get_argv().len(), 1);
+        assert!(cmd.get_env(LAUNCHER_VARIABLE).is_none());
     }
 
     #[test]
@@ -301,9 +334,10 @@ mod tests {
             "Take out the \"&\": this program is a launcher, and the command interpreter would act on it. \
              Or start the program itself"
         );
-        let why = launcher_refusal_typed(Path::new("C:/R&D/codex.cmd"), &[]).unwrap();
+        assert_eq!(launcher_refusal_typed(Path::new("C:/R&D/codex.cmd"), &[]), None);
+        let why = launcher_refusal_typed(Path::new("C:/100%/codex.cmd"), &[]).unwrap();
         assert!(
-            why.starts_with("Start the program itself, not its launcher: the launcher's path holds \"&\"")
+            why.starts_with("Start the program itself, not its launcher: the launcher's path holds \"%\"")
         );
         // Nothing about the workspace file: the options were just typed.
         let why = launcher_refusal_typed(launcher, &args(&["%x%"])).unwrap();
