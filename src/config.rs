@@ -345,10 +345,29 @@ mod tests {
         assert!(parse("not json").is_err());
     }
 
+    /// An empty folder of this test's own. A process id is reused by the
+    /// operating system, so a folder left by an earlier run that stopped
+    /// part way can carry the same name: it is emptied first, never trusted.
+    fn fresh_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("lillignode-test-config-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_folder_left_by_an_earlier_run_is_emptied_before_use() {
+        let stale = fresh_dir("stale");
+        std::fs::write(stale.join(FILE), r#"{"menu_keys": ["ctrl+c"]}"#).unwrap();
+        let dir = fresh_dir("stale");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+        assert_eq!(load(&dir), (Config::default(), None));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn an_unusable_file_falls_back_to_defaults_and_says_so() {
-        let dir = std::env::temp_dir().join(format!("lillignode-test-config-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = fresh_dir("unusable");
         assert_eq!(load(&dir), (Config::default(), None));
         std::fs::write(dir.join(FILE), r#"{"menu_keys": ["ctrl+c"]}"#).unwrap();
         let (config, problem) = load(&dir);
