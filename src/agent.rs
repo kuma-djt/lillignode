@@ -39,6 +39,8 @@ pub enum StartError {
     CommandNotFound(String),
     /// Found, but the operating system refused to start it.
     Failed(String),
+    /// Lillignode would not start it as given, and why.
+    Refused(String),
 }
 
 impl fmt::Display for StartError {
@@ -51,6 +53,7 @@ impl fmt::Display for StartError {
                 write!(f, "\"{c}\" is not installed or not on PATH")
             }
             StartError::Failed(why) => write!(f, "it would not start ({why})"),
+            StartError::Refused(why) => write!(f, "{why}"),
         }
     }
 }

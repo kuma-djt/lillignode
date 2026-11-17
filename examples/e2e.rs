@@ -946,6 +946,41 @@ fn main() {
     let saved = std::fs::read_to_string(&file).unwrap();
     check("removed agent is gone from the saved file", !saved.contains("nosuchagent"), &saved);
 
+    // What Lillignode would never have written is not started, and says why.
+    // The launchers here are .cmd files on Windows only.
+    let launcher_args = if cfg!(windows) { r#"["--x", "a&b"]"# } else { "[]" };
+    let refused_state = sb.root.join("state-refused");
+    std::fs::create_dir_all(&refused_state).unwrap();
+    let refused_file = refused_state.join("workspace.json");
+    std::fs::write(
+        &refused_file,
+        format!(
+            r#"{{"version": 1, "focused": 0, "agents": [
+  {{"name": "echoer", "command": "echoer", "args": {launcher_args}, "folder": "{w}"}},
+  {{"name": "bell\u0007", "command": "echoer", "args": [], "folder": "{w}"}}
+]}}"#,
+            w = json_path(&sb.work)
+        ),
+    )
+    .unwrap();
+    let mut s = Session::start_in(&sb, &refused_state);
+    if cfg!(windows) {
+        s.expect(
+            "an argument a .cmd launcher would act on: not started, and why",
+            "echoer (work) was not started: its arguments hold \"&\", which Lillignode will not pass to a .cmd or .bat launcher.",
+        );
+    }
+    s.raw(CTRL_Q);
+    s.keys(b"\t");
+    s.expect(
+        "a control character in a saved name: not started, and why",
+        "bell  (work) was not started: its saved name holds a control character, which Lillignode never writes.",
+    );
+    s.keys(ESC);
+    drop(s.quit("quit", cfg!(not(windows))));
+    let saved = std::fs::read_to_string(&refused_file).unwrap();
+    check("the refused entries are saved back as they were", saved.contains("bell\\u0007"), &saved);
+
     println!("F. Damaged saved workspace");
     std::fs::write(&file, "{ \"version\": 1, \"agents\": [ tru").unwrap();
     let mut s = Session::start(&sb);

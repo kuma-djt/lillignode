@@ -28,7 +28,7 @@ Only the latest release and the `main` branch. There are no back-ported fixes.
 
 ## Known limits
 
-Some weaknesses are known and not yet fixed in 0.1. They are listed in plain words under [Known limits in 0.1](README.md#known-limits-in-01) in the README: the saved workspace is trusted at launch, pasted text keeps control characters other than Esc, cost is experimental, and only Windows has been run by a person. A report that finds a new way to exploit one of them is still welcome.
+Some weaknesses are known and not yet fixed in 0.1. They are listed in plain words under [Known limits in 0.1](README.md#known-limits-in-01) in the README: the saved workspace is trusted at launch within limits, a paste on Windows can still carry control characters, cost is experimental, and only Windows has been run by a person. A report that finds a new way to exploit one of them is still welcome.
 
 ## What does not
 

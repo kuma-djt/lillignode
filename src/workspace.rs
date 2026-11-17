@@ -73,11 +73,17 @@ impl Entry {
 
     /// "Claude Code (api-refactor)": the name plus the folder's last part.
     pub fn label(&self) -> String {
-        format!("{} ({})", self.saved.name, self.folder_name())
+        format!("{} ({})", self.name(), self.folder_name())
+    }
+
+    /// The name as it is shown. A saved name is outside data: any control
+    /// character in it is shown as a space, so it cannot act on the screen.
+    pub fn name(&self) -> String {
+        printable(&self.saved.name)
     }
 
     pub fn folder_name(&self) -> String {
-        folder_name(&self.saved.folder)
+        printable(&folder_name(&self.saved.folder))
     }
 
     pub fn is_running(&self) -> bool {
@@ -140,6 +146,41 @@ impl Entry {
     }
 }
 
+/// `text` with every control character shown as a space.
+pub fn printable(text: &str) -> String {
+    text.chars().map(|c| if c.is_control() { ' ' } else { c }).collect()
+}
+
+/// What in a saved agent Lillignode would never have written itself, said
+/// as the reason it is not started. None when the entry is as Lillignode
+/// writes it. A saved entry is outside data: someone else may have written it.
+fn not_as_written(saved: &SavedAgent) -> Option<String> {
+    let control = |text: &str| text.chars().any(char::is_control);
+    let what = if control(&saved.name) {
+        "name"
+    } else if control(&saved.command) {
+        "command"
+    } else if saved.args.iter().any(|a| control(a)) {
+        "arguments"
+    } else if control(&saved.folder.to_string_lossy()) {
+        "folder"
+    } else {
+        return saved.conversation.as_deref().filter(|id| !is_conversation_id(id)).map(|_| {
+            "its saved conversation id is not one Lillignode writes. It was left as written, and no new \
+             conversation was begun in its place"
+                .to_string()
+        });
+    };
+    Some(format!(
+        "its saved {what} holds a control character, which Lillignode never writes. Nothing was run"
+    ))
+}
+
+/// A conversation id as Lillignode writes one: a UUID in its usual form.
+fn is_conversation_id(id: &str) -> bool {
+    uuid::Uuid::try_parse(id).is_ok_and(|u| u.hyphenated().to_string() == id)
+}
+
 /// The last part of a folder's path, which is what the user is shown.
 fn folder_name(folder: &Path) -> String {
     folder
@@ -196,7 +237,11 @@ fn terminal_and_track(saved: &SavedAgent, size: Size) -> (Terminal, Track) {
 
 /// The reader of a saved agent's cost, for an agent that has one to read.
 fn usage_reader(saved: &SavedAgent) -> Option<cost::Reader> {
-    let id = saved.conversation.as_deref().filter(|_| kind_of(saved).has_cost_record())?;
+    // The id names a file to read, so one Lillignode did not write is not used.
+    let id = saved
+        .conversation
+        .as_deref()
+        .filter(|id| kind_of(saved).has_cost_record() && is_conversation_id(id))?;
     Some(cost::Reader::new(id))
 }
 
@@ -400,6 +445,9 @@ impl<B: AgentBackend> Workspace<B> {
 
     fn try_start(&mut self, saved: &SavedAgent, conversation: Conversation) -> (Status, Option<AgentId>) {
         // Checked before the backend sees it: a saved entry is outside data.
+        if let Some(why) = not_as_written(saved) {
+            return (Status::NotStarted(why), None);
+        }
         if saved.command.trim().is_empty() {
             return (Status::NotStarted("its saved entry has no command".into()), None);
         }
@@ -879,6 +927,47 @@ mod tests {
         assert!(report.not_restored[1].1.contains("not a full path"));
         // A stale focus index falls back to the first agent.
         assert_eq!(ws.focused_index(), Some(0));
+    }
+
+    #[test]
+    fn restore_starts_nothing_lillignode_would_never_have_written_and_says_what() {
+        let mut ws = Workspace::new(Fake::default(), SIZE);
+        let with = |change: fn(&mut SavedAgent)| {
+            let mut a = agent("claude", "api");
+            change(&mut a);
+            a
+        };
+        let agents = vec![
+            with(|a| a.name = "Claude\x1b[2J Code".into()),
+            with(|a| a.command = "claude\r\nother".into()),
+            with(|a| a.args = vec!["--x".into(), "a\x07b".into()]),
+            with(|a| a.folder = root("a\u{9b}b")),
+            with(|a| a.conversation = Some("not-an-id".into())),
+            with(|a| a.conversation = Some("{11111111-2222-4333-8444-555555555555}".into())),
+            agent("claude", "fine"),
+        ];
+        let report = ws.restore(saved(agents, Some(0)));
+        let why: Vec<&str> = report.not_restored.iter().map(|(_, why)| why.as_str()).collect();
+        assert_eq!(why.len(), 6, "{why:?}");
+        for (i, what) in ["name", "command", "arguments", "folder"].iter().enumerate() {
+            assert_eq!(
+                why[i],
+                format!(
+                    "its saved {what} holds a control character, which Lillignode never writes. Nothing was run"
+                )
+            );
+        }
+        assert!(why[4].starts_with("its saved conversation id is not one Lillignode writes"), "{}", why[4]);
+        assert!(why[5].starts_with("its saved conversation id"), "the braced form is not written either");
+        assert_eq!(report.restored.len(), 1, "the good one still starts");
+        assert_eq!(log(&ws).len(), 1, "nothing else was started");
+        // Each stays in the workspace, as written: its id was not replaced.
+        assert_eq!(ws.entries().len(), 7);
+        assert_eq!(ws.entries()[4].saved.conversation.as_deref(), Some("not-an-id"));
+        assert_eq!(ws.to_saved().agents[0].name, "Claude\x1b[2J Code");
+        // What is shown of it cannot act on the screen.
+        assert_eq!(ws.entries()[0].label(), "Claude [2J Code (api)");
+        assert!(!ws.entries()[3].label().chars().any(char::is_control));
     }
 
     #[test]

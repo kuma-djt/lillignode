@@ -129,9 +129,28 @@ pub fn file_in(dir: &Path) -> PathBuf {
     dir.join(FILE)
 }
 
+/// The largest saved workspace Lillignode reads. One it wrote itself is a
+/// few hundred bytes an agent.
+pub const LARGEST_FILE: u64 = 1_000_000;
+/// The most agents a saved workspace may list. Each would be started at once.
+pub const MOST_AGENTS: usize = 64;
+
 fn read(path: &Path) -> Result<SavedWorkspace, String> {
+    let size = fs::metadata(path).map_err(|e| e.to_string())?.len();
+    if size > LARGEST_FILE {
+        return Err(format!(
+            "it is {size} bytes, larger than the {LARGEST_FILE} Lillignode reads, so none of it was started"
+        ));
+    }
     let text = fs::read_to_string(path).map_err(|e| e.to_string())?;
     let ws: SavedWorkspace = serde_json::from_str(&text).map_err(|e| format!("it is not valid ({e})"))?;
+    if ws.agents.len() > MOST_AGENTS {
+        return Err(format!(
+            "it lists {} agents, more than the {MOST_AGENTS} Lillignode starts at once, so none of them was \
+             started",
+            ws.agents.len()
+        ));
+    }
     if ws.version > VERSION {
         return Err(format!(
             "it was saved by a newer Lillignode (format {}, this one reads up to {VERSION})",
@@ -329,6 +348,34 @@ mod tests {
         let l = load(&dir);
         assert_eq!(l.outcome, LoadOutcome::Loaded);
         assert_eq!(l.workspace, one("a"));
+    }
+
+    #[test]
+    fn a_file_too_large_or_listing_too_many_agents_is_set_aside_and_nothing_is_started() {
+        let dir = temp_dir("too-many");
+        save(&dir, &one("good")).unwrap();
+        save(&dir, &one("good")).unwrap();
+        let mut many = one("a");
+        many.agents = vec![one("a").agents[0].clone(); MOST_AGENTS + 1];
+        fs::write(file_in(&dir), serde_json::to_string(&many).unwrap()).unwrap();
+        let l = load(&dir);
+        let LoadOutcome::UsedPrevious { why, .. } = l.outcome else { panic!("{:?}", l.outcome) };
+        assert!(why.starts_with("it lists 65 agents, more than the 64"), "{why}");
+        assert_eq!(l.workspace, one("good"), "the previous copy is used");
+        // Exactly the most is read.
+        many.agents.truncate(MOST_AGENTS);
+        fs::write(file_in(&dir), serde_json::to_string(&many).unwrap()).unwrap();
+        assert_eq!(load(&dir).outcome, LoadOutcome::Loaded);
+
+        let dir = temp_dir("too-large");
+        let mut text = serde_json::to_string(&one("a")).unwrap();
+        text.push_str(&" ".repeat(LARGEST_FILE as usize));
+        fs::write(file_in(&dir), &text).unwrap();
+        let l = load(&dir);
+        let LoadOutcome::Lost { why, unreadable_kept_as } = l.outcome else { panic!("{:?}", l.outcome) };
+        assert!(why.contains("larger than the 1000000 Lillignode reads"), "{why}");
+        assert!(l.workspace.agents.is_empty());
+        assert_eq!(fs::metadata(unreadable_kept_as).unwrap().len(), text.len() as u64, "kept whole");
     }
 
     #[test]

@@ -30,7 +30,7 @@ use crate::cost::Cost;
 use crate::look::{self, Palette, Tone};
 use crate::status::AgentStatus;
 use crate::view;
-use crate::workspace::{Entry, Status};
+use crate::workspace::{printable, Entry, Status};
 
 pub const MIN_COLS: u16 = 80;
 pub const MIN_ROWS: u16 = 12;
@@ -157,7 +157,7 @@ fn agent_rows(entry: &Entry, focused: bool, width: usize, clock: u64, p: Palette
         Span::styled(look::HAT, p.copper()),
         Span::styled(sign.to_string(), p.tone(tone)),
         Span::raw(" "),
-        Span::styled(clip(&entry.saved.name, room), name_style),
+        Span::styled(clip(&entry.name(), room), name_style),
     ]);
 
     // The folder is how agents with the same name are told apart, so some
@@ -306,8 +306,8 @@ fn draw_entry(frame: &mut Frame, area: Rect, entry: &Entry) {
                  Fix the cause, then the menu key, then r to try again. Or the menu key, then x to remove it.\n\n\
                  Command: {}\nFolder:  {}",
                 entry.label(),
-                entry.saved.command,
-                entry.saved.folder.display()
+                printable(&entry.saved.command),
+                printable(&entry.saved.folder.display().to_string())
             ),
         ),
         // An exited agent keeps its last screen, so what it said before
