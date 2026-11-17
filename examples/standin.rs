@@ -27,6 +27,9 @@
 //!   standin codex           report status the way Codex 0.169.0 does:
 //!                           without asking, under its own name, on keys
 //!                           (see `codex_mode`)
+//!   standin reports         report status the way any program may: without
+//!                           asking, under a name of its own or none, on keys
+//!                           (see `reports_mode`)
 //!   standin status-echo     ask the status question the way Claude Code
 //!                           does, then take pastes and report input as
 //!                           `echo` does
@@ -357,6 +360,72 @@ fn codex_mode() {
     }
 }
 
+/// Report the way any program may, as the open format describes: nothing
+/// is asked, the program names itself `deploy` or gives no name, and some
+/// keys send what a careless or hostile program might.
+fn reports_mode() {
+    let send = |body: &str| {
+        let mut out = std::io::stdout();
+        let _ = write!(out, "\x1b]7501;{body}\x1b\\");
+        let _ = out.flush();
+    };
+    let mut stdin = std::io::stdin();
+    let mut buf = [0u8; 256];
+    loop {
+        let n = match stdin.read(&mut buf) {
+            Ok(0) | Err(_) => return,
+            Ok(n) => n,
+        };
+        for &key in &buf[..n] {
+            match key {
+                b'w' => send("state=working:app=deploy"),
+                b'p' => send("state=blocked:kind=permission:app=deploy"),
+                b'd' => send("state=done:app=deploy"),
+                // No name at all: the format allows it.
+                b'i' => send("state=idle"),
+                b'c' => send("state=clear"),
+                // A kind nobody knows, a part nobody knows, a part given twice.
+                b'k' => send("state=blocked:kind=coffee:app=deploy"),
+                b'n' => send("state=idle:app=deploy:mood=fine:state=working"),
+                // A state nobody knows.
+                b'u' => send("state=pondering:app=deploy"),
+                // A message that tries to clear the screen, move the cursor,
+                // set the window title and reverse the text after it.
+                b'm' => send(&format!(
+                    "state=error:app=deploy:msg={}",
+                    base64("\x1b[2J\x1b[H\x1b]0;owned\x07first\r\nsecond\u{202e}third")
+                )),
+                // As fast as it can write: two thousand changes into and
+                // out of needing the user, ending in needing the user.
+                b'f' => {
+                    let mut all = String::new();
+                    for _ in 0..2000 {
+                        all += "\x1b]7501;state=working:app=deploy\x1b\\";
+                        all += "\x1b]7501;state=blocked:app=deploy\x1b\\";
+                    }
+                    let mut out = std::io::stdout();
+                    let _ = out.write_all(all.as_bytes());
+                    let _ = out.flush();
+                }
+                // One more change into needing the user.
+                b'b' => {
+                    send("state=working:app=deploy");
+                    send("state=blocked:app=deploy");
+                }
+                // A shell marking its next prompt.
+                b'$' => {
+                    let mut out = std::io::stdout();
+                    let _ = write!(out, "\x1b]133;A\x07");
+                    let _ = out.flush();
+                }
+                0x04 => return,
+                _ => continue,
+            }
+            say(&format!("SENT {}", key as char));
+        }
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mode = args.first().map(String::as_str).unwrap_or("echo");
@@ -462,6 +531,10 @@ fn main() {
         "codex" => {
             say("STANDIN READY codex");
             codex_mode();
+        }
+        "reports" => {
+            say("STANDIN READY reports");
+            reports_mode();
         }
         "status-silent" => {
             say("STANDIN READY status-silent");

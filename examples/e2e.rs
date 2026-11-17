@@ -596,12 +596,10 @@ fn codex(sb: &Sandbox, standin: &Path) {
     s.keys(b"s");
     s.expect("the status report is about Codex", "Status report for Codex (work)");
     s.expect("what it needs is there", "Status: Needs you: permission.");
-    s.expect(
-        "it says Codex is not asked or answered",
-        "Codex reports without asking Lillignode's terminal first.",
-    );
+    s.expect("it says nothing was asked", "Status question: not asked. A program may report without asking.");
+    s.expect("and who sent it", "Sent by: Codex.");
     s.expect("with the report as it arrived", "ESC ]7501;state=blocked:app=codex:kind=permission");
-    s.expect("and which Codex it was checked with", "Read the way Codex 0.169.0 reports.");
+    s.expect("and which Codex it was checked with", "Checked with Codex 0.169.0.");
     s.never("and nothing about Claude Code's own switch", "CLAUDE_CODE_DISABLE_TERMINAL_TITLE");
     s.keys(b"z");
     s.keys(b"q");
@@ -628,20 +626,23 @@ fn codex(sb: &Sandbox, standin: &Path) {
     s.expect("the next report replaces it", "work  Idle ");
     s.keys(b"x");
     s.expect(
-        "a report under another program's name is Unknown, not that program's status",
-        "work  Unknown   ",
+        "a report under another program's name is read: the report says who it is",
+        "work  NEEDS YOU   ",
     );
+    s.raw(CTRL_Q);
+    s.keys(b"s");
+    s.expect(
+        "and the status report says whose name it carried, and that it differs",
+        "Sent by: Claude Code. This agent was started as Codex",
+    );
+    s.keys(b"z");
+    s.keys(b"u");
+    s.expect("a state Lillignode does not know", "SENT u");
+    s.expect("is Unknown, never the nearest match", "work  Unknown   ");
     s.expect(
         "a notice says so, naming Codex",
         "Status shows Unknown: Codex sent a status Lillignode does not understand",
     );
-    s.raw(CTRL_Q);
-    s.keys(b"s");
-    s.expect("and the status report says whose name it carried", "it is from \"claude-code\", not Codex");
-    s.keys(b"z");
-    s.keys(b"u");
-    s.expect("a state Lillignode does not know", "SENT u");
-    s.expect("is Unknown too, never the nearest match", "work  Unknown   ");
     s.keys(b"d");
     s.expect("done again", "work  Done ");
     // Everything is finished, so quit does not ask.
@@ -686,6 +687,100 @@ fn codex(sb: &Sandbox, standin: &Path) {
     s.expect("and names it", "Not finished or not known: Codex (work) (Unknown: no report).");
     s.keys(b"n");
     drop(s.quit("quit", true));
+}
+
+/// Any program that reports its status has it shown. The stand-in is
+/// named deploy, which Lillignode knows nothing about, and reports without
+/// asking, so this passes with either pseudo-terminal.
+fn any_program(sb: &Sandbox, standin: &Path) {
+    println!("Q. Status reported by a program Lillignode knows nothing about");
+    let dir = sb.root.join("any-program");
+    std::fs::create_dir_all(&dir).unwrap();
+    launcher(&dir, standin, "deploy", "reports");
+    let state = sb.root.join("state-any-program");
+    let mut s = Session::start_in(sb, &state);
+    s.new_agent(&dir.join("deploy").display().to_string());
+    s.expect("it starts", "STANDIN READY reports");
+    s.expect("with nothing said, it is Unknown from the start, not Starting", "work  Unknown   ");
+    s.never("and that is not worth a notice: nothing was expected of it", "Status shows Unknown");
+    s.raw(CTRL_Q);
+    s.keys(b"s");
+    s.expect(
+        "the status report says why",
+        "Status: Unknown: no report. This program has sent no status report.",
+    );
+    s.expect("and that none has come", "No report has been received.");
+    s.keys(b"z");
+    let bells_before = bells(&s);
+    s.keys(b"w");
+    s.expect("its first report shows", "work  Working ");
+    s.keys(b"p");
+    s.expect("needing you shows the yellow block", "work  NEEDS YOU   ");
+    s.expect("the heading counts it", " Lillignode  1 NEEDS YOU");
+    check("and the bell rings", bells(&s) == bells_before + 1, &format!("{}", bells(&s) - bells_before));
+    s.raw(CTRL_Q);
+    s.keys(b"s");
+    s.expect("what it needs is there", "Status: Needs you: permission.");
+    s.expect("the report names its sender, in its own word", "Sent by: \"deploy\".");
+    s.expect("and Lillignode says it has not checked this program", "Not checked with this program.");
+    s.keys(b"z");
+    s.keys(b"d");
+    s.expect("reported: done", "work  Done ");
+    s.keys(b"i");
+    s.expect("a report with no name is still the program's", "work  Idle ");
+    s.keys(b"k");
+    s.expect("a kind Lillignode does not know still needs you", "work  NEEDS YOU   ");
+    s.keys(b"n");
+    s.expect("unknown and repeated parts are passed over; the last state stands", "work  Working ");
+    s.keys(b"u");
+    s.expect("a state Lillignode does not know is Unknown, never the status before it", "work  Unknown   ");
+    s.never("with no notice: this program was never known to work", "Status shows Unknown");
+    s.keys(b"m");
+    s.expect("a message that tries to draw is read for its status", "work  Error   ");
+    s.expect("the sidebar is whole", " Lillignode ");
+    s.raw(CTRL_Q);
+    s.keys(b"s");
+    s.expect(
+        "its words are shown as words, with nothing that draws or reorders",
+        "Status: Error: [2J [H ]0;owned first",
+    );
+    s.expect("and the report as it arrived is spelt out", "ESC ]7501;state=error:app=deploy:msg=");
+    s.keys(b"z");
+    check("the window title was not changed by it", !contains(&s.raw, b"]0;owned"), "owned");
+
+    let bells_before = bells(&s);
+    s.keys(b"f");
+    s.expect("a flood of reports arrives", "SENT f");
+    s.expect("the row shows the last of them", "work  NEEDS YOU   ");
+    for _ in 0..6 {
+        s.keys(b"b");
+        s.pump_for(Duration::from_millis(300));
+    }
+    let rung = bells(&s) - bells_before;
+    check("a flood rings a few bells, not thousands", (1..=3).contains(&rung), &format!("{rung} bells"));
+    s.raw(CTRL_Q);
+    s.keys(b"s");
+    s.expect("the status report says bells were held back", "Bells not rung: ");
+    s.keys(b"z");
+    s.keys(b"$");
+    s.expect("a shell prompt after needing you ends it", "work  Unknown   ");
+    s.raw(CTRL_Q);
+    s.keys(b"s");
+    s.expect("and the status report says why", "Status: Unknown: at a prompt.");
+    s.keys(b"z");
+    s.keys(b"d");
+    s.expect("done", "work  Done ");
+    s.keys(b"$");
+    s.never("a shell prompt leaves Done alone", "work  Unknown   ");
+    s.raw(CTRL_Q);
+    s.keys(b"q");
+    drop(s.quit_already_asked("quit with it Done does not ask"));
+    let saved = std::fs::read_to_string(state.join("workspace.json")).unwrap();
+    check("it is saved as a plain program", saved.contains("\"kind\": \"program\""), &saved);
+}
+
+fn contains(hay: &[u8], needle: &[u8]) -> bool {
+    hay.windows(needle.len()).any(|w| w == needle)
 }
 
 fn conversation_id(file: &Path) -> String {
@@ -1196,13 +1291,16 @@ fn main() {
     s.keys(b"i");
     s.expect("the next good report replaces it", "work  Idle ");
     s.keys(b"n");
-    s.expect("a report with a part Lillignode does not know is Unknown too", "work  Unknown   ");
+    s.expect("a part Lillignode does not know is passed over, and the rest read", "work  Working ");
+    s.keys(b"u");
+    s.expect("the unknown state again", "work  Unknown   ");
     s.raw(CTRL_Q);
     s.keys(b"s");
     s.expect("menu then s shows the status report", "Status report for Claude Code (work)");
     s.expect("with the question and the answer", "Status question: asked");
-    s.expect("with the raw report", "ESC ]7501;state=working:app=claude-code:mood=fine");
-    s.expect("and why it was not understood", "has a part Lillignode does not know: \"mood\"");
+    s.expect("with the raw report", "ESC ]7501;state=pondering:app=claude-code");
+    s.expect("and why it was not understood", "state \"pondering\" is one Lillignode does not know");
+    s.expect("who sent the last report it could read", "Sent by: Claude Code.");
     s.expect("and counts background-task reports", "(1 about its background tasks");
     s.expect("the bar says how to leave", "STATUS REPORT of Claude Code (work).  Any key: back to the agent");
     s.keys(b"z");
@@ -1297,6 +1395,7 @@ fn main() {
     cost(&sb);
     side_by_side(&sb, &standin);
     codex(&sb, &standin);
+    any_program(&sb, &standin);
 
     let _ = std::fs::remove_dir_all(&sb.root);
     println!("\nAll checks passed.");

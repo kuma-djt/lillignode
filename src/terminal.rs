@@ -21,28 +21,20 @@ pub enum StatusMessage {
     Asked,
     /// A report. Everything after `7501;`, as received.
     Report(Vec<u8>),
+    /// The agent's shell marked the start of a new prompt (`OSC 133 ; A`).
+    /// A program that was reporting inside that shell has gone.
+    Prompt,
 }
 
-/// What an agent's terminal does with status messages. It depends on what
-/// kind of agent runs in it: a program Lillignode does not read the status
-/// of is not told that its status is wanted.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum StatusMessages {
-    /// The status question is not answered and nothing is handed over.
-    #[default]
-    Ignored,
-    /// The status question is answered yes, and reports are handed over.
-    Answered,
-    /// Reports are handed over. The status question is not answered: this
-    /// is for a program that reports without asking.
-    Kept,
-}
+/// The message number shells use to mark their prompts, and the mark for
+/// the start of one.
+const SHELL_MARK: &[u8] = b"133";
+const PROMPT_START: &[u8] = b"A";
 
 #[derive(Default)]
 struct Replies {
     pending: Vec<u8>,
     status: Vec<StatusMessage>,
-    status_messages: StatusMessages,
 }
 
 impl vt100::Callbacks for Replies {
@@ -71,16 +63,19 @@ impl vt100::Callbacks for Replies {
 
     fn unhandled_osc(&mut self, _: &mut vt100::Screen, params: &[&[u8]]) {
         let Some((&code, rest)) = params.split_first() else { return };
-        if code != status::CODE || self.status_messages == StatusMessages::Ignored {
+        if code == SHELL_MARK && rest.first() == Some(&PROMPT_START) {
+            self.status.push(StatusMessage::Prompt);
+            return;
+        }
+        if code != status::CODE {
             return;
         }
         if rest == [b"?"] {
-            if self.status_messages == StatusMessages::Answered {
-                // Answered here, in line with any other question, because
-                // Claude Code takes "no" if a later question is answered first.
-                self.pending.extend_from_slice(status::ANSWER);
-                self.status.push(StatusMessage::Asked);
-            }
+            // Answered for every program: any of them may send reports.
+            // Answered here, in line with any other question, because
+            // Claude Code takes "no" if a later question is answered first.
+            self.pending.extend_from_slice(status::ANSWER);
+            self.status.push(StatusMessage::Asked);
         } else {
             // The parser splits on ';'. A report has none, but if one ever
             // does it is put back as it was, to be read (and refused) whole.
@@ -100,13 +95,10 @@ fn nz(n: u16) -> NonZeroU16 {
 }
 
 impl Terminal {
-    /// A terminal for a program whose status is not read.
+    /// A terminal for any program. It answers the status question and
+    /// hands over status reports, whoever is running in it.
     pub fn new(rows: u16, cols: u16) -> Self {
-        Self::with_status(rows, cols, StatusMessages::Ignored)
-    }
-
-    pub fn with_status(rows: u16, cols: u16, status_messages: StatusMessages) -> Self {
-        let replies = Replies { status_messages, ..Replies::default() };
+        let replies = Replies::default();
         Self { parser: vt100::Parser::new_with_callbacks(nz(rows), nz(cols), HISTORY_ROWS, replies) }
     }
 
@@ -243,7 +235,7 @@ mod tests {
 
     #[test]
     fn answers_the_status_question_in_order_and_hands_over_reports() {
-        let mut t = Terminal::with_status(24, 80, StatusMessages::Answered);
+        let mut t = Terminal::new(24, 80);
         // Claude Code asks, then asks what kind of terminal this is. The
         // status answer must come first.
         assert_eq!(t.feed(b"\x1b]7501;?\x07\x1b[c"), b"\x1b]7501;?\x07\x1b[?1;2c");
@@ -267,45 +259,60 @@ mod tests {
 
     #[test]
     fn a_long_report_arrives_whole() {
-        let mut t = Terminal::with_status(24, 80, StatusMessages::Answered);
+        let mut t = Terminal::new(24, 80);
         let body = format!("state=working:app=claude-code:msg={}", "QUJD".repeat(700));
         let _ = t.feed(format!("\x1b]7501;{body}\x07").as_bytes());
         assert_eq!(t.take_status(), vec![StatusMessage::Report(body.into_bytes())]);
     }
 
     #[test]
-    fn a_program_whose_status_is_not_read_is_not_answered_and_nothing_is_kept() {
+    fn a_program_that_reports_without_asking_has_its_reports_handed_over() {
         let mut t = Terminal::new(24, 80);
-        // Only the question every terminal answers gets an answer.
-        assert_eq!(t.feed(b"\x1b]7501;?\x07\x1b[c"), b"\x1b[?1;2c");
-        let _ = t.feed(b"\x1b]7501;state=blocked:app=claude-code\x07x");
-        assert!(t.take_status().is_empty());
-        // And it is still not drawn.
-        assert_eq!(t.screen().rows(0, 80).next().unwrap(), "x");
-    }
-
-    #[test]
-    fn a_program_that_reports_without_asking_has_its_reports_kept_and_is_never_answered() {
-        let mut t = Terminal::with_status(24, 80, StatusMessages::Kept);
         // Either ending. Codex ends its reports the second way.
         assert!(t.feed(b"\x1b]7501;state=idle:app=codex\x1b\\").is_empty());
-        assert!(t.feed(b"\x1b]7501;state=blocked:app=codex:kind=permission\x07x").is_empty());
+        assert!(t.feed(b"\x1b]7501;state=blocked:app=terraform:kind=permission\x07x").is_empty());
         assert_eq!(
             t.take_status(),
             vec![
                 StatusMessage::Report(b"state=idle:app=codex".to_vec()),
-                StatusMessage::Report(b"state=blocked:app=codex:kind=permission".to_vec()),
+                StatusMessage::Report(b"state=blocked:app=terraform:kind=permission".to_vec()),
             ]
         );
-        // If it did ask, it would not be told yes, and nothing is noted.
-        assert_eq!(t.feed(b"\x1b]7501;?\x07\x1b[c"), b"\x1b[?1;2c");
-        assert!(t.take_status().is_empty());
         assert_eq!(t.screen().rows(0, 80).next().unwrap(), "x");
     }
 
     #[test]
+    fn the_answer_to_the_status_question_carries_nothing_the_program_sent() {
+        let mut t = Terminal::new(24, 80);
+        let _ = t.feed(b"\x1b]7501;state=working:app=evil:msg=QUJD\x07");
+        // A question with more after it is a report, not the question.
+        assert!(t.feed(b"\x1b]7501;?;x\x07").is_empty());
+        assert_eq!(t.feed(b"\x1b]7501;?\x07"), b"\x1b]7501;?\x07");
+    }
+
+    #[test]
+    fn a_shell_marking_a_new_prompt_is_handed_over_in_its_place() {
+        let mut t = Terminal::new(24, 80);
+        let _ = t.feed(b"\x1b]7501;state=working\x07\x1b]133;A\x07\x1b]7501;state=done\x1b\\");
+        // Either ending, with or without more after the mark.
+        let _ = t.feed(b"\x1b]133;A;cl=m\x1b\\");
+        assert_eq!(
+            t.take_status(),
+            vec![
+                StatusMessage::Report(b"state=working".to_vec()),
+                StatusMessage::Prompt,
+                StatusMessage::Report(b"state=done".to_vec()),
+                StatusMessage::Prompt,
+            ]
+        );
+        // The shell's other marks are not the start of a prompt.
+        let _ = t.feed(b"\x1b]133;B\x07\x1b]133;C\x07\x1b]133;D;0\x07\x1b]133\x07\x1b]1337;A\x07");
+        assert!(t.take_status().is_empty());
+    }
+
+    #[test]
     fn other_terminal_messages_are_not_status() {
-        let mut t = Terminal::with_status(24, 80, StatusMessages::Answered);
+        let mut t = Terminal::new(24, 80);
         let _ = t.feed(b"\x1b]0;title\x07\x1b]9;4;1;50\x07\x1b]75010;?\x07");
         assert!(t.take_status().is_empty());
     }

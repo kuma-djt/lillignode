@@ -899,7 +899,8 @@ impl<B: AgentBackend> App<B> {
     }
 
     /// Call after each batch of events and ticks. Gives the Unknown notice
-    /// the first time Claude Code's reporting is seen not to reach Lillignode,
+    /// the first time the reporting of a program expected to report (Claude
+    /// Code, Codex) is seen not to reach Lillignode,
     /// and returns true if the bell should ring: an agent has just started
     /// needing you, and the bell is not switched off.
     pub fn after_events(&mut self) -> bool {
@@ -1343,13 +1344,17 @@ impl<B: AgentBackend> App<B> {
         let Some(e) = self.ws.focused() else { return "No agent is open.".to_string() };
         let t = &e.track;
         let heard = t.trace();
+        // Who the agent was started as, if that is a program known to
+        // report, and who its latest report says it is.
+        let expected = e.kind().reporter();
+        let sender = heard.app.as_deref();
         let mut out = format!("Status report for {}\n\n", e.label());
         // The status in full, with its reason: the sidebar shows it short.
         match e.reported() {
             Some(shown) => {
                 out += &format!("Status: {}", shown.text());
                 if let AgentStatus::Unknown(why) = shown {
-                    out += &format!(". {}", status::why_long(why, e.kind().reporter()));
+                    out += &format!(". {}", status::why_long(why, expected));
                 }
                 out += &format!(". The sidebar shows it as {}.\n", shown.short());
             }
@@ -1357,11 +1362,7 @@ impl<B: AgentBackend> App<B> {
         }
         // The status trace comes before cost, so a short window, which
         // cannot scroll this panel, still shows why a status is what it is.
-        let Some(who) = e.kind().reporter() else {
-            out += &format!("\n{}", self.cost_report(e));
-            return out;
-        };
-        let claude_code = *who == status::CLAUDE_CODE;
+        let claude_code = expected == Some(&status::CLAUDE_CODE);
         out += "\n";
         // Near the top, so a short window still shows it: when it is set,
         // nothing below can be other than empty.
@@ -1374,18 +1375,17 @@ impl<B: AgentBackend> App<B> {
                 value.escape_debug()
             );
         }
-        if !who.asks_first {
-            out += &format!("{} reports without asking Lillignode's terminal first.\n", who.name);
-        } else if e.is_running() {
+        if e.is_running() {
             out += &match heard.asked_after {
                 Some(after) => format!(
                     "Status question: asked {:.1} seconds after it started. Lillignode answered yes.\n",
                     after.as_secs_f32()
                 ),
-                None => format!(
+                None if expected.is_some_and(|who| who.asks_first) => format!(
                     "Status question: not asked in the {} since it started.\n",
                     plural(t.running_for(Instant::now()).as_secs() as usize, "second", "seconds")
                 ),
+                None => "Status question: not asked. A program may report without asking.\n".to_string(),
             };
         }
         out += &format!("Reports received since it started: {}", heard.reports);
@@ -1395,7 +1395,17 @@ impl<B: AgentBackend> App<B> {
                 heard.task_reports
             );
         }
-        out += ".\n\n";
+        out += ".\n";
+        if t.bells_held() > 0 {
+            out += &format!(
+                "Bells not rung: {}. It began to need you more often than Lillignode rings for one agent \
+                 ({} in a row, then one every {} seconds). Its status was still shown each time.\n",
+                t.bells_held(),
+                status::BELLS,
+                status::BELL_BACK.as_secs()
+            );
+        }
+        out += "\n";
         match &heard.last {
             None => out += "No report has been received.\n",
             Some(last) => {
@@ -1412,22 +1422,42 @@ impl<B: AgentBackend> App<B> {
                     "Last report, received {} ago, as it arrived (its ending is not shown):\n{raw}\n",
                     plural(ago as usize, "second", "seconds")
                 );
-                out += &format!("Read as: {}", reading_text(&last.reading));
-                if !last.used {
-                    out += ". Not used: it came before the agent asked the status question";
-                }
-                out += ".\n";
+                out += &format!("Read as: {}.\n", reading_text(&last.reading));
             }
+        }
+        // Who the reports say they are from. The name is the program's own
+        // word for itself, in the few characters the format allows.
+        match (sender, expected) {
+            (Some(app), Some(who)) if app != who.app => {
+                out += &format!(
+                    "Sent by: {}. This agent was started as {}; its reports name another program, and \
+                     the status shown is that program's.\n",
+                    sender_name(app),
+                    who.name
+                );
+            }
+            (Some(app), _) => out += &format!("Sent by: {}.\n", sender_name(app)),
+            (None, _) if heard.reports > heard.task_reports => {
+                out += "Its reports do not say which program sent them.\n";
+            }
+            (None, _) => {}
         }
         if claude_code && self.status_off_switch.is_none() {
             out += &format!("\n{} is not set where Lillignode was started.\n", status::OFF_SWITCH);
         }
-        out += &format!(
-            "\nRead the way {} {} reports. Kept in memory only, never on disk, and started afresh \
-             whenever the agent is started.",
-            who.name, who.checked_with
-        );
-        if *who == status::CODEX {
+        // What the reading was checked against: the program the reports
+        // name, or else the one the agent was started as.
+        let checked = match sender {
+            Some(app) => status::known(app),
+            None => expected,
+        };
+        out += "\nRead as the open Program Status format says (OSC 7501, revision 0.4). ";
+        out += &match checked {
+            Some(who) => format!("Checked with {} {}.", who.name, who.checked_with),
+            None => "Not checked with this program.".to_string(),
+        };
+        out += " Kept in memory only, never on disk, and started afresh whenever the agent is started.";
+        if checked == Some(&status::CODEX) {
             out += "\n\nTwo things to know about Codex's reports. On some of its own set-up screens that \
                     are waiting for an answer it reports Idle, so Lillignode shows Idle there and does \
                     not say it needs you. And Done means its turn ended, not that the work succeeded.";
@@ -1515,13 +1545,22 @@ pub(crate) fn keep_end(text: &str, room: usize) -> String {
 
 fn reading_text(reading: &Reading) -> String {
     match reading {
-        Reading::Status { status, message: Some(m) } => {
+        Reading::Status { status, message: Some(m), .. } => {
             format!("{}, with the message \"{m}\"", status.text())
         }
-        Reading::Status { status, message: None } => status.text(),
+        Reading::Status { status, message: None, .. } => status.text(),
         Reading::Cleared => "the agent withdrew its status".to_string(),
         Reading::Task => "about one of its background tasks, so not used for its status".to_string(),
         Reading::NotUnderstood(why) => format!("not understood, because {why}"),
+    }
+}
+
+/// How the sender of a report is named: by the name people use, for a
+/// program Lillignode knows, and otherwise by its own word, in quotes.
+fn sender_name(app: &str) -> String {
+    match status::known(app) {
+        Some(who) => who.name.to_string(),
+        None => format!("\"{app}\""),
     }
 }
 
@@ -1926,7 +1965,7 @@ Cost",
         let (mut app, _) = app_with_agent();
         app.on_key(press(KeyCode::F(12)));
         app.on_key(press(KeyCode::Char('q')));
-        assert!(app.bar().contains("(Unknown: not Claude Code)"), "{}", app.bar());
+        assert!(app.bar().contains("(Unknown: no report)"), "{}", app.bar());
     }
 
     #[test]
@@ -3095,6 +3134,63 @@ Cost",
         assert!(app.bar().ends_with("2 agents need you."), "{}", app.bar());
     }
 
+    #[test]
+    fn the_status_report_for_any_program_names_its_sender_and_says_what_was_not_checked() {
+        let (mut app, _) = app_with_agent();
+        app.notice = None;
+        let text = app.status_report_text();
+        assert!(
+            text.contains("Status: Unknown: no report. This program has sent no status report."),
+            "{text}"
+        );
+        assert!(text.contains("No report has been received."), "{text}");
+        assert!(!app.after_events(), "nothing was expected of it, so no bell and no notice");
+        assert_eq!(app.notice, None);
+
+        report(&mut app, 1, "state=blocked:app=deploy:kind=coffee");
+        assert!(app.after_events(), "any program that needs you rings");
+        let text = app.status_report_text();
+        assert!(text.contains("Status: Needs you. The sidebar shows it as Needs you."), "{text}");
+        assert!(text.contains("Sent by: \"deploy\".\n"), "{text}");
+        assert!(text.contains("(OSC 7501, revision 0.4). Not checked with this program."), "{text}");
+        assert!(!text.contains("Codex"), "{text}");
+
+        report(&mut app, 1, "state=idle");
+        let text = app.status_report_text();
+        assert!(text.contains("Its reports do not say which program sent them."), "{text}");
+        // Not understood, from a program never known to work: no notice.
+        report(&mut app, 1, "state=pondering");
+        assert!(!app.after_events());
+        assert_eq!(app.notice, None);
+        assert!(app.status_report_text().contains("Status: Unknown: not understood."));
+    }
+
+    #[test]
+    fn the_status_report_says_when_reports_name_another_program_than_the_agent_was_started_as() {
+        let mut app = app_with_claude_and_codex();
+        codex_reports(&mut app, 2, "state=working:app=claude-code");
+        let text = app.status_report_text();
+        assert!(text.contains("Status: Working."), "{text}");
+        assert!(text.contains("Sent by: Claude Code. This agent was started as Codex;"), "{text}");
+        assert!(text.contains("Checked with Claude Code 2.1.325."), "{text}");
+        assert!(!text.contains("Two things to know about Codex's reports"), "{text}");
+    }
+
+    #[test]
+    fn the_status_report_says_how_many_bells_were_not_rung() {
+        let (mut app, _) = app_with_agent();
+        let mut rung = 0;
+        for _ in 0..10 {
+            report(&mut app, 1, "state=working");
+            report(&mut app, 1, "state=blocked");
+            rung += u32::from(app.after_events());
+        }
+        assert_eq!(rung, u32::from(status::BELLS));
+        let text = app.status_report_text();
+        assert!(text.contains("Bells not rung: 7. It began to need you more often"), "{text}");
+        assert!(text.contains("(3 in a row, then one every 20 seconds)"), "{text}");
+    }
+
     /// One Claude Code agent (id 1, asked and answered) and one Codex agent
     /// (id 2), which is in front.
     fn app_with_claude_and_codex() -> App<Fake> {
@@ -3143,19 +3239,20 @@ Cost",
             text.starts_with("Status report for Codex (web)\n\nStatus: Needs you: permission."),
             "{text}"
         );
-        assert!(text.contains("Codex reports without asking Lillignode's terminal first."), "{text}");
+        assert!(text.contains("Status question: not asked. A program may report without asking."), "{text}");
         assert!(text.contains("Reports received since it started: 1."), "{text}");
         assert!(text.contains("7501;state=blocked:app=codex:kind=permission"), "{text}");
         assert!(text.contains("Read as: "), "{text}");
-        assert!(text.contains("Read the way Codex 0.169.0 reports."), "{text}");
+        assert!(text.contains("Sent by: Codex.\n"), "{text}");
+        assert!(text.contains("(OSC 7501, revision 0.4). Checked with Codex 0.169.0."), "{text}");
         // What Codex does not say, said plainly.
         assert!(text.contains("it reports Idle, so Lillignode shows Idle there"), "{text}");
         assert!(text.contains("Done means its turn ended, not that the work succeeded."), "{text}");
         // Nothing that is only true of Claude Code.
-        for wrong in ["CLAUDE_CODE_DISABLE_TERMINAL_TITLE", "Status question:", "Not used", "2.1.325"] {
+        for wrong in ["CLAUDE_CODE_DISABLE_TERMINAL_TITLE", "Status question: asked", "2.1.325"] {
             assert!(!text.contains(wrong), "{wrong} in: {text}");
         }
-        assert!(!text.contains("Read the way Claude Code"), "{text}");
+        assert!(!text.contains("Checked with Claude Code"), "{text}");
 
         // The Claude Code agent's report is as it was.
         app.ws.focus_next();
@@ -3163,7 +3260,7 @@ Cost",
         assert!(text.starts_with("Status report for Claude Code (a)"), "{text}");
         assert!(text.contains("CLAUDE_CODE_DISABLE_TERMINAL_TITLE is set"), "{text}");
         assert!(text.contains("Status question: asked"), "{text}");
-        assert!(text.contains("Read the way Claude Code 2.1.325 reports."), "{text}");
+        assert!(text.contains("Checked with Claude Code 2.1.325."), "{text}");
         assert!(!text.contains("Codex"), "{text}");
     }
 

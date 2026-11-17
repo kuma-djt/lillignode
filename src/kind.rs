@@ -1,25 +1,29 @@
 //! What kind of agent a program is.
 //!
 //! Lillignode does more for an agent it knows by name: it may give the agent
-//! a conversation to continue, read its status and read its cost. Each of
-//! those is a question, and each is answered here, once, by the agent's kind.
+//! a conversation to continue and read its cost, and it knows whether to
+//! expect status reports from it. Each of those is a question, and each is
+//! answered here, once, by the agent's kind.
+//!
+//! Status itself does not depend on the kind: any program that reports its
+//! status has it shown.
 //!
 //! An agent's kind is worked out from its command when it is first started
 //! and is saved with it. From then on the saved word decides, not the name.
 
 use std::path::Path;
 
-use crate::status::{self, NoSource, Report, Reporter, StatusSource, Why};
-use crate::terminal::StatusMessages;
+use crate::status::{self, Report, Reporter, StatusSource, Why};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AgentKind {
-    /// Claude Code: a conversation to continue, its status and its cost.
+    /// Claude Code: a conversation to continue and its cost. It is expected
+    /// to report its status.
     ClaudeCode,
-    /// Codex: its status. Its conversation is not continued and its cost
-    /// is not read.
+    /// Codex: expected to report its status. Its conversation is not
+    /// continued and its cost is not read.
     Codex,
-    /// Any other program. Lillignode can tell only whether it is running.
+    /// Any other program. It has a status if it reports one.
     Program,
 }
 
@@ -101,8 +105,8 @@ impl AgentKind {
         }
     }
 
-    /// The program whose status reports are read for an agent of this kind.
-    /// None for a kind whose status is not read.
+    /// The program an agent of this kind is expected to be, for a kind
+    /// known to report its status. None for a kind nothing is expected of.
     pub fn reporter(self) -> Option<&'static Reporter> {
         match self {
             AgentKind::ClaudeCode => Some(&status::CLAUDE_CODE),
@@ -111,20 +115,13 @@ impl AgentKind {
         }
     }
 
-    /// Where the status of an agent of this kind comes from.
+    /// Where the status of an agent of this kind comes from: its own
+    /// reports, for every kind. The kind decides only what is shown and
+    /// said while it has sent none.
     pub fn status_source(self) -> Box<dyn StatusSource> {
         match self.reporter() {
-            Some(who) => Box::new(Report::from(who)),
-            None => Box::new(NoSource::new(Why::NotClaudeCode)),
-        }
-    }
-
-    /// What the terminal of an agent of this kind does with status messages.
-    pub fn status_messages(self) -> StatusMessages {
-        match self {
-            AgentKind::ClaudeCode => StatusMessages::Answered,
-            AgentKind::Codex => StatusMessages::Kept,
-            AgentKind::Program => StatusMessages::Ignored,
+            Some(who) => Box::new(Report::expected(who)),
+            None => Box::new(Report::unexpected(Why::NothingSent)),
         }
     }
 
@@ -189,11 +186,10 @@ mod tests {
     }
 
     #[test]
-    fn codex_has_its_status_read_and_nothing_else() {
+    fn codex_is_expected_to_report_and_gets_no_extras() {
         let codex = AgentKind::Codex;
         assert_eq!(codex.name("codex.cmd"), "Codex");
         assert_eq!(codex.reporter(), Some(&status::CODEX));
-        assert_eq!(codex.status_messages(), StatusMessages::Kept);
         // It is never told which conversation to use, and never asked to
         // continue one: its idea of the last one may not be this agent's.
         assert!(!codex.keeps_conversations());
