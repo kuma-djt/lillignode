@@ -181,7 +181,7 @@ These are known and not yet fixed. Please do not report them as security problem
 ## Other limits
 
 - **Windows 11 only so far.** Use Windows Terminal (see above).
-- **Claude Code is the one agent with status, cost and a conversation that continues.** Its status report format is not published and was read from Claude Code 2.1.325; a Claude Code update can change it, and then status shows Unknown.
+- **Claude Code is the one agent with status, cost and a conversation that continues.** Status reports come in an open format, the [Program Status proposal (OSC 7501)](https://mitchellh.com/writing/program-status-osc7501) by Mitchell Hashimoto. The proposal is a draft (revision 0.4) and can change.
 - **Codex has status only.** See [Codex](#codex) for what that leaves out and what to watch for.
 - **If `CLAUDE_CODE_DISABLE_TERMINAL_TITLE` is set where you start Lillignode,** Claude Code does not report status and every agent shows Unknown. Lillignode leaves your setting alone.
 - **Agents stop when you quit.** They reopen next time. Lillignode asks before quitting only while an agent may be in the middle of something.
