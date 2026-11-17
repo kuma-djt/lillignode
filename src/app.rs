@@ -140,6 +140,11 @@ pub struct App<B: AgentBackend> {
     /// Whole seconds since Lillignode started, set by the caller before it
     /// draws. A Working agent's sign in the sidebar moves with it.
     pub clock: u64,
+    /// The first agent the sidebar showed last time it was drawn, when not
+    /// all of them fit. Kept so the list moves only as far as it must.
+    pub sidebar_top: std::cell::Cell<usize>,
+    /// The first line of the status report on screen, while it is open.
+    pub report_top: usize,
     /// The window, as last told by `set_window`. Decides whether two
     /// agents fit side by side, and what size agents are given.
     window: Rect,
@@ -313,6 +318,8 @@ impl<B: AgentBackend> App<B> {
             too_small: false,
             colors: Depth::Full,
             clock: 0,
+            report_top: 0,
+            sidebar_top: std::cell::Cell::new(0),
             window: Rect::default(),
             held_paste: None,
             state_dir,
@@ -422,8 +429,7 @@ impl<B: AgentBackend> App<B> {
                 self.command(key);
             }
             Mode::History => self.history_key(key),
-            // Any key closes it and is not passed on.
-            Mode::StatusReport => self.mode = Mode::Normal,
+            Mode::StatusReport => self.report_key(key),
             Mode::NewAgent(_) => self.new_agent_key(key),
             Mode::Confirm(what) => {
                 self.mode = Mode::Normal;
@@ -539,6 +545,7 @@ impl<B: AgentBackend> App<B> {
             KeyCode::Char('x') if self.ws.focused().is_some() => self.act(Action::Close),
             KeyCode::Char('s') => {
                 if self.ws.focused().is_some() {
+                    self.report_top = 0;
                     self.mode = Mode::StatusReport;
                 } else {
                     self.refuse("There is no agent to show a status report for.".to_string());
@@ -612,6 +619,40 @@ impl<B: AgentBackend> App<B> {
                 }
             }
         }
+    }
+
+    /// The status report scrolls with the history keys. Any other key
+    /// closes it and is not passed on. A report that fits does not move.
+    fn report_key(&mut self, key: KeyEvent) {
+        let view = ui::report_view(&self.status_report_text(), self.window);
+        let Some((lines, page)) = view.filter(|_| self.is_scroll_key(&key)) else {
+            self.mode = Mode::Normal;
+            return;
+        };
+        let last = lines.len().saturating_sub(page);
+        let top = self.report_top.min(last);
+        self.report_top = match key.code {
+            KeyCode::PageUp => top.saturating_sub(page),
+            KeyCode::PageDown => (top + page).min(last),
+            KeyCode::Up => top.saturating_sub(1),
+            KeyCode::Down => (top + 1).min(last),
+            _ => 0,
+        };
+    }
+
+    /// The keys that move through history and the status report.
+    fn is_scroll_key(&self, key: &KeyEvent) -> bool {
+        key.modifiers.is_empty()
+            && matches!(
+                key.code,
+                KeyCode::PageUp | KeyCode::PageDown | KeyCode::Up | KeyCode::Down | KeyCode::Home
+            )
+    }
+
+    /// True while the status report is longer than its panel.
+    fn report_scrolls(&self) -> bool {
+        ui::report_view(&self.status_report_text(), self.window)
+            .is_some_and(|(lines, page)| lines.len() > page)
     }
 
     /// Scroll the focused agent's history. Any key that is not a scroll key
@@ -917,6 +958,13 @@ impl<B: AgentBackend> App<B> {
                 format!("{}  {} two side by side", menu_line(), key("v"))
             }
             Mode::Menu => menu_line(),
+            Mode::StatusReport if self.report_scrolls() => format!(
+                "{} of {}.  {} scroll   {}: back to the agent",
+                mode("STATUS REPORT"),
+                self.focused_label(),
+                ["PgUp", "PgDn", "Up", "Down", "Home"].map(key).join(" "),
+                key("any other key")
+            ),
             Mode::StatusReport => format!(
                 "{} of {}.  {}: back to the agent",
                 mode("STATUS REPORT"),
@@ -1446,8 +1494,8 @@ impl<B: AgentBackend> App<B> {
             }
             None => out += &format!("Status: {}. The program is not running.\n", e.status.text()),
         }
-        // The status trace comes before cost, so a short window, which
-        // cannot scroll this panel, still shows why a status is what it is.
+        // The status trace comes before cost, so the first page, in a short
+        // window, still shows why a status is what it is.
         let claude_code = expected == Some(&status::CLAUDE_CODE);
         out += "\n";
         // Near the top, so a short window still shows it: when it is set,
@@ -1963,6 +2011,53 @@ mod tests {
     }
 
     #[test]
+    fn a_status_report_longer_than_its_panel_scrolls_with_the_history_keys() {
+        let (mut app, sent) = app_with_agent();
+        let small = Rect::new(0, 0, crate::ui::MIN_COLS, crate::ui::MIN_ROWS);
+        app.set_window(small);
+        app.on_key(press(KeyCode::F(12)));
+        app.on_key(press(KeyCode::Char('s')));
+        let (lines, page) = crate::ui::report_view(&app.status_report_text(), small).unwrap();
+        assert!(lines.len() > page, "the test needs a report that does not fit");
+        assert!(app.bar().contains("PgUp PgDn Up Down Home scroll   any other key: back"), "{}", app.bar());
+        let foot = |app: &App<Fake>| screen(app, small.width, small.height)[8].trim().to_string();
+        assert_eq!(foot(&app), format!("│  lines 1 to {page} of {}", lines.len()));
+
+        app.on_key(press(KeyCode::Down));
+        assert_eq!(app.report_top, 1);
+        app.on_key(press(KeyCode::PageDown));
+        assert_eq!(app.report_top, (1 + page).min(lines.len() - page));
+        for _ in 0..lines.len() {
+            app.on_key(press(KeyCode::PageDown));
+        }
+        assert_eq!(app.report_top, lines.len() - page, "it stops at the last page");
+        assert!(foot(&app).ends_with(&format!("to {n} of {n}", n = lines.len())), "{}", foot(&app));
+        app.on_key(press(KeyCode::Up));
+        assert_eq!(app.report_top, lines.len() - page - 1);
+        app.on_key(press(KeyCode::Home));
+        assert_eq!(app.report_top, 0);
+        app.on_key(press(KeyCode::PageUp));
+        assert_eq!(app.report_top, 0, "it stops at the top");
+        assert!(matches!(app.mode, Mode::StatusReport), "scroll keys never close it");
+
+        // Any other key closes it and goes nowhere; opened again, it starts at the top.
+        app.on_key(press(KeyCode::PageDown));
+        app.on_key(press(KeyCode::End));
+        assert!(matches!(app.mode, Mode::Normal));
+        assert!(sent.borrow().is_empty(), "{:?}", sent.borrow());
+        app.on_key(press(KeyCode::F(12)));
+        app.on_key(press(KeyCode::Char('s')));
+        assert_eq!(app.report_top, 0);
+
+        // A report that fits: the scroll keys do nothing and do not close it.
+        app.set_window(Rect::new(0, 0, 200, 80));
+        assert!(app.bar().ends_with("Any key: back to the agent"), "{}", app.bar());
+        app.on_key(press(KeyCode::PageDown));
+        assert_eq!(app.report_top, 0);
+        assert!(matches!(app.mode, Mode::StatusReport));
+    }
+
+    #[test]
     fn s_with_no_agent_says_so() {
         let mut app = App::launch(
             Fake::default(),
@@ -2027,6 +2122,43 @@ Cost",
     }
 
     const PERMISSION: &str = "state=blocked:app=claude-code:kind=permission";
+
+    #[test]
+    fn a_sidebar_too_short_for_every_agent_says_how_many_are_where_and_who_needs_you() {
+        let mut app = app_with_claude_agents(6);
+        for id in 1..=6 {
+            report(&mut app, id, "state=idle:app=claude-code");
+        }
+        report(&mut app, 1, PERMISSION);
+        let side = |app: &App<Fake>| -> Vec<String> {
+            screen(app, crate::ui::MIN_COLS, crate::ui::MIN_ROWS)
+                .iter()
+                .take(9)
+                .map(|r| r.chars().take(27).collect::<String>().trim_end().to_string())
+                .collect()
+        };
+        // The last one started, f, is in front, at the foot: a is hidden
+        // above and needs you, so it is named.
+        let rows = side(&app);
+        assert_eq!(rows[0], " Lillignode  1 NEEDS YOU");
+        assert_eq!(rows[1], " 3 more above");
+        assert_eq!(rows[2], "  Claude Code NEEDS YOU");
+        assert!(rows[7].starts_with(">/\\z Claude Code"), "{rows:#?}");
+        assert_eq!(rows[8], "  f  Idle");
+        // Tab round to a: the list follows it, and says what is below.
+        app.ws.focus_next();
+        let rows = side(&app);
+        assert!(rows[1].starts_with(">/\\! Claude Code"), "{rows:#?}");
+        assert_eq!(rows[7], " 3 more below");
+        assert_eq!(rows[8], "", "nothing below the pointer: nobody hidden needs you");
+        // Next, and next: the list does not move while the front is on screen.
+        app.ws.focus_next();
+        app.ws.focus_next();
+        assert_eq!(side(&app)[1], " /\\! Claude Code", "a is still the first row shown");
+        // A window with room for all: no pointer.
+        let all = screen(&app, 100, 20);
+        assert!(!all.iter().any(|r| r.contains("more above") || r.contains("more below")), "{all:#?}");
+    }
 
     #[test]
     fn an_agent_behind_that_needs_you_is_named_with_the_keys_to_reach_it() {

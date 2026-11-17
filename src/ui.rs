@@ -184,6 +184,63 @@ fn agent_rows(entry: &Entry, focused: bool, width: usize, clock: u64, p: Palette
     [first, second]
 }
 
+/// The rows that stand for agents the sidebar has no room for: how many,
+/// and where, in words; and when any of them needs you, who, on a yellow
+/// row, so an agent that needs you is never out of sight without a pointer.
+fn more_rows(hidden: &[Entry], where_: &str, width: usize, p: Palette) -> Vec<Line<'static>> {
+    let mut rows =
+        vec![Line::from(Span::styled(clip(&format!(" {} more {where_}", hidden.len()), width), p.dim()))];
+    let waiting: Vec<&Entry> = hidden.iter().filter(|e| e.needs_you().is_some()).collect();
+    let who = match waiting.as_slice() {
+        [] => return rows,
+        [one] => format!("{}{} NEEDS YOU", " ".repeat(DETAIL_AT), one.name()),
+        many => format!("{}{} of them NEED YOU", " ".repeat(DETAIL_AT), many.len()),
+    };
+    rows.push(Line::from(Span::styled(format!("{:<width$}", clip(&who, width)), p.needs_you_block())));
+    rows
+}
+
+/// The rows a "more" pointer takes for these hidden agents: none when
+/// there are none, two when one of them needs you, otherwise one.
+fn more_height(needs: &[bool]) -> usize {
+    match (needs.is_empty(), needs.contains(&true)) {
+        (true, _) => 0,
+        (false, true) => 2,
+        (false, false) => 1,
+    }
+}
+
+/// Which agents the sidebar shows, first to last, in `room` rows, `per`
+/// rows an agent. All of them when they fit. Otherwise the list scrolls only
+/// as far as it must to keep the agent in front on screen (and, with two
+/// side by side, the one `beside` it when there is room), starting as near
+/// as it can to where it started last time (`top`). Hidden agents above and
+/// below are pointed to by "more" rows, which take room too.
+pub(crate) fn shown_agents(
+    needs: &[bool],
+    per: usize,
+    room: usize,
+    front: usize,
+    beside: Option<usize>,
+    top: usize,
+) -> (usize, usize) {
+    let count = needs.len();
+    if count == 0 || count * per <= room {
+        return (0, count.saturating_sub(1));
+    }
+    let fits = |a: usize, b: usize| {
+        more_height(&needs[..a]) + (b - a + 1) * per + more_height(&needs[b + 1..]) <= room
+    };
+    // For each first row that keeps the front on screen, the most it can show.
+    let windows: Vec<(usize, usize)> = (0..=front.min(count - 1))
+        .filter_map(|a| (front..count).rev().find(|&b| fits(a, b)).map(|b| (a, b)))
+        .collect();
+    let with_beside: Vec<(usize, usize)> =
+        windows.iter().copied().filter(|&(a, b)| beside.is_none_or(|i| a <= i && i <= b)).collect();
+    let choices = if with_beside.is_empty() { windows } else { with_beside };
+    choices.into_iter().min_by_key(|&(a, _)| (a.abs_diff(top), a)).unwrap_or((front, front))
+}
+
 fn draw_sidebar<B: AgentBackend>(frame: &mut Frame, area: Rect, app: &App<B>, p: Palette) {
     let panel = p.panel();
     let row = (area.width - 1) as usize;
@@ -200,7 +257,21 @@ fn draw_sidebar<B: AgentBackend>(frame: &mut Frame, area: Rect, app: &App<B>, p:
     if app.ws.entries().is_empty() {
         lines.push(Line::from(Span::styled(" No agents yet. Press n.", p.dim())));
     }
-    for (i, entry) in app.ws.entries().iter().enumerate() {
+    // Which agents fit. The total of cost at the foot gives way first.
+    let entries = app.ws.entries();
+    let per = if app.cost_shown() { 3 } else { 2 };
+    let total = app.cost_total();
+    let room = (area.height as usize).saturating_sub(1);
+    let total_fits = entries.len() * per + total.len() <= room;
+    let needs: Vec<bool> = entries.iter().map(|e| e.needs_you().is_some()).collect();
+    let front = app.ws.focused_index().unwrap_or(0);
+    let beside = app.ws.pair().map(|pair| if pair.left == front { pair.right } else { pair.left });
+    let (first, last) = shown_agents(&needs, per, room, front, beside, app.sidebar_top.get());
+    app.sidebar_top.set(first);
+    if first > 0 {
+        lines.extend(more_rows(&entries[..first], "above", row, p));
+    }
+    for (i, entry) in entries.iter().enumerate().take(last + 1).skip(first) {
         let focused = app.ws.focused_index() == Some(i);
         lines.extend(agent_rows(entry, focused, row, app.clock, p));
         if app.cost_shown() {
@@ -220,10 +291,15 @@ fn draw_sidebar<B: AgentBackend>(frame: &mut Frame, area: Rect, app: &App<B>, p:
             ]));
         }
     }
+    if last + 1 < entries.len() {
+        lines.extend(more_rows(&entries[last + 1..], "below", row, p));
+    }
     frame.render_widget(Paragraph::new(lines).style(panel), Rect { width: area.width - 1, ..area });
-    // The total stays at the foot of the sidebar, whatever is above it.
+    // The total stays at the foot of the sidebar, below every agent row.
+    // With no room for it there it is not drawn; the status report has it.
+    let total = if total_fits { total } else { Vec::new() };
     let total: Vec<Line> =
-        app.cost_total().iter().map(|text| Line::from(format!("{:<row$}", clip(text, row)))).collect();
+        total.iter().map(|text| Line::from(format!("{:<row$}", clip(text, row)))).collect();
     let rows = (total.len() as u16).min(area.height);
     frame.render_widget(
         Paragraph::new(total).style(panel),
@@ -237,10 +313,55 @@ fn draw_sidebar<B: AgentBackend>(frame: &mut Frame, area: Rect, app: &App<B>, p:
     );
 }
 
+/// Where a message goes inside the agent's area: two columns in from each
+/// side, one row down.
+fn padded(area: Rect) -> Rect {
+    Rect::new(area.x + 2, area.y + 1, area.width.saturating_sub(4), area.height.saturating_sub(1))
+}
+
 fn message(frame: &mut Frame, area: Rect, text: String) {
-    let padded =
-        Rect::new(area.x + 2, area.y + 1, area.width.saturating_sub(4), area.height.saturating_sub(1));
-    frame.render_widget(Paragraph::new(text).wrap(Wrap { trim: false }), padded);
+    frame.render_widget(Paragraph::new(text).wrap(Wrap { trim: false }), padded(area));
+}
+
+/// The status report as it is drawn in this window: its lines, wrapped at
+/// spaces, and how many of them are shown at once. When they do not all
+/// fit, one row fewer is shown, for the line that says where the reader is.
+/// None when the window is too small to draw it.
+pub fn report_view(text: &str, window: Rect) -> Option<(Vec<String>, usize)> {
+    let area = padded(areas(window)?.agent);
+    let width = area.width as usize;
+    let mut lines = Vec::new();
+    for paragraph in text.split('\n') {
+        let chars: Vec<char> = paragraph.chars().collect();
+        let wrapped = wrap_at_spaces(&chars, width);
+        if wrapped.is_empty() {
+            lines.push(String::new());
+        }
+        lines.extend(wrapped.iter().map(|&(s, e)| chars[s..e].iter().collect::<String>()));
+    }
+    // The text ends with a line break, which leaves nothing to show.
+    while lines.last().is_some_and(String::is_empty) {
+        lines.pop();
+    }
+    let rows = area.height as usize;
+    let shown = if lines.len() > rows { rows.saturating_sub(1).max(1) } else { rows };
+    Some((lines, shown))
+}
+
+/// The status report, from line `top`, with "line 21 of 46" at its foot
+/// when it does not all fit.
+fn draw_report<B: AgentBackend>(frame: &mut Frame, area: Rect, app: &App<B>, p: Palette) {
+    let Some((lines, shown)) = report_view(&app.status_report_text(), frame.area()) else { return };
+    let top = app.report_top.min(lines.len().saturating_sub(shown));
+    let mut rows: Vec<Line> = lines.iter().skip(top).take(shown).map(|l| Line::from(l.clone())).collect();
+    if lines.len() > shown {
+        let last = (top + shown).min(lines.len());
+        rows.push(Line::from(Span::styled(
+            format!("lines {} to {last} of {}", top + 1, lines.len()),
+            p.dim(),
+        )));
+    }
+    frame.render_widget(Paragraph::new(rows), padded(area));
 }
 
 /// No agents are open: the gnome, what Lillignode is in two sentences, and
@@ -349,7 +470,7 @@ fn pair_shown<B: AgentBackend>(app: &App<B>, window: Rect) -> Option<crate::work
 
 fn draw_agent<B: AgentBackend>(frame: &mut Frame, area: Rect, app: &App<B>, p: Palette) {
     if matches!(app.mode, Mode::StatusReport) {
-        message(frame, area, app.status_report_text());
+        draw_report(frame, area, app, p);
         return;
     }
     let Some(front) = app.ws.focused() else {
@@ -571,6 +692,35 @@ mod tests {
     fn wrapped(text: &str, width: usize) -> Vec<String> {
         let chars: Vec<char> = text.chars().collect();
         wrap_at_spaces(&chars, width).iter().map(|&(s, e)| chars[s..e].iter().collect()).collect()
+    }
+
+    #[test]
+    fn the_sidebar_shows_every_agent_that_fits_and_otherwise_follows_the_one_in_front() {
+        let calm = [false; 10];
+        // All fit: all shown, from the first.
+        assert_eq!(shown_agents(&calm[..4], 2, 8, 3, None, 0), (0, 3));
+        // Ten agents in 8 rows, two rows each, the first in front: three,
+        // then one row saying more are below.
+        assert_eq!(shown_agents(&calm, 2, 8, 0, None, 0), (0, 2));
+        // The front moves down: the list moves only as far as it must.
+        assert_eq!(shown_agents(&calm, 2, 8, 3, None, 0), (1, 3));
+        assert_eq!(shown_agents(&calm, 2, 8, 9, None, 1), (7, 9));
+        // And back up: it keeps where it was while the front is in view.
+        assert_eq!(shown_agents(&calm, 2, 8, 8, None, 7), (7, 9));
+        assert_eq!(shown_agents(&calm, 2, 8, 5, None, 7), (5, 7));
+        // An agent that needs you, hidden, takes a second row to be named.
+        let mut needs = calm;
+        needs[9] = true;
+        let (first, last) = shown_agents(&needs, 2, 8, 0, None, 0);
+        assert_eq!((first, last), (0, 2), "one more row below: 3 agents and 2 rows still fit");
+        assert_eq!(2 * 3 + more_height(&needs[last + 1..]), 8);
+        // With cost on, three rows an agent: the front is always shown.
+        assert_eq!(shown_agents(&needs, 3, 8, 5, None, 0), (5, 5));
+        // Two side by side: the one beside the front is kept too, when it fits.
+        assert_eq!(shown_agents(&calm, 2, 8, 4, Some(5), 0), (3, 5));
+        let (first, last) = shown_agents(&calm, 3, 8, 4, Some(9), 0);
+        assert!(first <= 4 && (4..9).contains(&last), "no room for both: the front is kept");
+        assert_eq!(shown_agents(&[], 2, 8, 0, None, 0), (0, 0));
     }
 
     #[test]

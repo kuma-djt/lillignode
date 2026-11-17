@@ -36,7 +36,7 @@ Each agent in the sidebar has two lines: a gnome mark and its name, then its fol
 | `.` | Starting |
 | `-` | Exited |
 
-The sidebar says the status in a word or two: "NEEDS YOU", "Unknown", "Error". Why (permission or a question, why status is unknown, the error's own words) is in the notice under the agent and in the status report (menu key, then `s`).
+The sidebar says the status in a word or two: "NEEDS YOU", "Unknown", "Error". Why (permission or a question, why status is unknown, the error's own words) is in the notice under the agent and in the status report (menu key, then `s`). When there are more agents than the sidebar has room for, it keeps the one in front in view and says how many are above and below; if one of those needs you, it names it on a yellow row.
 
 **Yellow means Needs you and nothing else.** An agent waiting for you gets a yellow block in the sidebar, a count beside the name at the top, a notice naming it, and one bell. Copper marks the hats, the name at the top and the agent in front, which also has a `>` before its hat.
 
@@ -67,7 +67,7 @@ Inside Lillignode, press `n` to start an agent: Enter for Claude Code, then the 
 | n | new agent |
 | x | close the agent in front |
 | r | start it again after it has stopped |
-| s | its status report (and its cost, if switched on) |
+| s | its status report (and its cost, if switched on). When it is longer than the window, PgUp, PgDn, Up, Down and Home move through it |
 | PgUp | read back its history |
 | v | two agents side by side, or back to one |
 
@@ -207,7 +207,7 @@ These are known and not yet fixed. Please do not report them as security problem
 - **Codex has status only.** See [Codex](#codex) for what that leaves out and what to watch for.
 - **If `CLAUDE_CODE_DISABLE_TERMINAL_TITLE` is set where you start Lillignode,** Claude Code does not report status and every Claude Code agent shows Unknown. Lillignode leaves your setting alone.
 - **Agents stop when you quit.** They reopen next time. Lillignode asks before quitting only while an agent may be in the middle of something.
-- **The sidebar and the status report do not scroll,** the mouse is not passed to agents, history cannot be searched, and an agent cannot be renamed.
+- **The mouse is not passed to agents,** history cannot be searched, and an agent cannot be renamed.
 - **No installer, and the program is not signed.** On Windows, build it yourself or use the release zip.
 
 ## What it touches on your machine
