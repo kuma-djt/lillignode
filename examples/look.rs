@@ -69,7 +69,7 @@ fn busy(cols: u16, rows: u16) -> App<Fake> {
         app.ws.start_new("claude", PathBuf::from("/work").join(folder)).unwrap();
         reports(&mut app, i as u32 + 1, "?");
     }
-    app.ws.start_new("codex", PathBuf::from("/work/tools")).unwrap();
+    app.ws.start_new("aider", PathBuf::from("/work/tools")).unwrap();
     reports(&mut app, 1, "state=working:app=claude-code");
     reports(&mut app, 2, "state=blocked:app=claude-code:kind=permission");
     reports(&mut app, 3, "state=done:app=claude-code");

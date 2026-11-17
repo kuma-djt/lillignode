@@ -24,6 +24,9 @@
 //!                           ask the status question, then report on keys
 //!                           (see `status_mode`)
 //!   standin status-silent   never ask, never report
+//!   standin codex           report status the way Codex 0.169.0 does:
+//!                           without asking, under its own name, on keys
+//!                           (see `codex_mode`)
 //!   standin status-echo     ask the status question the way Claude Code
 //!                           does, then take pastes and report input as
 //!                           `echo` does
@@ -312,6 +315,48 @@ fn status_mode() {
     }
 }
 
+/// Report the way Codex was seen to: nothing is asked; each report names
+/// `codex` and ends with ESC \ where Claude Code's ends with a bell; and the
+/// window title is set before it, ending in a bell that is not meant for
+/// anybody.
+fn codex_report(body: &str) {
+    let mut out = std::io::stdout();
+    let _ = write!(out, "\x1b]0;codex\x07\x1b]7501;{body}\x1b\\");
+    let _ = out.flush();
+}
+
+fn codex_mode() {
+    codex_report("state=idle:app=codex");
+    let mut stdin = std::io::stdin();
+    let mut buf = [0u8; 256];
+    // One key, one report.
+    loop {
+        let n = match stdin.read(&mut buf) {
+            Ok(0) | Err(_) => return,
+            Ok(n) => n,
+        };
+        for &key in &buf[..n] {
+            let body = match key {
+                b'w' => "state=working:app=codex",
+                b'p' => "state=blocked:app=codex:kind=permission",
+                b'q' => "state=blocked:app=codex:kind=question",
+                b'a' => "state=blocked:app=codex:kind=auth",
+                b'd' => "state=done:app=codex",
+                b'i' => "state=idle:app=codex",
+                b'e' => "state=error:app=codex",
+                b'c' => "state=clear",
+                // A state nobody has seen, and a report under another name.
+                b'u' => "state=pondering:app=codex",
+                b'x' => "state=blocked:app=claude-code",
+                0x04 => return,
+                _ => continue,
+            };
+            codex_report(body);
+            say(&format!("SENT {}", key as char));
+        }
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mode = args.first().map(String::as_str).unwrap_or("echo");
@@ -413,6 +458,10 @@ fn main() {
             print!("\x1b[?2004h");
             say("STANDIN TAKES PASTES");
             echo(|_| {});
+        }
+        "codex" => {
+            say("STANDIN READY codex");
+            codex_mode();
         }
         "status-silent" => {
             say("STANDIN READY status-silent");

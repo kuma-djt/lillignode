@@ -14,6 +14,7 @@ use crate::agent::{AgentBackend, AgentEvent, Size};
 use crate::config::{Billing, Config};
 use crate::cost::{self, Cost, Usage, Waiting, WhyNot};
 use crate::keys;
+use crate::kind::AgentKind;
 use crate::look::Depth;
 use crate::state::{self, LoadOutcome};
 use crate::status::{self, AgentStatus, Reading};
@@ -150,7 +151,7 @@ pub struct App<B: AgentBackend> {
     status_off_switch: Option<String>,
     /// The notice that Claude Code's status is not reaching Lillignode is
     /// given once per run.
-    unknown_notice_given: bool,
+    unknown_notice_given: Vec<AgentKind>,
     /// The notice that a cost could not be read is given once per run too.
     cost_notice_given: bool,
     /// Windows only: Microsoft's newer pseudo-terminal is not beside
@@ -270,7 +271,7 @@ impl<B: AgentBackend> App<B> {
             state_dir,
             launch_dir,
             status_off_switch: std::env::var(status::OFF_SWITCH).ok(),
-            unknown_notice_given: false,
+            unknown_notice_given: Vec::new(),
             cost_notice_given: false,
             newer_pty_missing: newer_pty_missing(),
         };
@@ -903,22 +904,28 @@ impl<B: AgentBackend> App<B> {
     /// needing you, and the bell is not switched off.
     pub fn after_events(&mut self) -> bool {
         let began = self.ws.take_began_needing_you();
-        if !self.unknown_notice_given {
-            let broken =
-                self.ws.entries().iter().filter(|e| e.is_claude_code()).find_map(|e| match e.reported() {
-                    Some(AgentStatus::Unknown(why)) if why.is_breakage() => Some(why),
-                    _ => None,
-                });
-            if let Some(why) = broken {
-                self.unknown_notice_given = true;
-                // Never replaces a notice already up (it may be a failure the
-                // user still has to act on): it goes first, the other after it.
-                let text = self.unknown_notice(why);
-                self.notice = Some(match self.notice.take() {
-                    Some(earlier) => format!("{text}  {earlier}"),
-                    None => text,
-                });
+        // Said once for each kind of agent: one kind's reporting failing
+        // says nothing about another's.
+        let broken = self.ws.entries().iter().find_map(|e| {
+            let who = e.kind().reporter()?;
+            match e.reported() {
+                Some(AgentStatus::Unknown(why))
+                    if why.is_breakage() && !self.unknown_notice_given.contains(&e.kind()) =>
+                {
+                    Some((e.kind(), who, why))
+                }
+                _ => None,
             }
+        });
+        if let Some((kind, who, why)) = broken {
+            self.unknown_notice_given.push(kind);
+            // Never replaces a notice already up (it may be a failure the
+            // user still has to act on): it goes first, the other after it.
+            let text = self.unknown_notice(who, why);
+            self.notice = Some(match self.notice.take() {
+                Some(earlier) => format!("{text}  {earlier}"),
+                None => text,
+            });
         }
         if !self.cost_notice_given {
             // A cost Lillignode tried to read and could not. Pending, and an
@@ -966,9 +973,10 @@ impl<B: AgentBackend> App<B> {
     /// notice rows of the narrowest window Lillignode draws in
     /// (`NOTICE_LIMIT`), so what to do, which comes last, is never cut off.
     /// The longer explanation is in the status report panel.
-    fn unknown_notice(&self, why: status::Why) -> String {
+    fn unknown_notice(&self, who: &status::Reporter, why: status::Why) -> String {
         let fine = "Agents work as before; nothing was changed.";
-        if self.status_off_switch.is_some() {
+        let claude_code = *who == status::CLAUDE_CODE;
+        if claude_code && self.status_off_switch.is_some() {
             return format!(
                 "Status shows Unknown: {} is set here. {fine} Lillignode leaves that setting alone.",
                 status::OFF_SWITCH
@@ -976,21 +984,31 @@ impl<B: AgentBackend> App<B> {
         }
         if why == status::Why::NotUnderstood {
             return format!(
-                "Status shows Unknown: Claude Code sent a status Lillignode does not understand. {fine} \
-                 Look for a newer Lillignode."
+                "Status shows Unknown: {} sent a status Lillignode does not understand. {fine} Look for a \
+                 newer Lillignode.",
+                who.name
             );
         }
-        if self.newer_pty_missing {
+        // Only a program that waits for an answer needs the two files.
+        if who.asks_first && self.newer_pty_missing {
             // Agents run as before; the fix is for people who built it
             // themselves, as the release zip has both files.
             return "Status shows Unknown: conpty.dll and OpenConsole.exe are not beside lillignode.exe. \
                     Nothing was changed. Run scripts\\package-windows.ps1 -BesideBuild."
                 .to_string();
         }
+        if !who.asks_first {
+            // The likeliest cause comes first: seen with Codex signed out.
+            return format!(
+                "Status shows Unknown: {} is not reporting it. If it is signed out it reports nothing: \
+                 sign in and it will. {fine}",
+                who.name
+            );
+        }
         format!(
-            "Status shows Unknown: Claude Code is not reporting it. {fine} Checked with Claude Code {}; \
-             get a newer Lillignode.",
-            status::CHECKED_WITH
+            "Status shows Unknown: {} is not reporting it. {fine} Checked with {} {}; get a newer \
+             Lillignode.",
+            who.name, who.name, who.checked_with
         )
     }
 
@@ -1331,7 +1349,7 @@ impl<B: AgentBackend> App<B> {
             Some(shown) => {
                 out += &format!("Status: {}", shown.text());
                 if let AgentStatus::Unknown(why) = shown {
-                    out += &format!(". {}", status::why_long(why));
+                    out += &format!(". {}", status::why_long(why, e.kind().reporter()));
                 }
                 out += &format!(". The sidebar shows it as {}.\n", shown.short());
             }
@@ -1339,14 +1357,15 @@ impl<B: AgentBackend> App<B> {
         }
         // The status trace comes before cost, so a short window, which
         // cannot scroll this panel, still shows why a status is what it is.
-        if !e.is_claude_code() {
+        let Some(who) = e.kind().reporter() else {
             out += &format!("\n{}", self.cost_report(e));
             return out;
-        }
+        };
+        let claude_code = *who == status::CLAUDE_CODE;
         out += "\n";
         // Near the top, so a short window still shows it: when it is set,
         // nothing below can be other than empty.
-        if let Some(value) = &self.status_off_switch {
+        if let (true, Some(value)) = (claude_code, &self.status_off_switch) {
             out += &format!(
                 "{} is set (to \"{}\") where Lillignode was started, and every agent inherits it. Claude \
                  Code does not report its status while it is switched on. Lillignode leaves it alone: it \
@@ -1355,7 +1374,9 @@ impl<B: AgentBackend> App<B> {
                 value.escape_debug()
             );
         }
-        if e.is_running() {
+        if !who.asks_first {
+            out += &format!("{} reports without asking Lillignode's terminal first.\n", who.name);
+        } else if e.is_running() {
             out += &match heard.asked_after {
                 Some(after) => format!(
                     "Status question: asked {:.1} seconds after it started. Lillignode answered yes.\n",
@@ -1392,20 +1413,25 @@ impl<B: AgentBackend> App<B> {
                     plural(ago as usize, "second", "seconds")
                 );
                 out += &format!("Read as: {}", reading_text(&last.reading));
-                if !last.after_question {
+                if !last.used {
                     out += ". Not used: it came before the agent asked the status question";
                 }
                 out += ".\n";
             }
         }
-        if self.status_off_switch.is_none() {
+        if claude_code && self.status_off_switch.is_none() {
             out += &format!("\n{} is not set where Lillignode was started.\n", status::OFF_SWITCH);
         }
         out += &format!(
-            "\nRead the way Claude Code {} reports. Kept in memory only, never on disk, and started \
-             afresh whenever the agent is started.",
-            status::CHECKED_WITH
+            "\nRead the way {} {} reports. Kept in memory only, never on disk, and started afresh \
+             whenever the agent is started.",
+            who.name, who.checked_with
         );
+        if *who == status::CODEX {
+            out += "\n\nTwo things to know about Codex's reports. On some of its own set-up screens that \
+                    are waiting for an answer it reports Idle, so Lillignode shows Idle there and does \
+                    not say it needs you. And Done means its turn ended, not that the work succeeded.";
+        }
         out += "\n\n";
         out += &self.cost_report(e);
         out
@@ -1942,21 +1968,21 @@ Cost",
         // Causes Lillignode can see for itself come first.
         let mut app = app_with_claude_agents(0);
         app.newer_pty_missing = true;
-        let text = app.unknown_notice(status::Why::NoReport);
+        let text = app.unknown_notice(&status::CLAUDE_CODE, status::Why::NoReport);
         assert!(text.contains("conpty.dll and OpenConsole.exe are not beside lillignode.exe"), "{text}");
         assert!(
             text.ends_with(r"Nothing was changed. Run scripts\package-windows.ps1 -BesideBuild."),
             "{text}"
         );
         app.status_off_switch = Some("1".into());
-        let text = app.unknown_notice(status::Why::NoReport);
+        let text = app.unknown_notice(&status::CLAUDE_CODE, status::Why::NoReport);
         assert!(
             text.starts_with("Status shows Unknown: CLAUDE_CODE_DISABLE_TERMINAL_TITLE is set here."),
             "{text}"
         );
         app.status_off_switch = None;
         app.newer_pty_missing = false;
-        let text = app.unknown_notice(status::Why::NotAsked);
+        let text = app.unknown_notice(&status::CLAUDE_CODE, status::Why::NotAsked);
         assert!(text.starts_with("Status shows Unknown: Claude Code is not reporting it."), "{text}");
     }
 
@@ -1970,9 +1996,11 @@ Cost",
         for (off, missing) in [(true, false), (false, true), (false, false)] {
             app.status_off_switch = off.then(|| "1".to_string());
             app.newer_pty_missing = missing;
-            for why in [status::Why::NotAsked, status::Why::NoReport, status::Why::NotUnderstood] {
-                let text = app.unknown_notice(why);
-                assert!(text.chars().count() <= room, "{} characters: {text}", text.chars().count());
+            for who in [&status::CLAUDE_CODE, &status::CODEX] {
+                for why in [status::Why::NotAsked, status::Why::NoReport, status::Why::NotUnderstood] {
+                    let text = app.unknown_notice(who, why);
+                    assert!(text.chars().count() <= room, "{} characters: {text}", text.chars().count());
+                }
             }
         }
     }
@@ -1986,7 +2014,7 @@ Cost",
         app.ws.focus_next();
         report(&mut app, 3, PERMISSION);
         let waiting = app.needs_you_notice().unwrap();
-        let unknown = app.unknown_notice(status::Why::NoReport);
+        let unknown = app.unknown_notice(&status::CLAUDE_CODE, status::Why::NoReport);
         let notices = [
             "Claude Code 2 (api) could not continue its earlier conversation (there may have been nothing \
              in it yet), so it started a new conversation. If there was an earlier one, the agent's own \
@@ -2050,7 +2078,7 @@ Cost",
         let mut app = app_with_claude_agents(2);
         app.ws.focus_next();
         report(&mut app, 2, PERMISSION);
-        app.notice = Some(app.unknown_notice(status::Why::NoReport));
+        app.notice = Some(app.unknown_notice(&status::CLAUDE_CODE, status::Why::NoReport));
         let (cols, rows) = (crate::ui::MIN_COLS, crate::ui::MIN_ROWS);
         let mut term = ratatui::Terminal::new(TestBackend::new(cols, rows)).unwrap();
         term.draw(|f| crate::ui::draw(f, &app)).unwrap();
@@ -2249,7 +2277,7 @@ Cost",
         // Said once, in the notice rows, with where the reason is; and it
         // never replaces a notice already up.
         app.notice = Some("Earlier.".into());
-        app.unknown_notice_given = true;
+        app.unknown_notice_given = vec![AgentKind::ClaudeCode, AgentKind::Codex];
         app.after_events();
         let notice = app.notice.clone().unwrap();
         assert!(
@@ -3065,5 +3093,127 @@ Cost",
         assert!(app.bar().ends_with("1 agent needs you."), "{}", app.bar());
         report(&mut app, 2, PERMISSION);
         assert!(app.bar().ends_with("2 agents need you."), "{}", app.bar());
+    }
+
+    /// One Claude Code agent (id 1, asked and answered) and one Codex agent
+    /// (id 2), which is in front.
+    fn app_with_claude_and_codex() -> App<Fake> {
+        let mut app = app_with_claude_agents(1);
+        app.ws.start_new("codex", std::env::temp_dir().join("web")).unwrap();
+        app.notice = None;
+        app
+    }
+
+    fn codex_reports(app: &mut App<Fake>, id: u32, body: &str) {
+        app.on_agent_event(AgentEvent::Output(AgentId(id), format!("\x1b]7501;{body}\x1b\\").into_bytes()));
+    }
+
+    #[test]
+    fn a_codex_agent_that_needs_you_is_counted_named_and_rings_like_any_other() {
+        let mut app = app_with_claude_and_codex();
+        assert_eq!(app.ws.focused().unwrap().label(), "Codex (web)");
+        report(&mut app, 1, "state=idle:app=claude-code");
+        codex_reports(&mut app, 2, "state=working:app=codex");
+        assert!(!app.after_events());
+        assert_eq!(app.unfinished(), ["Codex (web) (Working)"]);
+
+        codex_reports(&mut app, 2, "state=blocked:app=codex:kind=permission");
+        assert!(app.after_events(), "the bell rings for it");
+        assert!(!app.after_events(), "once");
+        assert_eq!(app.needs_you_count(), 1);
+        // From behind another agent, the notice names it.
+        app.ws.focus_next();
+        let notice = app.needs_you_notice().unwrap();
+        assert!(notice.contains("Codex (web)"), "{notice}");
+
+        // Done is settled: quitting would not ask about it.
+        codex_reports(&mut app, 2, "state=done:app=codex");
+        assert_eq!(app.needs_you_count(), 0);
+        assert!(app.unfinished().is_empty(), "{:?}", app.unfinished());
+    }
+
+    #[test]
+    fn the_status_report_for_codex_says_what_is_true_of_codex() {
+        let mut app = app_with_claude_and_codex();
+        // Set where Lillignode was started, but it is Claude Code's switch.
+        app.status_off_switch = Some("1".into());
+        codex_reports(&mut app, 2, "state=blocked:app=codex:kind=permission");
+        let text = app.status_report_text();
+        assert!(
+            text.starts_with("Status report for Codex (web)\n\nStatus: Needs you: permission."),
+            "{text}"
+        );
+        assert!(text.contains("Codex reports without asking Lillignode's terminal first."), "{text}");
+        assert!(text.contains("Reports received since it started: 1."), "{text}");
+        assert!(text.contains("7501;state=blocked:app=codex:kind=permission"), "{text}");
+        assert!(text.contains("Read as: "), "{text}");
+        assert!(text.contains("Read the way Codex 0.169.0 reports."), "{text}");
+        // What Codex does not say, said plainly.
+        assert!(text.contains("it reports Idle, so Lillignode shows Idle there"), "{text}");
+        assert!(text.contains("Done means its turn ended, not that the work succeeded."), "{text}");
+        // Nothing that is only true of Claude Code.
+        for wrong in ["CLAUDE_CODE_DISABLE_TERMINAL_TITLE", "Status question:", "Not used", "2.1.325"] {
+            assert!(!text.contains(wrong), "{wrong} in: {text}");
+        }
+        assert!(!text.contains("Read the way Claude Code"), "{text}");
+
+        // The Claude Code agent's report is as it was.
+        app.ws.focus_next();
+        let text = app.status_report_text();
+        assert!(text.starts_with("Status report for Claude Code (a)"), "{text}");
+        assert!(text.contains("CLAUDE_CODE_DISABLE_TERMINAL_TITLE is set"), "{text}");
+        assert!(text.contains("Status question: asked"), "{text}");
+        assert!(text.contains("Read the way Claude Code 2.1.325 reports."), "{text}");
+        assert!(!text.contains("Codex"), "{text}");
+    }
+
+    #[test]
+    fn a_codex_agent_that_reports_nothing_gets_its_own_notice_once_and_its_own_reason() {
+        let mut app = app_with_claude_and_codex();
+        // Neither applies to Codex: it needs no answer, so no files, and the
+        // switch is Claude Code's.
+        app.newer_pty_missing = true;
+        app.status_off_switch = Some("1".into());
+        report(&mut app, 1, "state=idle:app=claude-code");
+        app.ws.tick(Instant::now() + status::STARTING_DEADLINE);
+        app.after_events();
+        let notice = app.notice.clone().unwrap();
+        assert_eq!(
+            notice,
+            "Status shows Unknown: Codex is not reporting it. If it is signed out it reports nothing: \
+             sign in and it will. Agents work as before; nothing was changed."
+        );
+        let text = app.status_report_text();
+        assert!(
+            text.contains("Status: Unknown: no report. Codex sent no status report within 15 seconds"),
+            "{text}"
+        );
+        assert!(text.contains("If it is signed out, sign in and it reports."), "{text}");
+
+        // Once for Codex: a second silent Codex agent says nothing more.
+        app.notice = None;
+        app.ws.start_new("codex", std::env::temp_dir().join("docs")).unwrap();
+        app.ws.tick(Instant::now() + status::STARTING_DEADLINE + status::STARTING_DEADLINE);
+        app.after_events();
+        assert_eq!(app.notice, None);
+
+        // Claude Code's reporting failing is a different matter, said once too.
+        report(&mut app, 1, "state=pondering:app=claude-code");
+        app.after_events();
+        let notice = app.notice.clone().unwrap();
+        assert!(
+            notice.starts_with("Status shows Unknown: CLAUDE_CODE_DISABLE_TERMINAL_TITLE is set here."),
+            "{notice}"
+        );
+    }
+
+    #[test]
+    fn a_plain_program_and_codex_never_have_a_cost_and_say_so() {
+        let mut app = app_with_claude_and_codex();
+        app.ws.read_cost_from(None);
+        app.config.cost = true;
+        let text = app.status_report_text();
+        assert!(text.contains("Lillignode reads cost only for Claude Code."), "{text}");
+        assert_eq!(app.ws.focused().unwrap().cost(), Cost::Unknown(WhyNot::NotClaudeCode));
     }
 }

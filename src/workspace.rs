@@ -426,7 +426,18 @@ impl<B: AgentBackend> Workspace<B> {
         if saved.kind.is_none() {
             // Saved before kinds were recorded: work it out once. From now
             // on it is saved with the agent.
-            saved.kind = Some(AgentKind::of_command(&saved.command).saved_word().to_string());
+            let kind = AgentKind::of_command(&saved.command);
+            saved.kind = Some(kind.saved_word().to_string());
+            // Then, an agent that was not known by name was named as it
+            // was typed ("codex", "codex 2"). It gets the name a new one of
+            // its kind would, keeping its number.
+            let number = saved
+                .name
+                .strip_prefix(&saved.command)
+                .filter(|rest| rest.strip_prefix(' ').map_or(rest.is_empty(), |n| n.parse::<u32>().is_ok()));
+            if let Some(number) = number {
+                saved.name = format!("{}{number}", kind.name(&saved.command));
+            }
         }
         let keeps_conversations = kind_of(&saved).keeps_conversations();
         let continuing = keeps_conversations && saved.conversation.is_some();
@@ -833,13 +844,13 @@ mod tests {
     fn restore_reports_what_came_back_and_what_did_not_and_keeps_every_entry() {
         let mut ws = Workspace::new(Fake::default(), SIZE);
         let report = ws.restore(saved(
-            vec![agent("claude", "api"), agent("codex", "web"), agent("claude", "gone")],
+            vec![agent("claude", "api"), agent("aider", "web"), agent("claude", "gone")],
             Some(1),
         ));
 
         assert_eq!(report.restored, vec![Restored { label: "Claude Code (api)".into(), continuing: true }]);
         assert_eq!(report.not_restored.len(), 2);
-        assert_eq!(report.not_restored[0].0, "codex (web)");
+        assert_eq!(report.not_restored[0].0, "aider (web)");
         assert!(report.not_restored[0].1.contains("not installed"), "{:?}", report.not_restored[0]);
         assert!(report.not_restored[1].1.contains("does not exist"), "{:?}", report.not_restored[1]);
 
@@ -1408,7 +1419,7 @@ mod tests {
     #[test]
     fn an_agent_saved_without_a_kind_gets_one_from_its_command_and_it_is_saved() {
         let mut ws = Workspace::new(Fake::default(), SIZE);
-        ws.restore(saved(vec![agent("claude", "api"), agent("codex", "web")], Some(0)));
+        ws.restore(saved(vec![agent("claude", "api"), agent("aider", "web")], Some(0)));
         assert_eq!(ws.entries()[0].kind(), AgentKind::ClaudeCode);
         assert_eq!(ws.entries()[1].kind(), AgentKind::Program);
         // Recorded for the one that could not be started too.
@@ -1559,5 +1570,143 @@ mod tests {
         assert_eq!(entry.reported(), Some(AgentStatus::Unknown(Why::KindNotKnown)));
         assert_eq!(entry.track.trace().reports, 0);
         assert!(!ws.take_began_needing_you());
+    }
+
+    /// A Codex agent that the fake backend will start: it starts only
+    /// programs named claude, so this one is Codex by its saved kind.
+    fn codex_agent(folder: &str) -> SavedAgent {
+        SavedAgent {
+            name: "Codex".into(),
+            command: "claude".into(),
+            kind: Some("codex".into()),
+            args: vec![],
+            folder: root(folder),
+            conversation: None,
+        }
+    }
+
+    fn codex_says(ws: &mut Workspace<Fake>, id: u32, body: &str) {
+        // Codex ends its reports this way.
+        ws.handle(AgentEvent::Output(AgentId(id), format!("\x1b]7501;{body}\x1b\\").into_bytes()));
+    }
+
+    #[test]
+    fn a_program_named_codex_is_codex_and_is_saved_as_it() {
+        let mut ws = Workspace::new(Fake::default(), SIZE);
+        // The fake backend does not start it, which is enough to see what it is.
+        ws.restore(saved(vec![agent("codex", "web")], Some(0)));
+        let entry = ws.focused().unwrap();
+        assert_eq!(entry.kind(), AgentKind::Codex);
+        assert_eq!(entry.label(), "Codex (web)");
+        let kept = &ws.to_saved().agents[0];
+        assert_eq!(kept.kind.as_deref(), Some("codex"));
+        // No conversation id is made up for it.
+        assert_eq!(kept.conversation, None);
+    }
+
+    #[test]
+    fn codex_shows_what_it_reports_without_being_answered_and_rings_once() {
+        let mut ws = Workspace::new(Fake::default(), SIZE);
+        let report = ws.restore(saved(vec![codex_agent("web")], Some(0)));
+        // Started as typed: nothing added, and not asked to continue.
+        assert_eq!(report.restored, vec![Restored { label: "Codex (web)".into(), continuing: false }]);
+        assert_eq!(log(&ws), ["start 1 "]);
+        assert_eq!(ws.focused().unwrap().reported(), Some(AgentStatus::Starting));
+
+        codex_says(&mut ws, 1, "state=idle:app=codex");
+        assert_eq!(ws.focused().unwrap().reported(), Some(AgentStatus::Idle));
+        assert!(ws.focused().unwrap().is_settled());
+        codex_says(&mut ws, 1, "state=working:app=codex");
+        assert_eq!(ws.focused().unwrap().reported(), Some(AgentStatus::Working));
+        assert!(!ws.focused().unwrap().is_settled());
+        assert!(!ws.take_began_needing_you());
+        codex_says(&mut ws, 1, "state=blocked:app=codex:kind=permission");
+        assert_eq!(ws.focused().unwrap().needs_you(), Some(Some(Kind::Permission)));
+        assert!(ws.take_began_needing_you());
+        assert!(!ws.take_began_needing_you());
+        codex_says(&mut ws, 1, "state=done:app=codex");
+        assert_eq!(ws.focused().unwrap().reported(), Some(AgentStatus::Done));
+
+        // Nothing was ever sent back to it: it asks nothing and is told nothing.
+        assert_eq!(log(&ws), ["start 1 "]);
+        assert!(ask(&mut ws, 1).is_empty());
+        // Its cost is not read, and says so; it is never zero or pending.
+        assert_eq!(ws.focused().unwrap().cost(), Cost::Unknown(cost::WhyNot::NotClaudeCode));
+    }
+
+    #[test]
+    fn codex_started_again_begins_a_new_conversation_and_is_read_again() {
+        let mut ws = Workspace::new(Fake::default(), SIZE);
+        ws.restore(saved(vec![codex_agent("web")], Some(0)));
+        codex_says(&mut ws, 1, "state=working:app=codex");
+        // It stops with an error straight away. That is not a failed
+        // continue, because it was never asked to continue.
+        assert_eq!(
+            ws.handle(AgentEvent::Exited(AgentId(1), Exit { code: 1 })),
+            Some(Happened::Exited { label: "Codex (web)".into(), exit: Exit { code: 1 } })
+        );
+        assert_eq!(ws.focused().unwrap().reported(), None);
+        assert_eq!(ws.restart_focused(), Some(false));
+        assert_eq!(log(&ws).last().unwrap(), "start 2 ");
+        assert_eq!(ws.focused().unwrap().reported(), Some(AgentStatus::Starting));
+        codex_says(&mut ws, 2, "state=idle:app=codex");
+        assert_eq!(ws.focused().unwrap().reported(), Some(AgentStatus::Idle));
+        assert_eq!(ws.to_saved().agents[0].conversation, None);
+    }
+
+    #[test]
+    fn a_report_under_another_programs_name_is_not_understood() {
+        let mut ws = Workspace::new(Fake::default(), SIZE);
+        ws.restore(saved(vec![codex_agent("web"), agent("claude", "api")], Some(0)));
+        codex_says(&mut ws, 1, "state=blocked:app=claude-code");
+        assert_eq!(ws.entries()[0].reported(), Some(AgentStatus::Unknown(Why::NotUnderstood)));
+        assert_eq!(ask(&mut ws, 2), yes(2));
+        ws.handle(AgentEvent::Output(AgentId(2), b"\x1b]7501;state=blocked:app=codex\x07".to_vec()));
+        assert_eq!(ws.entries()[1].reported(), Some(AgentStatus::Unknown(Why::NotUnderstood)));
+        assert!(!ws.take_began_needing_you());
+    }
+
+    #[test]
+    fn a_silent_codex_agent_is_unknown_for_no_report_until_it_reports() {
+        let mut ws = Workspace::new(Fake::default(), SIZE);
+        ws.restore(saved(vec![codex_agent("web")], Some(0)));
+        assert!(ws.tick(Instant::now() + crate::status::STARTING_DEADLINE));
+        assert_eq!(ws.focused().unwrap().reported(), Some(AgentStatus::Unknown(Why::NoReport)));
+        assert!(!ws.focused().unwrap().is_settled(), "quit asks about it");
+        codex_says(&mut ws, 1, "state=idle:app=codex");
+        assert_eq!(ws.focused().unwrap().reported(), Some(AgentStatus::Idle));
+    }
+
+    #[test]
+    fn a_codex_agent_saved_before_kinds_were_recorded_is_named_as_a_new_one_would_be() {
+        // As the released program saved them: named as typed, numbered, no kind.
+        let old = |name: &str| SavedAgent { name: name.into(), ..agent("codex", "web") };
+        // Only a name that is the command, or the command and a number.
+        let mut other = old("codexplorer");
+        other.folder = root("docs");
+        let mut ws = Workspace::new(Fake::default(), SIZE);
+        ws.restore(saved(vec![old("codex"), old("codex 2"), other, agent("claude", "api")], Some(0)));
+        let names: Vec<_> = ws.entries().iter().map(|e| e.label()).collect();
+        assert_eq!(names, ["Codex (web)", "Codex 2 (web)", "codexplorer (docs)", "Claude Code (api)"]);
+        // A new one beside them is numbered after them, not given a twin's name.
+        assert!(ws.start_new("codex", root("web")).is_err(), "the fake backend starts only claude");
+        // Once the kind is saved the name is left alone, whatever it is.
+        let again = ws.to_saved();
+        let mut ws = Workspace::new(Fake::default(), SIZE);
+        ws.restore(again.clone());
+        assert_eq!(ws.to_saved().agents, again.agents);
+    }
+
+    #[test]
+    fn a_program_named_codex_that_was_saved_as_a_plain_program_stays_one() {
+        let mut plain = agent("codex", "web");
+        plain.name = "codex".into();
+        plain.kind = Some("program".into());
+        let mut ws = Workspace::new(Fake::default(), SIZE);
+        ws.restore(saved(vec![plain], Some(0)));
+        let entry = ws.focused().unwrap();
+        assert_eq!(entry.kind(), AgentKind::Program);
+        assert_eq!(entry.label(), "codex (web)");
+        assert_eq!(ws.to_saved().agents[0].kind.as_deref(), Some("program"));
     }
 }

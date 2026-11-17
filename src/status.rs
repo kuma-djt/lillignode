@@ -30,6 +30,28 @@ pub const SILENCE: Duration = Duration::from_secs(60);
 /// The Claude Code version this reading was checked against.
 pub const CHECKED_WITH: &str = "2.1.325";
 
+/// A program whose status reports Lillignode reads.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Reporter {
+    /// What it calls itself in a report.
+    pub app: &'static str,
+    /// What the user calls it.
+    pub name: &'static str,
+    /// The version of it this reading was checked against.
+    pub checked_with: &'static str,
+    /// Whether it reports only after asking the status question and being
+    /// answered. One that does not reports unasked, and every report counts.
+    pub asks_first: bool,
+}
+
+pub const CLAUDE_CODE: Reporter =
+    Reporter { app: "claude-code", name: "Claude Code", checked_with: CHECKED_WITH, asks_first: true };
+
+/// Codex sends the same report, under its own name, without asking first.
+/// On its sign-in screen and some of its set-up screens it sends none.
+pub const CODEX: Reporter =
+    Reporter { app: "codex", name: "Codex", checked_with: "0.169.0", asks_first: false };
+
 /// The switch that stops Claude Code reporting. If Lillignode itself was
 /// started with it set, every agent inherits it.
 pub const OFF_SWITCH: &str = "CLAUDE_CODE_DISABLE_TERMINAL_TITLE";
@@ -147,15 +169,38 @@ fn why_short(why: Why) -> &'static str {
     }
 }
 
-/// The full sentence for an Unknown, for the status report panel.
-pub fn why_long(why: Why) -> &'static str {
+/// The full sentence for an Unknown, for the status report panel. `who` is
+/// the program whose reports this agent's status is read from, if any.
+pub fn why_long(why: Why, who: Option<&Reporter>) -> String {
+    let name = who.map_or(CLAUDE_CODE.name, |who| who.name);
+    let asks_first = match who {
+        Some(who) => who.asks_first,
+        None => true,
+    };
     match why {
-        Why::NotAsked => "Claude Code did not ask Lillignode's terminal for status reports within 15 seconds of starting",
-        Why::NoReport => "Claude Code asked for status reports and Lillignode answered, but no report arrived within 15 seconds of starting. The answer may not have reached it",
-        Why::NotUnderstood => "Claude Code sent a status Lillignode does not understand",
-        Why::Withdrawn => "Claude Code withdrew its status and has not reported a new one",
-        Why::NotClaudeCode => "Lillignode shows what an agent is doing only for Claude Code. For any other agent it can tell only whether its program is running",
-        Why::KindNotKnown => "This agent was saved as a kind of agent this Lillignode does not know, most likely by a newer Lillignode. It runs as a plain program, and Lillignode can tell only whether it is running. What was saved about it is kept",
+        Why::NotAsked => {
+            format!(
+                "{name} did not ask Lillignode's terminal for status reports within 15 seconds of starting"
+            )
+        }
+        Why::NoReport if asks_first => format!(
+            "{name} asked for status reports and Lillignode answered, but no report arrived within 15 \
+             seconds of starting. The answer may not have reached it"
+        ),
+        Why::NoReport => format!(
+            "{name} sent no status report within 15 seconds of starting. The likeliest cause is that it \
+             is signed out, when it sends none. If it is signed out, sign in and it reports. Otherwise this \
+             {name} may report differently from the one Lillignode was checked with"
+        ),
+        Why::NotUnderstood => format!("{name} sent a status Lillignode does not understand"),
+        Why::Withdrawn => format!("{name} withdrew its status and has not reported a new one"),
+        Why::NotClaudeCode => "Lillignode shows what an agent is doing only for Claude Code and Codex. For \
+                               any other program it can tell only whether it is running"
+            .to_string(),
+        Why::KindNotKnown => "This agent was saved as a kind of agent this Lillignode does not know, most \
+                              likely by a newer Lillignode. It runs as a plain program, and Lillignode can \
+                              tell only whether it is running. What was saved about it is kept"
+            .to_string(),
     }
 }
 
@@ -184,10 +229,11 @@ impl Reading {
     }
 }
 
-/// Read the part of a report after `7501;`. Exact match or not understood:
-/// every part must be one Lillignode knows, given once, with a value it can read.
-pub fn read(body: &[u8]) -> Reading {
-    match read_parts(body) {
+/// Read the part of a report after `7501;`, from the program `who`. Exact
+/// match or not understood: every part must be one Lillignode knows, given
+/// once, with a value it can read, and the report must name that program.
+pub fn read(body: &[u8], who: &Reporter) -> Reading {
+    match read_parts(body, who) {
         Ok(reading) => reading,
         Err(why) => Reading::NotUnderstood(why),
     }
@@ -204,7 +250,7 @@ struct Parts<'a> {
     msg: Option<&'a str>,
 }
 
-fn read_parts(body: &[u8]) -> Result<Reading, String> {
+fn read_parts(body: &[u8], who: &Reporter) -> Result<Reading, String> {
     let text = std::str::from_utf8(body).map_err(|_| "it is not text".to_string())?;
     let mut parts = Parts::default();
     for part in text.split(':') {
@@ -239,8 +285,8 @@ fn read_parts(body: &[u8]) -> Result<Reading, String> {
     }
 
     match parts.app {
-        Some("claude-code") => {}
-        Some(other) => return Err(format!("it is from \"{}\", not Claude Code", shown(other))),
+        Some(app) if app == who.app => {}
+        Some(other) => return Err(format!("it is from \"{}\", not {}", shown(other), who.name)),
         None => return Err("it does not say which program sent it".into()),
     }
     if parts.kind.is_some() && state != "blocked" {
@@ -375,9 +421,9 @@ pub struct LastReport {
     pub raw: Vec<u8>,
     pub at: SystemTime,
     pub reading: Reading,
-    /// False if it arrived before the agent asked the status question, in
-    /// which case it was not used.
-    pub after_question: bool,
+    /// False for a report that was not used: one from a program that
+    /// reports only after asking the status question, arriving before it asked.
+    pub used: bool,
 }
 
 /// What a source has heard from its agent, kept for the status report
@@ -411,14 +457,19 @@ pub trait StatusSource {
     fn trace(&self) -> &Trace;
 }
 
-/// Claude Code's own status report, used only once it has asked the
-/// status question.
-#[derive(Default)]
-pub struct ClaudeReport {
+/// A program's own status report, read as that program sends it.
+pub struct Report {
+    who: &'static Reporter,
     trace: Trace,
 }
 
-impl StatusSource for ClaudeReport {
+impl Report {
+    pub fn from(who: &'static Reporter) -> Self {
+        Self { who, trace: Trace::default() }
+    }
+}
+
+impl StatusSource for Report {
     fn at_start(&self) -> AgentStatus {
         AgentStatus::Starting
     }
@@ -432,33 +483,34 @@ impl StatusSource for ClaudeReport {
     fn received(&mut self, body: &[u8], now: SystemTime) -> Option<AgentStatus> {
         let reading = if body.len() > LONGEST_REPORT {
             Reading::NotUnderstood(format!(
-                "it is {} characters long, far longer than Claude Code sends",
-                body.len()
+                "it is {} characters long, far longer than {} sends",
+                body.len(),
+                self.who.name
             ))
         } else {
-            read(body)
+            read(body, self.who)
         };
-        let after_question = self.trace.asked_after.is_some();
+        // No report, no status: from a program that asks first, one that
+        // arrives unasked is kept for the panel but not shown.
+        let used = !self.who.asks_first || self.trace.asked_after.is_some();
         self.trace.reports = self.trace.reports.saturating_add(1);
         if reading == Reading::Task {
             self.trace.task_reports = self.trace.task_reports.saturating_add(1);
         }
-        // No report, no status: one that arrives unasked is kept for the
-        // panel but not shown.
-        let shown = if after_question { reading.shown() } else { None };
+        let shown = if used { reading.shown() } else { None };
         let kept = &body[..body.len().min(LONGEST_REPORT)];
         let mut raw = Vec::with_capacity(5 + kept.len());
         raw.extend_from_slice(b"7501;");
         raw.extend_from_slice(kept);
-        self.trace.last = Some(LastReport { raw, at: now, reading, after_question });
+        self.trace.last = Some(LastReport { raw, at: now, reading, used });
         shown
     }
 
     fn why_silent(&self) -> Why {
-        if self.trace.asked_after.is_some() {
-            Why::NoReport
-        } else {
+        if self.who.asks_first && self.trace.asked_after.is_none() {
             Why::NotAsked
+        } else {
+            Why::NoReport
         }
     }
 
@@ -608,7 +660,7 @@ mod tests {
 
     /// The tracker of a Claude Code agent.
     fn claude(started: Instant) -> Track {
-        Track::new(started, Box::new(ClaudeReport::default()))
+        Track::new(started, Box::new(Report::from(&CLAUDE_CODE)))
     }
 
     fn b64(text: &str) -> String {
@@ -628,7 +680,7 @@ mod tests {
     }
 
     fn status(body: &str) -> Reading {
-        read(body.as_bytes())
+        read(body.as_bytes(), &CLAUDE_CODE)
     }
 
     fn is(body: &str, expected: AgentStatus) {
@@ -683,7 +735,8 @@ mod tests {
         ] {
             assert!(matches!(status(body), Reading::NotUnderstood(_)), "{body:?} was understood");
         }
-        assert!(matches!(read(b"state=working:app=claude-code:msg=\xff"), Reading::NotUnderstood(_)));
+        let not_text = read(b"state=working:app=claude-code:msg=\xff", &CLAUDE_CODE);
+        assert!(matches!(not_text, Reading::NotUnderstood(_)));
     }
 
     #[test]
@@ -728,7 +781,7 @@ mod tests {
         t.asked(t0);
         t.received(b"state=done:app=claude-code", SystemTime::now());
         assert_eq!(t.shown, AgentStatus::Done);
-        assert!(t.trace().last.as_ref().unwrap().after_question);
+        assert!(t.trace().last.as_ref().unwrap().used);
     }
 
     #[test]
@@ -785,7 +838,7 @@ mod tests {
         let mut t = claude(Instant::now());
         t.received(b"state=working:app=claude-code", SystemTime::now());
         assert_eq!(t.shown, AgentStatus::Starting);
-        assert!(!t.trace().last.as_ref().unwrap().after_question);
+        assert!(!t.trace().last.as_ref().unwrap().used);
     }
 
     #[test]
@@ -910,5 +963,73 @@ mod tests {
         // Nothing of what it sent is kept.
         assert_eq!(t.trace().reports, 0);
         assert!(t.trace().asked_after.is_none() && t.trace().last.is_none());
+    }
+
+    /// The tracker of a Codex agent.
+    fn codex(started: Instant) -> Track {
+        Track::new(started, Box::new(Report::from(&CODEX)))
+    }
+
+    #[test]
+    fn codex_reports_are_used_without_a_question_and_read_the_same_way() {
+        let t0 = Instant::now();
+        let mut t = codex(t0);
+        assert_eq!(t.shown, AgentStatus::Starting);
+        // As seen from Codex 0.169.0: unasked, three parts at most.
+        for (body, shown) in [
+            ("state=idle:app=codex", AgentStatus::Idle),
+            ("state=working:app=codex", AgentStatus::Working),
+            ("state=blocked:app=codex:kind=permission", AgentStatus::NeedsYou(Some(Kind::Permission))),
+            ("state=blocked:app=codex:kind=question", AgentStatus::NeedsYou(Some(Kind::Question))),
+            ("state=blocked:app=codex:kind=auth", AgentStatus::NeedsYou(Some(Kind::SignIn))),
+            ("state=done:app=codex", AgentStatus::Done),
+            ("state=error:app=codex", AgentStatus::Error(None)),
+            ("state=clear", AgentStatus::Unknown(Why::Withdrawn)),
+        ] {
+            t.received(body.as_bytes(), SystemTime::now());
+            assert_eq!(t.shown, shown, "{body}");
+            assert!(t.trace().last.as_ref().unwrap().used, "{body}");
+        }
+        assert!(t.trace().asked_after.is_none());
+        // One stretch of needing you, one bell.
+        assert!(t.take_began_needing_you());
+        assert!(!t.take_began_needing_you());
+    }
+
+    #[test]
+    fn each_program_is_read_only_under_its_own_name() {
+        let from_claude = read(b"state=idle:app=claude-code", &CODEX);
+        assert_eq!(from_claude, Reading::NotUnderstood("it is from \"claude-code\", not Codex".into()));
+        let from_codex = read(b"state=idle:app=codex", &CLAUDE_CODE);
+        assert_eq!(from_codex, Reading::NotUnderstood("it is from \"codex\", not Claude Code".into()));
+        // And shown as not understood, never as the status it carried.
+        let mut t = codex(Instant::now());
+        t.received(b"state=blocked:app=claude-code", SystemTime::now());
+        assert_eq!(t.shown, AgentStatus::Unknown(Why::NotUnderstood));
+        assert!(!t.take_began_needing_you());
+        // The same strictness about parts and states as for Claude Code.
+        assert!(matches!(read(b"state=pondering:app=codex", &CODEX), Reading::NotUnderstood(_)));
+        assert!(matches!(read(b"state=idle:app=codex:mood=fine", &CODEX), Reading::NotUnderstood(_)));
+        assert!(matches!(read(b"state=idle:app=codex:kind=permission", &CODEX), Reading::NotUnderstood(_)));
+    }
+
+    #[test]
+    fn a_codex_agent_that_sends_nothing_is_unknown_for_no_report_never_for_not_asking() {
+        let t0 = Instant::now();
+        let mut t = codex(t0);
+        assert!(!t.tick(t0 + STARTING_DEADLINE - Duration::from_millis(1)));
+        assert_eq!(t.shown, AgentStatus::Starting);
+        assert!(t.tick(t0 + STARTING_DEADLINE));
+        assert_eq!(t.shown, AgentStatus::Unknown(Why::NoReport));
+        // It is not stuck there: the first report is shown.
+        t.received(b"state=idle:app=codex", SystemTime::now());
+        assert_eq!(t.shown, AgentStatus::Idle);
+        // The sentence for it is Codex's own, and says what to do.
+        let said = why_long(Why::NoReport, Some(&CODEX));
+        assert!(said.starts_with("Codex sent no status report"), "{said}");
+        assert!(said.contains("If it is signed out, sign in and it reports."), "{said}");
+        assert!(
+            why_long(Why::NoReport, Some(&CLAUDE_CODE)).starts_with("Claude Code asked for status reports")
+        );
     }
 }

@@ -33,6 +33,9 @@ pub enum StatusMessages {
     Ignored,
     /// The status question is answered yes, and reports are handed over.
     Answered,
+    /// Reports are handed over. The status question is not answered: this
+    /// is for a program that reports without asking.
+    Kept,
 }
 
 #[derive(Default)]
@@ -72,10 +75,12 @@ impl vt100::Callbacks for Replies {
             return;
         }
         if rest == [b"?"] {
-            // Answered here, in line with any other question, because Claude
-            // Code takes "no" if a later question is answered first.
-            self.pending.extend_from_slice(status::ANSWER);
-            self.status.push(StatusMessage::Asked);
+            if self.status_messages == StatusMessages::Answered {
+                // Answered here, in line with any other question, because
+                // Claude Code takes "no" if a later question is answered first.
+                self.pending.extend_from_slice(status::ANSWER);
+                self.status.push(StatusMessage::Asked);
+            }
         } else {
             // The parser splits on ';'. A report has none, but if one ever
             // does it is put back as it was, to be read (and refused) whole.
@@ -276,6 +281,25 @@ mod tests {
         let _ = t.feed(b"\x1b]7501;state=blocked:app=claude-code\x07x");
         assert!(t.take_status().is_empty());
         // And it is still not drawn.
+        assert_eq!(t.screen().rows(0, 80).next().unwrap(), "x");
+    }
+
+    #[test]
+    fn a_program_that_reports_without_asking_has_its_reports_kept_and_is_never_answered() {
+        let mut t = Terminal::with_status(24, 80, StatusMessages::Kept);
+        // Either ending. Codex ends its reports the second way.
+        assert!(t.feed(b"\x1b]7501;state=idle:app=codex\x1b\\").is_empty());
+        assert!(t.feed(b"\x1b]7501;state=blocked:app=codex:kind=permission\x07x").is_empty());
+        assert_eq!(
+            t.take_status(),
+            vec![
+                StatusMessage::Report(b"state=idle:app=codex".to_vec()),
+                StatusMessage::Report(b"state=blocked:app=codex:kind=permission".to_vec()),
+            ]
+        );
+        // If it did ask, it would not be told yes, and nothing is noted.
+        assert_eq!(t.feed(b"\x1b]7501;?\x07\x1b[c"), b"\x1b[?1;2c");
+        assert!(t.take_status().is_empty());
         assert_eq!(t.screen().rows(0, 80).next().unwrap(), "x");
     }
 

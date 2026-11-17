@@ -568,6 +568,126 @@ fn side_by_side(sb: &Sandbox, standin: &Path) {
     drop(s.quit("quit", true));
 }
 
+/// A second kind of agent. The stand-in is named codex, so it is taken for
+/// Codex: its status is read from reports it sends without asking, which
+/// need no answer, so this passes with either pseudo-terminal.
+fn codex(sb: &Sandbox, standin: &Path) {
+    println!("P. Status reported by a second kind of agent (stand-in for Codex)");
+    let reports = sb.root.join("codex-reports");
+    let silent = sb.root.join("codex-silent");
+    for (dir, mode) in [(&reports, "codex"), (&silent, "status-silent")] {
+        std::fs::create_dir_all(dir).unwrap();
+        launcher(dir, standin, "codex", mode);
+    }
+    let state = sb.root.join("state-codex");
+    let mut s = Session::start_in(sb, &state);
+    s.new_agent(&reports.join("codex").display().to_string());
+    s.expect("it starts", "STANDIN READY codex");
+    s.expect("its first report shows, with nothing asked and nothing answered", "work  Idle ");
+    s.expect("it is named Codex, with the sign for Idle", ">/\\z Codex");
+    let bells_before = bells(&s);
+    s.keys(b"w");
+    s.expect("reported: working", "work  Working ");
+    s.keys(b"p");
+    s.expect("reported: needs permission, the yellow block", "work  NEEDS YOU   ");
+    s.expect("the heading counts it", " Lillignode  1 NEEDS YOU");
+    s.expect("and its mark carries the sign for Needs you", ">/\\! Codex");
+    s.raw(CTRL_Q);
+    s.keys(b"s");
+    s.expect("the status report is about Codex", "Status report for Codex (work)");
+    s.expect("what it needs is there", "Status: Needs you: permission.");
+    s.expect(
+        "it says Codex is not asked or answered",
+        "Codex reports without asking Lillignode's terminal first.",
+    );
+    s.expect("with the report as it arrived", "ESC ]7501;state=blocked:app=codex:kind=permission");
+    s.expect("and which Codex it was checked with", "Read the way Codex 0.169.0 reports.");
+    s.never("and nothing about Claude Code's own switch", "CLAUDE_CODE_DISABLE_TERMINAL_TITLE");
+    s.keys(b"z");
+    s.keys(b"q");
+    s.expect("reported: has a question", "SENT q");
+    s.keys(b"a");
+    s.expect("reported: needs signing in", "SENT a");
+    s.expect("still needing you", "work  NEEDS YOU   ");
+    s.keys(b"d");
+    s.expect("reported: done", "work  Done ");
+    s.expect_gone("the heading count goes", "NEEDS YOU");
+    // The agent's own bell characters, one at the end of every title, are
+    // not Lillignode's and are never passed on.
+    check(
+        "the bell rang once for one stretch of needing you",
+        bells(&s) == bells_before + 1,
+        &format!("{} bells", bells(&s) - bells_before),
+    );
+    s.keys(b"e");
+    s.expect("reported: failed", "work  Error   ");
+    s.keys(b"c");
+    s.expect("a withdrawn status is Unknown", "work  Unknown   ");
+    s.never("which is about this agent, not about Codex's reporting", "Status shows Unknown");
+    s.keys(b"i");
+    s.expect("the next report replaces it", "work  Idle ");
+    s.keys(b"x");
+    s.expect(
+        "a report under another program's name is Unknown, not that program's status",
+        "work  Unknown   ",
+    );
+    s.expect(
+        "a notice says so, naming Codex",
+        "Status shows Unknown: Codex sent a status Lillignode does not understand",
+    );
+    s.raw(CTRL_Q);
+    s.keys(b"s");
+    s.expect("and the status report says whose name it carried", "it is from \"claude-code\", not Codex");
+    s.keys(b"z");
+    s.keys(b"u");
+    s.expect("a state Lillignode does not know", "SENT u");
+    s.expect("is Unknown too, never the nearest match", "work  Unknown   ");
+    s.keys(b"d");
+    s.expect("done again", "work  Done ");
+    // Everything is finished, so quit does not ask.
+    s.raw(CTRL_Q);
+    s.keys(b"q");
+    drop(s.quit_already_asked("quit with Codex Done does not ask"));
+    let saved = std::fs::read_to_string(state.join("workspace.json")).unwrap();
+    check("it is saved as Codex", saved.contains("\"kind\": \"codex\""), &saved);
+    check("with no conversation to continue", !saved.contains("conversation"), &saved);
+
+    let mut s = Session::start_in(sb, &state);
+    s.expect(
+        "it comes back, and is not said to continue a conversation",
+        "Restored 1 agent: Codex (work) (new conversation).",
+    );
+    s.expect("and is read again from its first report", "work  Idle ");
+    drop(s.quit("quit", false));
+
+    println!("P2. A Codex that reports nothing, as when it is signed out");
+    let mut s = Session::start_in(sb, &sb.root.join("state-codex-silent"));
+    s.new_agent(&silent.join("codex").display().to_string());
+    s.expect("it starts", "STANDIN READY status-silent");
+    s.expect("shows Starting at first", "work  Starting ");
+    s.pump_for(status_deadline());
+    s.expect("and Unknown once the deadline passes", "work  Unknown   ");
+    s.expect(
+        "the notice is Codex's own, and leads with the likeliest cause",
+        "Status shows Unknown: Codex is not reporting it. If it is signed out it reports nothing:",
+    );
+    s.expect(
+        "with what to do and that nothing was changed",
+        "sign in and it will. Agents work as before; nothing was changed.",
+    );
+    s.never("not the notice about the two files, which Codex does not need", "conpty.dll");
+    s.raw(CTRL_Q);
+    s.keys(b"s");
+    s.expect("the status report says why", "Codex sent no status report within 15 seconds of starting.");
+    s.keys(b"z");
+    s.raw(CTRL_Q);
+    s.keys(b"q");
+    s.expect("quit asks, because its status is not known", "Quit and stop 1 running agent? y / n");
+    s.expect("and names it", "Not finished or not known: Codex (work) (Unknown: no report).");
+    s.keys(b"n");
+    drop(s.quit("quit", true));
+}
+
 fn conversation_id(file: &Path) -> String {
     let saved = std::fs::read_to_string(file).unwrap();
     let at = saved.find("\"conversation\"").expect("a conversation id is saved");
@@ -1176,6 +1296,7 @@ fn main() {
     paste_after_status(&sb, &standin);
     cost(&sb);
     side_by_side(&sb, &standin);
+    codex(&sb, &standin);
 
     let _ = std::fs::remove_dir_all(&sb.root);
     println!("\nAll checks passed.");

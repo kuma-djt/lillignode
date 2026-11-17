@@ -12,12 +12,12 @@ The name is said "Lilli-node": the g is silent, as in gnome.
 
 - **Several Claude Code agents in one window.** Each has its own folder and its own screen. One agent is in front and takes your typing; the sidebar lists the rest.
 - **Hop between them.** Press the menu key (Ctrl+Q or F12), then Tab.
-- **See what each one is doing.** For Claude Code the sidebar shows Starting, Working, Needs you, Done, Idle or Error, as Claude Code itself reports it. When Lillignode cannot tell, it says Unknown. It never guesses.
+- **See what each one is doing.** For Claude Code the sidebar shows Starting, Working, Needs you, Done, Idle or Error, as Claude Code itself reports it. It does the same for Codex CLI (new, and not yet checked by a person: see [Codex](#codex)). When Lillignode cannot tell, it says Unknown. It never guesses.
 - **Two side by side, when you want.** Menu key, then `v`: the agent in front on the left, the next one beside it, each half the width. `v` again goes back to one. See [Two side by side](#two-side-by-side).
-- **Come back to where you were.** Quit and start again: the same agents reopen in the same folders, and Claude Code continues each conversation.
+- **Come back to where you were.** Quit and start again: the same agents reopen in the same folders, and Claude Code continues each conversation. Any other agent, Codex included, is started again and begins a new conversation; Lillignode says which.
 - **Read back what scrolled away.** The last 5,000 lines per agent, with Shift+PgUp.
 - **Paste safely.** A multi-line paste reaches the agent as one paste, never as a string of Enter presses.
-- **Run any other command-line agent too.** It runs; its status shows Unknown, because Lillignode reads status from Claude Code only.
+- **Run any other command-line agent too.** It runs; its status shows Unknown, because Lillignode reads status from Claude Code and Codex only.
 - **Cost, if you switch it on.** Experimental and off by default. See [Cost](#cost-experimental-off-by-default).
 
 ## The look
@@ -108,7 +108,7 @@ Menu key, then `v`. The agent in front goes on the left with the next agent besi
 - **Tab (after the menu key) goes to the next agent in the sidebar's order,** as it does with one on screen. If that agent is already on screen, the keyboard moves to it. If not, it takes the side you are on and the other side stays put. With more than two agents open, Tab is not always "the other side".
 - **An agent that needs you while you are typing into the other one** gets a yellow heading: "NEEDS YOU - you are NOT typing here". Read it before you answer: what you type goes to the other agent until you switch.
 - **It needs a window at least 109 columns wide.** In a narrower one `v` is refused and says so. If you narrow the window while two are showing, Lillignode shows one, says why, and puts both back when there is room.
-- **Changing the view resizes every agent,** shown or not, and each redraws at its new size. While Lillignode knows an agent is waiting for you, it asks first. It cannot know that for an agent whose status is Unknown (every agent that is not Claude Code): those are resized without a question.
+- **Changing the view resizes every agent,** shown or not, and each redraws at its new size. While Lillignode knows an agent is waiting for you, it asks first. It cannot know that for an agent whose status is Unknown (every agent that is not Claude Code or Codex, and either of those while it is not reporting): those are resized without a question.
 - **What a narrower size costs.** Anything on an agent's screen beyond the new width is gone until the agent draws it again. Lines already in its history are kept whole.
 
 Checked by hand with Claude Code 2.1.325: both agents redraw cleanly at half width, and on November 16, 2026, in Windows Terminal, a resize while Claude Code was showing a permission prompt left the prompt whole and answerable. If an agent looks wrong after a change, `v` goes back to one; most agents also redraw on Ctrl+L.
@@ -148,6 +148,27 @@ All are optional, and a change takes effect the next time Lillignode is started.
 
 **The file is strict.** One mistake in it and none of it is used: every setting is at its default until it is fixed. Lillignode never changes the file. It tells you when it starts, beginning with how to fix it ("To fix your settings file: ...") and naming the line and column where it can.
 
+## Codex
+
+Start Codex CLI like any agent: press `n`, type `codex`, then the folder. A program whose file is named `codex` is taken for Codex, and its status is read from the report Codex itself sends to its terminal. Lillignode adds nothing to how Codex is started and changes none of its settings.
+
+**Not yet checked by a person.** This was built against a stand-in that behaves as Codex 0.169.0 was seen to on Windows 11. Nobody has yet watched real Codex inside this Lillignode with its status showing. Treat it as experimental until that is done.
+
+What Codex gets, and what it does not:
+
+- **Status, the yellow block and the bell:** yes, as for Claude Code.
+- **On Windows, the two Microsoft files are not needed for Codex's status.** Claude Code's status needs them because Claude Code waits for an answer. Codex reports without one, and its reports were seen to arrive without the files.
+- **Its conversation is not continued.** When Lillignode reopens a Codex agent, or you start one again, it begins a new conversation. Codex's own `codex resume` still finds the earlier one.
+- **No cost.** It shows "cost unknown", never zero.
+
+What to watch for:
+
+- **Codex says Idle on at least one of its own set-up screens that is waiting for you.** Seen with Codex 0.169.0 at its first-run sandbox question; there may be others. Lillignode shows Idle there, with no yellow block and no bell, because that is what Codex reported. A request for permission while it was working was seen to be reported as it should be.
+- **Signed out, Codex reports nothing** (seen with 0.169.0). Its row shows Unknown after 15 seconds, and a notice says so. The same notice appears if Codex is silent for any other reason.
+- **Done means its turn ended,** not that the work succeeded. The same is true of Claude Code.
+- **History.** Codex draws on a full-screen display, which leaves Lillignode no history to keep. Scroll with Codex's own keys.
+- Codex's report format is not documented and was read from Codex 0.169.0. A Codex update can change it, and then status shows Unknown.
+
 ## Known limits in 0.1
 
 These are known and not yet fixed. Please do not report them as security problems.
@@ -160,7 +181,8 @@ These are known and not yet fixed. Please do not report them as security problem
 ## Other limits
 
 - **Windows 11 only so far.** Use Windows Terminal (see above).
-- **Claude Code is the one agent with real status and cost.** Its status report format is not published and was read from Claude Code 2.1.325; a Claude Code update can change it, and then status shows Unknown.
+- **Claude Code is the one agent with status, cost and a conversation that continues.** Its status report format is not published and was read from Claude Code 2.1.325; a Claude Code update can change it, and then status shows Unknown.
+- **Codex has status only.** See [Codex](#codex) for what that leaves out and what to watch for.
 - **If `CLAUDE_CODE_DISABLE_TERMINAL_TITLE` is set where you start Lillignode,** Claude Code does not report status and every agent shows Unknown. Lillignode leaves your setting alone.
 - **Agents stop when you quit.** They reopen next time. Lillignode asks before quitting only while an agent may be in the middle of something.
 - **The sidebar and the status report do not scroll,** the mouse is not passed to agents, history cannot be searched, and an agent cannot be renamed.
