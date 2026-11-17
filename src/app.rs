@@ -22,7 +22,7 @@ use crate::state::{self, LoadOutcome};
 use crate::status::{self, AgentStatus, Reading};
 use crate::terminal::HISTORY_ROWS;
 use crate::ui;
-use crate::workspace::{Entry, Happened, NoPair, RestoreReport, Status, Workspace};
+use crate::workspace::{split_options, Entry, Happened, NoPair, RestoreReport, Status, Workspace};
 
 pub const DEFAULT_COMMAND: &str = "claude";
 const AGENT_PROMPT: &str = "Agent to start: ";
@@ -96,10 +96,69 @@ pub enum Mode {
     StatusReport,
 }
 
+/// The new-agent form: the program, its options, the folder, and, when
+/// options were typed or the kind is not the one the name suggests, a last
+/// line that shows all of it before anything starts.
+#[derive(Default)]
 pub struct NewAgent {
-    /// None while asking for the command; Some(command) while asking for the folder.
-    pub command: Option<String>,
+    pub step: Step,
+    /// What is being typed at this step.
     pub input: String,
+    /// What was given at each step, kept so `n` at the last line goes back
+    /// with nothing lost.
+    command: String,
+    options: String,
+    folder: String,
+    /// The kind chosen with Tab or `k`. None: the one the name suggests.
+    kind: Option<AgentKind>,
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub enum Step {
+    #[default]
+    Program,
+    Options,
+    Folder,
+    /// Everything given, shown back before it starts.
+    Check,
+}
+
+impl NewAgent {
+    fn kind(&self) -> AgentKind {
+        self.kind.unwrap_or_else(|| AgentKind::of_command(&self.command))
+    }
+
+    fn next_kind(&mut self) {
+        self.kind = Some(self.kind().next());
+    }
+
+    /// Whether the last line is needed: options were typed, or the kind is
+    /// not the one the name suggests.
+    fn needs_check(&self) -> bool {
+        !self.options.trim().is_empty() || self.kind() != AgentKind::of_command(&self.command)
+    }
+
+    fn options_prompt(&self) -> String {
+        format!("Options for {} as {}: ", self.command, kind_words(self.kind()))
+    }
+}
+
+/// A kind in the words the form uses.
+fn kind_words(kind: AgentKind) -> &'static str {
+    match kind {
+        AgentKind::ClaudeCode => "Claude Code",
+        AgentKind::Codex => "Codex",
+        AgentKind::Program => "a plain program",
+    }
+}
+
+/// What starting an agent as this kind means, said before it starts.
+fn kind_means(kind: AgentKind) -> &'static str {
+    match kind {
+        AgentKind::ClaudeCode => "it continues its conversation next time",
+        AgentKind::Codex => "a new conversation each time",
+        AgentKind::Program => "status only if it reports one",
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -359,7 +418,23 @@ impl<B: AgentBackend> App<B> {
         self.notice = Some(match happened {
             Happened::Exited { label, exit } if exit.clean() => format!("{label} exited. {still_here}"),
             Happened::Exited { label, exit } => {
-                format!("{label} stopped with an error (exit code {}). {still_here}", exit.code)
+                // Started as a kind its name does not suggest, it may have
+                // been given options it does not take.
+                let chosen = self
+                    .ws
+                    .entries()
+                    .iter()
+                    .find(|e| e.label() == label)
+                    .filter(|e| e.kind() != AgentKind::Program && !e.kind_by_name())
+                    .map(|e| {
+                        format!(
+                            " It was started as {0}: if it is not {0}, x removes it, then start it again \
+                             as a plain program.",
+                            kind_words(e.kind())
+                        )
+                    })
+                    .unwrap_or_default();
+                format!("{label} stopped with an error (exit code {}). {still_here}{chosen}", exit.code)
             }
             Happened::StartedNewConversation { label } => {
                 self.save_or_say();
@@ -474,8 +549,11 @@ impl<B: AgentBackend> App<B> {
             // that draws no character. Such a character would put the
             // typing cursor in the wrong place, and three of them are the
             // bar's own marks.
-            let line = text.lines().next().unwrap_or("").trim();
-            form.input.extend(line.chars().filter(|c| !c.is_control()));
+            // The last line takes keys, not text.
+            if form.step != Step::Check {
+                let line = text.lines().next().unwrap_or("").trim();
+                form.input.extend(line.chars().filter(|c| !c.is_control()));
+            }
             return;
         }
         let can_take_it = self.focused_running() && !self.too_small;
@@ -534,7 +612,7 @@ impl<B: AgentBackend> App<B> {
         }
         match key.code {
             KeyCode::Char('n') => {
-                self.mode = Mode::NewAgent(NewAgent { command: None, input: String::new() });
+                self.mode = Mode::NewAgent(NewAgent::default());
             }
             KeyCode::Tab => self.act(Action::Next),
             KeyCode::BackTab => self.act(Action::Previous),
@@ -847,48 +925,84 @@ impl<B: AgentBackend> App<B> {
 
     fn new_agent_key(&mut self, key: KeyEvent) {
         let Mode::NewAgent(form) = &mut self.mode else { return };
-        match key.code {
-            KeyCode::Esc => {
+        let plain = !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
+        match (form.step, key.code) {
+            (_, KeyCode::Esc) => {
                 self.mode = Mode::Normal;
                 self.notice = Some("Cancelled. Nothing was started.".to_string());
             }
-            KeyCode::Backspace => {
+            (Step::Check, KeyCode::Char('y')) if plain => {
+                if self.check_problem().is_none() {
+                    self.start_from_form();
+                }
+            }
+            (Step::Check, KeyCode::Char('n')) if plain => {
+                form.step = Step::Program;
+                form.input = form.command.clone();
+            }
+            (Step::Check, KeyCode::Char('k')) if plain => form.next_kind(),
+            (Step::Check, _) => {}
+            (Step::Options, KeyCode::Tab) => form.next_kind(),
+            (_, KeyCode::Backspace) => {
                 form.input.pop();
             }
-            KeyCode::Char(c) if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
-                form.input.push(c);
+            (_, KeyCode::Char(c)) if plain => form.input.push(c),
+            (Step::Program, KeyCode::Enter) => {
+                let typed = form.input.trim().trim_matches('"');
+                let command = if typed.is_empty() { DEFAULT_COMMAND } else { typed }.to_string();
+                if command != form.command {
+                    // A kind chosen for another program does not carry over.
+                    form.kind = None;
+                    form.command = command;
+                }
+                form.step = Step::Options;
+                form.input = form.options.clone();
             }
-            KeyCode::Enter => {
-                let typed = form.input.trim().trim_matches('"').to_string();
-                match form.command.take() {
-                    None => {
-                        form.command =
-                            Some(if typed.is_empty() { DEFAULT_COMMAND.to_string() } else { typed });
-                        form.input.clear();
-                    }
-                    Some(command) => {
-                        let folder = resolve_folder(&self.launch_dir, &typed);
-                        match self.ws.start_new(&command, folder.clone()) {
-                            Ok(()) => {
-                                self.mode = Mode::Normal;
-                                self.notice = self
-                                    .ws
-                                    .focused()
-                                    .map(|e| format!("Started {} in {}.", e.saved.name, folder.display()));
-                                self.save_or_say();
-                            }
-                            Err(why) => {
-                                // Stay on the question so it can be corrected.
-                                self.notice = Some(format!(
-                                    "Could not start {command}: {why}. Nothing was started. Correct the folder, or Esc to cancel."
-                                ));
-                                form.command = Some(command);
-                            }
-                        }
-                    }
+            (Step::Options, KeyCode::Enter) => {
+                form.options = std::mem::take(&mut form.input);
+                form.step = Step::Folder;
+                form.input = form.folder.clone();
+            }
+            (Step::Folder, KeyCode::Enter) => {
+                form.folder = form.input.trim().trim_matches('"').to_string();
+                if form.needs_check() {
+                    form.step = Step::Check;
+                    form.input.clear();
+                } else {
+                    self.start_from_form();
                 }
             }
             _ => {}
+        }
+    }
+
+    /// Why the agent on the form's last line cannot be started as it
+    /// stands, or None.
+    fn check_problem(&self) -> Option<String> {
+        let Mode::NewAgent(form) = &self.mode else { return None };
+        self.ws.start_problem(&form.command, &split_options(&form.options).args, form.kind())
+    }
+
+    fn start_from_form(&mut self) {
+        let Mode::NewAgent(form) = &mut self.mode else { return };
+        let folder = resolve_folder(&self.launch_dir, &form.folder);
+        let args = split_options(&form.options).args;
+        match self.ws.start_new(&form.command, args, form.kind(), folder.clone()) {
+            Ok(()) => {
+                self.mode = Mode::Normal;
+                self.notice =
+                    self.ws.focused().map(|e| format!("Started {} in {}.", e.saved.name, folder.display()));
+                self.save_or_say();
+            }
+            Err(why) => {
+                // Back to the folder, with what was typed, so it can be corrected.
+                self.notice = Some(format!(
+                    "Could not start {}: {why}. Nothing was started. Correct the folder, or Esc to cancel.",
+                    form.command
+                ));
+                form.step = Step::Folder;
+                form.input = form.folder.clone();
+            }
         }
     }
 
@@ -984,11 +1098,51 @@ impl<B: AgentBackend> App<B> {
             }
             // What is being typed comes first and the hint after it, so a
             // long folder path cannot push the typing off the screen.
-            Mode::NewAgent(NewAgent { command: None, input }) => {
-                format!("{AGENT_PROMPT}{input}   (Enter alone: {DEFAULT_COMMAND}   Esc: cancel)")
+            Mode::NewAgent(form @ NewAgent { step: Step::Program, .. }) => {
+                format!("{AGENT_PROMPT}{}   (Enter alone: {DEFAULT_COMMAND}   Esc: cancel)", form.input)
             }
-            Mode::NewAgent(NewAgent { command: Some(_), input }) => {
-                format!("{FOLDER_PROMPT}{input}   (Enter alone: {}   Esc: cancel)", self.launch_dir.display())
+            Mode::NewAgent(form @ NewAgent { step: Step::Options, .. }) => format!(
+                "{}{}   (Enter alone: none   Tab: start it as {}   Esc: cancel)",
+                form.options_prompt(),
+                form.input,
+                kind_words(form.kind().next())
+            ),
+            // The question and its keys first, then what the kind means and
+            // the options as split; the program and folder, which may be
+            // long paths, last.
+            Mode::NewAgent(form @ NewAgent { step: Step::Check, .. }) => match self.check_problem() {
+                Some(why) => {
+                    format!("Cannot start it as typed. n: change it, k: another kind, Esc: cancel   {why}.")
+                }
+                None => {
+                    let kind = kind_words(form.kind());
+                    let options = split_options(&form.options);
+                    let shown = match options.args.as_slice() {
+                        [] => "No options.".to_string(),
+                        args => {
+                            format!("Options {}.", args.iter().map(|a| format!("[{a}]")).collect::<String>())
+                        }
+                    };
+                    let unclosed = if options.unclosed_quote {
+                        " There is a \" with no partner; it was kept as part of the last option."
+                    } else {
+                        ""
+                    };
+                    format!(
+                        "Start it as {kind}? y / n / k   As {kind}: {}. {shown}{unclosed} n: change it, k: \
+                         another kind. Program: {}. Folder: {}.",
+                        kind_means(form.kind()),
+                        form.command,
+                        resolve_folder(&self.launch_dir, &form.folder).display(),
+                    )
+                }
+            },
+            Mode::NewAgent(form) => {
+                format!(
+                    "{FOLDER_PROMPT}{}   (Enter alone: {}   Esc: cancel)",
+                    form.input,
+                    self.launch_dir.display()
+                )
             }
             // Every question puts the question and its keys first. The bar
             // is one line, and a question cut off before "y / n" cannot be
@@ -1620,7 +1774,12 @@ impl<B: AgentBackend> App<B> {
     pub fn bar_cursor(&self) -> Option<usize> {
         match &self.mode {
             Mode::NewAgent(form) => {
-                let prompt = if form.command.is_none() { AGENT_PROMPT } else { FOLDER_PROMPT };
+                let prompt = match form.step {
+                    Step::Program => AGENT_PROMPT.to_string(),
+                    Step::Options => form.options_prompt(),
+                    Step::Folder => FOLDER_PROMPT.to_string(),
+                    Step::Check => return None,
+                };
                 Some(prompt.chars().count() + form.input.chars().count())
             }
             _ => None,
@@ -1762,7 +1921,7 @@ mod tests {
             Config::default(),
             None,
         );
-        app.ws.start_new("cmd", here).unwrap();
+        app.ws.start_as_named("cmd", here).unwrap();
         (app, sent)
     }
 
@@ -1940,7 +2099,9 @@ mod tests {
         // was cut off before "y / n".
         let (mut app, _) = app_with_agent();
         for i in 0..6 {
-            app.ws.start_new("cmd", std::env::temp_dir().join(format!("a-rather-long-folder-name-{i}"))).ok();
+            app.ws
+                .start_as_named("cmd", std::env::temp_dir().join(format!("a-rather-long-folder-name-{i}")))
+                .ok();
         }
         let narrow =
             |app: &App<Fake>| app.bar().chars().take(crate::ui::MIN_COLS as usize).collect::<String>();
@@ -2089,7 +2250,7 @@ mod tests {
     #[test]
     fn the_status_report_shows_a_long_report_cut_and_says_how_it_was_read() {
         let (mut app, _) = app_with_agent();
-        app.ws.start_new("claude", std::env::temp_dir()).unwrap();
+        app.ws.start_as_named("claude", std::env::temp_dir()).unwrap();
         let report =
             format!("\x1b]7501;?\x07\x1b]7501;state=working:app=claude-code:msg={}\x07", "QUJD".repeat(600));
         app.on_agent_event(AgentEvent::Output(AgentId(2), report.into_bytes()));
@@ -2125,7 +2286,7 @@ Cost",
         app.newer_pty_missing = false;
         for i in 0..n {
             let folder = std::env::temp_dir().join(char::from(b'a' + i).to_string());
-            app.ws.start_new("claude", folder).unwrap();
+            app.ws.start_as_named("claude", folder).unwrap();
             report(&mut app, u32::from(i) + 1, "?");
         }
         app
@@ -2469,7 +2630,7 @@ Cost",
     fn cost_is_a_number_pending_or_unknown_and_the_total_says_what_it_leaves_out() {
         let folder = claude_folder("states");
         let mut app = app_with_claude_agents(2);
-        app.ws.start_new("cmd", std::env::temp_dir()).unwrap();
+        app.ws.start_as_named("cmd", std::env::temp_dir()).unwrap();
         // Off unless asked for: nothing is said about cost, and nothing read.
         assert!(!app.cost_shown());
         look(&mut app, 0);
@@ -2687,7 +2848,7 @@ Cost",
     fn passing_the_cost_warning_marks_the_row_and_says_so_once_and_nothing_else() {
         let folder = claude_folder("warning");
         let (mut app, sent) = app_with_agent();
-        app.ws.start_new("claude", std::env::temp_dir().join("a")).unwrap();
+        app.ws.start_as_named("claude", std::env::temp_dir().join("a")).unwrap();
         app.ws.read_cost_from(Some(folder.clone()));
         app.ws.set_cost_warning(Some(20_000));
         record_reply(&app, &folder, 1, "claude-opus-5-5", REPLY);
@@ -2802,7 +2963,7 @@ Cost",
     #[test]
     fn each_status_draws_its_own_sign_and_word_under_a_hat() {
         let mut app = app_with_claude_agents(6);
-        app.ws.start_new("cmd", std::env::temp_dir().join("g")).unwrap();
+        app.ws.start_as_named("cmd", std::env::temp_dir().join("g")).unwrap();
         report(&mut app, 1, "state=working:app=claude-code");
         report(&mut app, 2, PERMISSION);
         report(&mut app, 3, "state=done:app=claude-code");
@@ -2836,7 +2997,7 @@ Cost",
     #[test]
     fn a_long_folder_keeps_the_short_status_whole_and_marks_what_it_cut() {
         let mut app = app_with_claude_agents(0);
-        app.ws.start_new("cmd", std::env::temp_dir().join("a-long-folder-name")).unwrap();
+        app.ws.start_as_named("cmd", std::env::temp_dir().join("a-long-folder-name")).unwrap();
         let rows = screen(&app, 100, 20);
         assert_eq!(part(&rows[2], 0, 27), "  a-long-folder-n…  Unknown");
     }
@@ -2914,6 +3075,7 @@ Cost",
         app.on_key(press(KeyCode::F(12)));
         app.on_key(press(KeyCode::Char('n')));
         app.on_key(press(KeyCode::Enter));
+        app.on_key(press(KeyCode::Enter));
         app.on_paste("C:\\work\u{1}\tapi\u{3}\nsecond line".into());
         assert!(app.bar().starts_with("Folder to work in: C:\\workapi   (Enter alone"), "{}", app.bar());
         // The cursor sits where the typing is, not past it.
@@ -2965,8 +3127,8 @@ Cost",
         );
         // Another notice after it, and someone needing you before it, in the
         // narrowest window: the fix is still whole.
-        app.ws.start_new("claude", std::env::temp_dir()).unwrap();
-        app.ws.start_new("claude", std::env::temp_dir()).unwrap();
+        app.ws.start_as_named("claude", std::env::temp_dir()).unwrap();
+        app.ws.start_as_named("claude", std::env::temp_dir()).unwrap();
         report(&mut app, 1, "?");
         report(&mut app, 2, "?");
         let behind = 1 - app.ws.focused_index().unwrap() as u32;
@@ -3009,6 +3171,169 @@ Cost",
         app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
         assert!(matches!(app.mode, Mode::Normal));
         assert_eq!(app.ws.entries().len(), 2);
+    }
+
+    /// Menu, n, then each answer typed and Enter pressed after it.
+    fn answer_form(app: &mut App<Fake>, answers: &[&str]) {
+        app.on_key(press(KeyCode::F(12)));
+        app.on_key(press(KeyCode::Char('n')));
+        for answer in answers {
+            for c in answer.chars() {
+                app.on_key(press(KeyCode::Char(c)));
+            }
+            app.on_key(press(KeyCode::Enter));
+        }
+    }
+
+    #[test]
+    fn with_no_options_and_the_kind_its_name_suggests_an_agent_starts_without_a_last_question() {
+        let mut app = app_with_claude_agents(0);
+        answer_form(&mut app, &["", "", ""]);
+        assert!(matches!(app.mode, Mode::Normal));
+        assert_eq!(app.ws.entries().len(), 1);
+        assert_eq!(app.ws.entries()[0].kind(), AgentKind::ClaudeCode);
+        assert!(app.notice.clone().unwrap().starts_with("Started Claude Code in "));
+    }
+
+    #[test]
+    fn options_are_asked_for_after_the_program_and_shown_back_before_anything_starts() {
+        let mut app = app_with_claude_agents(0);
+        answer_form(&mut app, &["codex"]);
+        assert!(
+            app.bar().starts_with(
+                "Options for codex as Codex:    (Enter alone: none   Tab: start it as a plain program"
+            ),
+            "{}",
+            app.bar()
+        );
+        assert_eq!(app.bar_cursor(), Some("Options for codex as Codex: ".chars().count()));
+        for c in r#"-a on-request -c "x y""#.chars() {
+            app.on_key(press(KeyCode::Char(c)));
+        }
+        app.on_key(press(KeyCode::Enter));
+        app.on_key(press(KeyCode::Enter));
+        let bar = app.bar();
+        assert!(
+            bar.starts_with(
+                "Start it as Codex? y / n / k   As Codex: a new conversation each time. Options \
+                 [-a][on-request][-c][x y]. n: change it, k: another kind. Program: codex. Folder: "
+            ),
+            "{bar}"
+        );
+        assert_eq!(app.bar_cursor(), None);
+        assert!(app.ws.entries().is_empty(), "nothing starts before y");
+        app.on_key(press(KeyCode::Char('y')));
+        assert!(matches!(app.mode, Mode::Normal));
+        assert_eq!(app.ws.entries()[0].saved.args, ["-a", "on-request", "-c", "x y"]);
+        assert_eq!(app.ws.entries()[0].kind(), AgentKind::Codex);
+    }
+
+    #[test]
+    fn the_kind_can_be_changed_before_it_starts_and_n_goes_back_with_nothing_lost() {
+        let mut app = app_with_claude_agents(0);
+        answer_form(&mut app, &["claude"]);
+        // Tab at the options: another kind, said on the same line.
+        app.on_key(press(KeyCode::Tab));
+        assert!(app.bar().starts_with("Options for claude as Codex: "), "{}", app.bar());
+        app.on_key(press(KeyCode::Tab));
+        assert!(app.bar().starts_with("Options for claude as a plain program: "), "{}", app.bar());
+        app.on_key(press(KeyCode::Enter));
+        app.on_key(press(KeyCode::Enter));
+        // No options, but not the kind the name suggests: asked.
+        let bar = app.bar();
+        assert!(
+            bar.starts_with(
+                "Start it as a plain program? y / n / k   As a plain program: status only if it reports one. \
+                 No options. n: change it, k: another kind. Program: claude. Folder: "
+            ),
+            "{bar}"
+        );
+        assert!(bar.contains("As a plain program: status only if it reports one."), "{bar}");
+        app.on_key(press(KeyCode::Char('k')));
+        assert!(app.bar().starts_with("Start it as Claude Code? y / n / k"), "{}", app.bar());
+        assert!(app.bar().contains("As Claude Code: it continues its conversation next time."));
+        app.on_key(press(KeyCode::Char('k')));
+        app.on_key(press(KeyCode::Char('k')));
+        // n: back to the start, with the program as typed.
+        app.on_key(press(KeyCode::Char('n')));
+        assert!(app.bar().starts_with("Agent to start: claude   (Enter alone"), "{}", app.bar());
+        app.on_key(press(KeyCode::Enter));
+        assert!(app.bar().starts_with("Options for claude as a plain program: "), "{}", app.bar());
+        app.on_key(press(KeyCode::Enter));
+        app.on_key(press(KeyCode::Enter));
+        app.on_key(press(KeyCode::Char('y')));
+        let e = &app.ws.entries()[0];
+        assert_eq!(e.kind(), AgentKind::Program);
+        assert_eq!(e.saved.conversation, None, "not given a conversation");
+    }
+
+    #[test]
+    fn a_kind_chosen_for_one_program_does_not_carry_over_to_another() {
+        let mut app = app_with_claude_agents(0);
+        answer_form(&mut app, &["claude"]);
+        app.on_key(press(KeyCode::Tab));
+        app.on_key(press(KeyCode::Enter));
+        app.on_key(press(KeyCode::Enter));
+        app.on_key(press(KeyCode::Char('n')));
+        for _ in 0.."claude".len() {
+            app.on_key(press(KeyCode::Backspace));
+        }
+        for c in "aider".chars() {
+            app.on_key(press(KeyCode::Char(c)));
+        }
+        app.on_key(press(KeyCode::Enter));
+        assert!(app.bar().starts_with("Options for aider as a plain program: "), "{}", app.bar());
+    }
+
+    #[test]
+    fn options_that_would_give_claude_code_a_second_conversation_cannot_be_started() {
+        let mut app = app_with_claude_agents(0);
+        answer_form(&mut app, &["claude", "--resume abc", ""]);
+        let bar = app.bar();
+        assert_eq!(
+            bar,
+            "Cannot start it as typed. n: change it, k: another kind, Esc: cancel   Take out --resume: \
+             Lillignode gives Claude Code its conversation itself. Or start it as a plain program."
+        );
+        app.on_key(press(KeyCode::Char('y')));
+        assert!(app.ws.entries().is_empty(), "y does nothing while it cannot start");
+        // As a plain program it can.
+        app.on_key(press(KeyCode::Char('k')));
+        app.on_key(press(KeyCode::Char('k')));
+        assert!(app.bar().starts_with("Start it as a plain program? y / n / k"), "{}", app.bar());
+        app.on_key(press(KeyCode::Esc));
+        assert_eq!(app.notice.as_deref(), Some("Cancelled. Nothing was started."));
+        assert!(app.ws.entries().is_empty());
+    }
+
+    #[test]
+    fn an_open_quote_is_said_on_the_last_line() {
+        let mut app = app_with_claude_agents(0);
+        answer_form(&mut app, &["codex", r#"-m "two words"#, ""]);
+        let bar = app.bar();
+        assert!(
+            bar.contains(r#"Options [-m]["two words]. There is a " with no partner; it was kept as part of the last option. n:"#),
+            "{bar}"
+        );
+    }
+
+    #[test]
+    fn an_agent_started_as_a_kind_its_name_does_not_suggest_says_so_when_it_fails() {
+        let mut app = app_with_claude_agents(0);
+        app.ws.start_new("wrapper", vec![], AgentKind::ClaudeCode, std::env::temp_dir()).unwrap();
+        app.on_agent_event(AgentEvent::Exited(AgentId(1), crate::agent::Exit { code: 2 }));
+        let notice = app.notice.clone().unwrap();
+        assert!(
+            notice.ends_with(
+                "It was started as Claude Code: if it is not Claude Code, x removes it, then start it again as \
+                 a plain program."
+            ),
+            "{notice}"
+        );
+        // Started as what its name says, nothing more is said.
+        app.ws.start_as_named("claude", std::env::temp_dir()).unwrap();
+        app.on_agent_event(AgentEvent::Exited(AgentId(2), crate::agent::Exit { code: 2 }));
+        assert!(app.notice.clone().unwrap().ends_with("x to remove it."), "{:?}", app.notice);
     }
 
     #[test]
@@ -3390,8 +3715,8 @@ Cost",
         check(screen(&app, 100, 20), "welcome");
         check(screen(&app, 40, 8), "too small");
         app = app_with_claude_agents(6);
-        app.ws.start_new("cmd", std::env::temp_dir().join("a-folder-with-a-long-name")).unwrap();
-        app.ws.start_new("nosuch", std::env::temp_dir()).unwrap();
+        app.ws.start_as_named("cmd", std::env::temp_dir().join("a-folder-with-a-long-name")).unwrap();
+        app.ws.start_as_named("nosuch", std::env::temp_dir()).unwrap();
         report(&mut app, 1, "state=working:app=claude-code");
         report(&mut app, 2, PERMISSION);
         report(&mut app, 3, "state=done:app=claude-code");
@@ -3498,7 +3823,7 @@ Cost",
     /// (id 2), which is in front.
     fn app_with_claude_and_codex() -> App<Fake> {
         let mut app = app_with_claude_agents(1);
-        app.ws.start_new("codex", std::env::temp_dir().join("web")).unwrap();
+        app.ws.start_as_named("codex", std::env::temp_dir().join("web")).unwrap();
         app.notice = None;
         app
     }
@@ -3522,7 +3847,7 @@ Cost",
 
         // Two Codex agents: both named, in one sentence.
         app.on_key(press(KeyCode::Char('n')));
-        app.ws.start_new("codex", std::env::temp_dir().join("api")).unwrap();
+        app.ws.start_as_named("codex", std::env::temp_dir().join("api")).unwrap();
         app.on_key(press(KeyCode::F(12)));
         app.on_key(press(KeyCode::Char('q')));
         assert!(
@@ -3623,7 +3948,7 @@ Cost",
 
         // Once for Codex: a second silent Codex agent says nothing more.
         app.notice = None;
-        app.ws.start_new("codex", std::env::temp_dir().join("docs")).unwrap();
+        app.ws.start_as_named("codex", std::env::temp_dir().join("docs")).unwrap();
         app.ws.tick(Instant::now() + status::STARTING_DEADLINE + status::STARTING_DEADLINE);
         app.after_events();
         assert_eq!(app.notice, None);

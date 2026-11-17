@@ -89,6 +89,12 @@ pub trait AgentBackend {
     /// Start an agent. On success its events begin to arrive.
     fn start(&mut self, spec: &AgentSpec, size: Size) -> Result<AgentId, StartError>;
 
+    /// Why `start` would refuse this program with these arguments, worded
+    /// for someone who has just typed them, or None. Nothing is started.
+    fn would_refuse(&self, _command: &str, _args: &[String]) -> Option<String> {
+        None
+    }
+
     /// Send keystrokes to an agent. Errors mean the agent is gone.
     fn send(&mut self, id: AgentId, bytes: &[u8]) -> std::io::Result<()>;
 

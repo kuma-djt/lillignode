@@ -44,6 +44,16 @@ impl AgentKind {
         }
     }
 
+    /// The kind after this one, in the order the new-agent form offers
+    /// them, coming round again after the last.
+    pub fn next(self) -> AgentKind {
+        match self {
+            AgentKind::ClaudeCode => AgentKind::Codex,
+            AgentKind::Codex => AgentKind::Program,
+            AgentKind::Program => AgentKind::ClaudeCode,
+        }
+    }
+
     /// The word saved with an agent of this kind.
     pub fn saved_word(self) -> &'static str {
         match self {
@@ -157,6 +167,18 @@ mod tests {
         {
             assert_eq!(AgentKind::of_command(command), AgentKind::Program, "{command:?}");
         }
+    }
+
+    #[test]
+    fn the_form_offers_every_kind_in_turn_and_comes_round_again() {
+        let mut seen = vec![AgentKind::ClaudeCode];
+        while seen.len() < 4 {
+            seen.push(seen.last().unwrap().next());
+        }
+        assert_eq!(
+            seen,
+            [AgentKind::ClaudeCode, AgentKind::Codex, AgentKind::Program, AgentKind::ClaudeCode]
+        );
     }
 
     #[test]

@@ -57,7 +57,9 @@ You need [Claude Code](https://claude.com/claude-code) installed and signed in. 
 
 **On Windows, use Windows Terminal.** In the classic console window, pasting into Claude Code does not work (with or without Lillignode). In VS Code's terminal Ctrl+Q belongs to VS Code, so use F12.
 
-Inside Lillignode, press `n` to start an agent: Enter for Claude Code, then the folder it should work in. Your typing goes to the agent in front. Ctrl+Q or F12 opens Lillignode's menu:
+Inside Lillignode, press `n` to start an agent: Enter for Claude Code, then its options (Enter alone for none), then the folder it should work in. Your typing goes to the agent in front. Ctrl+Q or F12 opens Lillignode's menu:
+
+**Options and kind.** Options are split on spaces; double quotes keep a space inside one (`--name "two words"`). Lillignode takes a program named `claude` for Claude Code, `codex` for Codex, and anything else for a plain program. To start a wrapper script as Claude Code, or `claude` as a plain program, press Tab at the options to change the kind. When options were typed or the kind was changed, one more line shows the kind, the options as split, the program and the folder before anything starts: `y` starts it, `n` goes back to change it, `k` changes the kind. As Claude Code, an agent is given its conversation by Lillignode, so options that name one (`--resume`, `--session-id`, `--continue`) are refused there.
 
 | Key | What it does |
 |---|---|
@@ -173,7 +175,7 @@ What to watch for:
 
 ## Codex
 
-Start Codex CLI like any agent: press `n`, type `codex`, then the folder. A program whose file is named `codex` is taken for Codex. Lillignode adds nothing to how Codex is started and changes none of its settings.
+Start Codex CLI like any agent: press `n`, type `codex`, then its options if any (`-a on-request` asks before running commands), then the folder. A program whose file is named `codex` is taken for Codex. Lillignode adds nothing to how Codex is started and changes none of its settings.
 
 **Checked by script, not yet by a person in a real window.** With Codex 0.169.0 on Windows 11, inside Lillignode: Starting, Idle, Working, Needs you with one bell at an approval, Done, and Unknown when signed out. Not seen from real Codex: an error, a question, Esc in the middle of a turn. That check was made before status was opened to every program and has not been repeated since.
 

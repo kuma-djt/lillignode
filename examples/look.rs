@@ -66,10 +66,10 @@ fn busy(cols: u16, rows: u16) -> App<Fake> {
     let mut app = app(cols, rows);
     let folders = ["api", "web", "docs", "billing", "search", "infra"];
     for (i, folder) in folders.iter().enumerate() {
-        app.ws.start_new("claude", PathBuf::from("/work").join(folder)).unwrap();
+        app.ws.start_as_named("claude", PathBuf::from("/work").join(folder)).unwrap();
         reports(&mut app, i as u32 + 1, "?");
     }
-    app.ws.start_new("aider", PathBuf::from("/work/tools")).unwrap();
+    app.ws.start_as_named("aider", PathBuf::from("/work/tools")).unwrap();
     reports(&mut app, 1, "state=working:app=claude-code");
     reports(&mut app, 2, "state=blocked:app=claude-code:kind=permission");
     reports(&mut app, 3, "state=done:app=claude-code");

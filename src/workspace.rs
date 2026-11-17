@@ -94,6 +94,11 @@ impl Entry {
         kind_of(&self.saved)
     }
 
+    /// Whether its kind is the one its program's name suggests.
+    pub fn kind_by_name(&self) -> bool {
+        self.kind() == AgentKind::of_command(&self.saved.command)
+    }
+
     pub fn is_claude_code(&self) -> bool {
         self.kind() == AgentKind::ClaudeCode
     }
@@ -201,6 +206,62 @@ fn kind_is_known(saved: &SavedAgent) -> bool {
         Some(word) => AgentKind::from_saved(word).is_some(),
         None => true,
     }
+}
+
+/// True for an option by which Claude Code would be told which
+/// conversation to use. Lillignode tells it that itself.
+fn names_a_conversation(arg: &str) -> bool {
+    let flag = arg.split('=').next().unwrap_or(arg);
+    ["--session-id", "--resume", "-r", "--continue", "-c"].contains(&flag)
+}
+
+/// Options typed at the new-agent form, split into the arguments a program
+/// is given.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Options {
+    pub args: Vec<String>,
+    /// A `"` was left open. It was kept, as text, in the last option.
+    pub unclosed_quote: bool,
+}
+
+/// Split typed options on spaces. Double quotes keep spaces inside one
+/// option and are not passed on; `""` is an empty option. A quote with no
+/// partner is kept as text, so nothing typed is lost or guessed at.
+pub fn split_options(typed: &str) -> Options {
+    let mut out = Options::default();
+    let mut word = String::new();
+    let mut in_word = false;
+    // Where the open quote was in `word`, while one is open.
+    let mut open: Option<usize> = None;
+    for c in typed.chars() {
+        match c {
+            '"' => {
+                in_word = true;
+                open = match open {
+                    Some(_) => None,
+                    None => Some(word.len()),
+                };
+            }
+            c if c.is_whitespace() && open.is_none() => {
+                if in_word {
+                    out.args.push(std::mem::take(&mut word));
+                    in_word = false;
+                }
+            }
+            c => {
+                in_word = true;
+                word.push(c);
+            }
+        }
+    }
+    if let Some(at) = open {
+        word.insert(at, '"');
+        out.unclosed_quote = true;
+    }
+    if in_word {
+        out.args.push(word);
+    }
+    out
 }
 
 /// Whether to begin a conversation or continue the saved one.
@@ -539,8 +600,34 @@ impl<B: AgentBackend> Workspace<B> {
         report
     }
 
+    /// Why a new agent would not be started with these options as this
+    /// kind, worded for someone who has just typed them, or None. Nothing is
+    /// started. `start_new` refuses for the same reasons.
+    pub fn start_problem(&self, command: &str, args: &[String], kind: AgentKind) -> Option<String> {
+        if kind.keeps_conversations() {
+            if let Some(arg) = args.iter().find(|a| names_a_conversation(a)) {
+                return Some(format!(
+                    "Take out {arg}: Lillignode gives Claude Code its conversation itself. Or start it as a \
+                     plain program"
+                ));
+            }
+        }
+        self.backend.would_refuse(command, args)
+    }
+
+    /// Start a new agent with no options, as the kind its name suggests.
+    pub fn start_as_named(&mut self, command: &str, folder: PathBuf) -> Result<(), StartError> {
+        self.start_new(command, Vec::new(), AgentKind::of_command(command), folder)
+    }
+
     /// Start a new agent and put it in front. On failure nothing is added.
-    pub fn start_new(&mut self, command: &str, folder: PathBuf) -> Result<(), StartError> {
+    pub fn start_new(
+        &mut self,
+        command: &str,
+        args: Vec<String>,
+        kind: AgentKind,
+        folder: PathBuf,
+    ) -> Result<(), StartError> {
         // A workspace with more would not be started at the next launch.
         if self.entries.len() >= crate::state::MOST_AGENTS {
             return Err(StartError::Refused(format!(
@@ -548,12 +635,14 @@ impl<B: AgentBackend> Workspace<B> {
                 crate::state::MOST_AGENTS
             )));
         }
-        let kind = AgentKind::of_command(command);
+        if let Some(why) = self.start_problem(command, &args, kind) {
+            return Err(StartError::Refused(why));
+        }
         let saved = SavedAgent {
             name: self.distinct_name(&kind.name(command), &folder),
             command: command.to_string(),
             kind: Some(kind.saved_word().to_string()),
-            args: Vec::new(),
+            args,
             folder: folder.clone(),
             conversation: kind.keeps_conversations().then(new_conversation_id),
             other: Default::default(),
@@ -948,9 +1037,9 @@ mod tests {
     fn no_more_agents_are_opened_than_a_saved_workspace_may_hold() {
         let mut ws = Workspace::new(Fake::default(), SIZE);
         for i in 0..crate::state::MOST_AGENTS {
-            ws.start_new("claude", root(&format!("f{i}"))).unwrap();
+            ws.start_as_named("claude", root(&format!("f{i}"))).unwrap();
         }
-        let refused = ws.start_new("claude", root("one-more")).unwrap_err().to_string();
+        let refused = ws.start_as_named("claude", root("one-more")).unwrap_err().to_string();
         assert!(refused.starts_with("Lillignode keeps at most 64 agents"), "{refused}");
         assert_eq!(ws.entries().len(), crate::state::MOST_AGENTS, "nothing was added");
     }
@@ -971,6 +1060,70 @@ mod tests {
     }
 
     #[test]
+    fn typed_options_split_on_spaces_and_quotes_keep_a_space_inside_one() {
+        let split = |t: &str| split_options(t).args;
+        assert!(split("").is_empty());
+        assert!(split("   ").is_empty());
+        assert_eq!(split("--no-alt-screen -a on-request"), ["--no-alt-screen", "-a", "on-request"]);
+        assert_eq!(split("  -m   x  "), ["-m", "x"]);
+        assert_eq!(split(r#"--name "two words" end"#), ["--name", "two words", "end"]);
+        assert_eq!(split(r#"--x="a b""#), ["--x=a b"]);
+        assert_eq!(split(r#"-p """#), ["-p", ""]);
+        assert!(!split_options(r#"a "b c""#).unclosed_quote);
+    }
+
+    #[test]
+    fn a_quote_with_no_partner_is_kept_as_text_and_said() {
+        let o = split_options(r#"-m "two words"#);
+        assert!(o.unclosed_quote);
+        assert_eq!(o.args, ["-m", "\"two words"]);
+        let o = split_options(r#"a"b"#);
+        assert!(o.unclosed_quote);
+        assert_eq!(o.args, ["a\"b"]);
+    }
+
+    #[test]
+    fn a_new_agent_takes_its_options_and_the_kind_it_was_given() {
+        let mut ws = Workspace::new(Fake::default(), SIZE);
+        // claude started as a plain program: no conversation is given to it.
+        ws.start_new("claude", vec!["-a".into(), "b c".into()], AgentKind::Program, root("p")).unwrap();
+        assert_eq!(log(&ws), ["start 1 -a b c"]);
+        let saved = ws.to_saved();
+        assert_eq!(saved.agents[0].kind.as_deref(), Some("program"));
+        assert_eq!(saved.agents[0].args, ["-a", "b c"]);
+        assert_eq!(saved.agents[0].conversation, None);
+        assert_eq!(saved.agents[0].name, "claude");
+        assert!(!ws.entries()[0].kind_by_name());
+        // As Claude Code: its options first, then the conversation it is given.
+        ws.start_new("claude", vec!["--model".into(), "x".into()], AgentKind::ClaudeCode, root("c")).unwrap();
+        let id = ws.to_saved().agents[1].conversation.clone().unwrap();
+        assert_eq!(log(&ws)[1], format!("start 2 --model x --session-id {id}"));
+        assert!(ws.entries()[1].kind_by_name());
+    }
+
+    #[test]
+    fn claude_code_is_not_given_a_conversation_twice() {
+        let mut ws = Workspace::new(Fake::default(), SIZE);
+        for given in ["--resume", "--session-id", "--resume=abc", "-r", "--continue", "-c"] {
+            let args = vec![given.to_string()];
+            let why = ws.start_problem("claude", &args, AgentKind::ClaudeCode).unwrap();
+            assert_eq!(
+                why,
+                format!(
+                    "Take out {given}: Lillignode gives Claude Code its conversation itself. Or start it as \
+                     a plain program"
+                )
+            );
+            let refused = ws.start_new("claude", args.clone(), AgentKind::ClaudeCode, root("a"));
+            assert!(matches!(refused, Err(StartError::Refused(_))), "{given}");
+            // As a plain program it is the user's own business.
+            assert_eq!(ws.start_problem("claude", &args, AgentKind::Program), None);
+        }
+        assert!(ws.entries().is_empty() && log(&ws).is_empty(), "nothing was started");
+        assert_eq!(ws.start_problem("claude", &["--model".into()], AgentKind::ClaudeCode), None);
+    }
+
+    #[test]
     fn unknown_lines_survive_restore_restart_and_save() {
         let mut ws = Workspace::new(Fake::default(), SIZE);
         let mut a = agent("claude", "api");
@@ -985,7 +1138,7 @@ mod tests {
         assert_eq!(back.other["team"], "web");
         assert_eq!(back.agents[0].other["colour"], "red");
         // A new agent has none.
-        ws.start_new("claude", root("web")).unwrap();
+        ws.start_as_named("claude", root("web")).unwrap();
         assert!(ws.to_saved().agents[1].other.is_empty());
     }
 
@@ -1034,7 +1187,7 @@ mod tests {
     #[test]
     fn a_new_claude_code_agent_gets_a_conversation_id_and_restore_continues_it() {
         let mut ws = Workspace::new(Fake::default(), SIZE);
-        ws.start_new("claude", root("api")).unwrap();
+        ws.start_as_named("claude", root("api")).unwrap();
         let id = ws.to_saved().agents[0].conversation.clone().expect("a conversation id is saved");
         assert_eq!(log(&ws), vec![format!("start 1 --session-id {id}")]);
 
@@ -1086,7 +1239,7 @@ mod tests {
     #[test]
     fn an_agent_that_dies_is_marked_exited_and_can_be_started_again() {
         let mut ws = Workspace::new(Fake::default(), SIZE);
-        ws.start_new("claude", root("api")).unwrap();
+        ws.start_as_named("claude", root("api")).unwrap();
         assert_eq!(ws.focused().unwrap().status, Status::Running);
 
         let died = ws.handle(AgentEvent::Exited(AgentId(1), Exit { code: 3 }));
@@ -1110,8 +1263,8 @@ mod tests {
     #[test]
     fn a_failed_start_adds_nothing() {
         let mut ws = Workspace::new(Fake::default(), SIZE);
-        assert!(ws.start_new("codex", root("api")).is_err());
-        assert!(ws.start_new("claude", root("gone")).is_err());
+        assert!(ws.start_as_named("codex", root("api")).is_err());
+        assert!(ws.start_as_named("claude", root("gone")).is_err());
         assert!(ws.entries().is_empty());
         assert_eq!(ws.focused_index(), None);
     }
@@ -1120,7 +1273,7 @@ mod tests {
     fn four(front: usize) -> Workspace<Fake> {
         let mut ws = Workspace::new(Fake::default(), SIZE);
         for folder in ["a", "b", "c", "d"] {
-            ws.start_new("claude", root(folder)).unwrap();
+            ws.start_as_named("claude", root(folder)).unwrap();
         }
         while ws.focused_index() != Some(front) {
             ws.focus_next();
@@ -1138,7 +1291,7 @@ mod tests {
     fn two_side_by_side_takes_two_agents_and_starts_with_the_one_in_front_on_the_left() {
         let mut ws = Workspace::new(Fake::default(), SIZE);
         assert_eq!(ws.show_two(), Err(NoPair::TooFewAgents(0)));
-        ws.start_new("claude", root("a")).unwrap();
+        ws.start_as_named("claude", root("a")).unwrap();
         assert_eq!(ws.show_two(), Err(NoPair::TooFewAgents(1)));
         assert_eq!(ws.pair(), None, "a refusal changes nothing");
 
@@ -1174,7 +1327,7 @@ mod tests {
         ws.focus_previous();
         assert_eq!(shown(&ws), ("b".into(), "d".into(), "d".into()));
         // A new agent takes the side in front too.
-        ws.start_new("claude", root("e")).unwrap();
+        ws.start_as_named("claude", root("e")).unwrap();
         assert_eq!(shown(&ws), ("b".into(), "e".into(), "e".into()));
     }
 
@@ -1217,8 +1370,8 @@ mod tests {
     #[test]
     fn closing_stops_the_agent_removes_it_and_ignores_its_late_exit() {
         let mut ws = Workspace::new(Fake::default(), SIZE);
-        ws.start_new("claude", root("a")).unwrap();
-        ws.start_new("claude", root("b")).unwrap();
+        ws.start_as_named("claude", root("a")).unwrap();
+        ws.start_as_named("claude", root("b")).unwrap();
         assert_eq!(ws.close_focused(), Some("Claude Code (b)".to_string()));
         assert!(log(&ws).contains(&"close 2".to_string()));
         assert_eq!(ws.focused().unwrap().label(), "Claude Code (a)");
@@ -1230,9 +1383,9 @@ mod tests {
     fn agents_shown_with_the_same_folder_get_numbered_names_that_stay_put() {
         let mut ws = Workspace::new(Fake::default(), SIZE);
         for _ in 0..3 {
-            ws.start_new("claude", root("api")).unwrap();
+            ws.start_as_named("claude", root("api")).unwrap();
         }
-        ws.start_new("claude", root("web")).unwrap();
+        ws.start_as_named("claude", root("web")).unwrap();
         let labels = |ws: &Workspace<Fake>| ws.entries().iter().map(Entry::label).collect::<Vec<_>>();
         assert_eq!(
             labels(&ws),
@@ -1245,7 +1398,7 @@ mod tests {
         ws.focus_next();
         assert_eq!(ws.close_focused(), Some("Claude Code 2 (api)".to_string()));
         assert_eq!(labels(&ws), ["Claude Code (api)", "Claude Code 3 (api)", "Claude Code (web)"]);
-        ws.start_new("claude", root("api")).unwrap();
+        ws.start_as_named("claude", root("api")).unwrap();
         assert_eq!(ws.entries().last().unwrap().label(), "Claude Code 2 (api)");
 
         // Restoring keeps the numbers as saved.
@@ -1265,7 +1418,7 @@ mod tests {
     #[test]
     fn terminal_questions_are_answered_to_the_agent_that_asked() {
         let mut ws = Workspace::new(Fake::default(), SIZE);
-        ws.start_new("claude", root("a")).unwrap();
+        ws.start_as_named("claude", root("a")).unwrap();
         ws.handle(AgentEvent::Output(AgentId(1), b"\x1b[6n".to_vec()));
         assert!(log(&ws).contains(&"send 1 \"\\u{1b}[1;1R\"".to_string()));
     }
@@ -1273,7 +1426,7 @@ mod tests {
     #[test]
     fn a_claude_code_agent_shows_what_it_reports_and_starts_over_when_restarted() {
         let mut ws = Workspace::new(Fake::default(), SIZE);
-        ws.start_new("claude", root("a")).unwrap();
+        ws.start_as_named("claude", root("a")).unwrap();
         assert_eq!(ws.focused().unwrap().reported(), Some(AgentStatus::Starting));
         ws.handle(AgentEvent::Output(AgentId(1), b"\x1b]7501;?\x07".to_vec()));
         assert!(log(&ws).contains(&"send 1 \"\\u{1b}]7501;?\\u{7}\"".to_string()), "{:?}", log(&ws));
@@ -1320,7 +1473,7 @@ mod tests {
     #[test]
     fn needs_you_rings_once_and_settled_means_done_idle_or_error() {
         let mut ws = Workspace::new(Fake::default(), SIZE);
-        ws.start_new("claude", root("a")).unwrap();
+        ws.start_as_named("claude", root("a")).unwrap();
         let report = |ws: &mut Workspace<Fake>, body: &str| {
             ws.handle(AgentEvent::Output(AgentId(1), format!("\x1b]7501;{body}\x07").into_bytes()));
         };
@@ -1347,7 +1500,7 @@ mod tests {
     #[test]
     fn the_deadline_turns_a_silent_agent_unknown() {
         let mut ws = Workspace::new(Fake::default(), SIZE);
-        ws.start_new("claude", root("a")).unwrap();
+        ws.start_as_named("claude", root("a")).unwrap();
         // The first tick also takes a first look at the cost.
         ws.tick(Instant::now());
         assert!(!ws.tick(Instant::now()));
@@ -1358,7 +1511,7 @@ mod tests {
     #[test]
     fn a_working_agent_that_draws_nothing_for_a_minute_is_working_quiet_and_not_settled() {
         let mut ws = Workspace::new(Fake::default(), SIZE);
-        ws.start_new("claude", root("a")).unwrap();
+        ws.start_as_named("claude", root("a")).unwrap();
         ws.handle(AgentEvent::Output(AgentId(1), b"\x1b]7501;?\x07".to_vec()));
         ws.handle(AgentEvent::Output(AgentId(1), b"\x1b]7501;state=working:app=claude-code\x07".to_vec()));
         let start = Instant::now();
@@ -1539,7 +1692,7 @@ mod tests {
     #[test]
     fn typing_returns_the_view_to_the_present() {
         let mut ws = Workspace::new(Fake::default(), Size { rows: 3, cols: 20 });
-        ws.start_new("claude", root("a")).unwrap();
+        ws.start_as_named("claude", root("a")).unwrap();
         let lines: String = (1..=10).map(|i| format!("line {i}\r\n")).collect();
         ws.handle(AgentEvent::Output(AgentId(1), lines.into_bytes()));
         ws.focused_mut().unwrap().term.scroll(5);
@@ -1573,7 +1726,7 @@ mod tests {
         assert_eq!(ws.focused().unwrap().key(), keys[1]);
 
         // A new agent never gets a key that was used before, the closed one's included.
-        ws.start_new("claude", root("new")).unwrap();
+        ws.start_as_named("claude", root("new")).unwrap();
         let new = ws.focused().unwrap().key();
         assert!(!keys.contains(&new));
     }
@@ -1612,7 +1765,7 @@ mod tests {
     #[test]
     fn a_new_agent_is_saved_with_its_kind() {
         let mut ws = Workspace::new(Fake::default(), SIZE);
-        ws.start_new("claude", root("api")).unwrap();
+        ws.start_as_named("claude", root("api")).unwrap();
         assert_eq!(ws.to_saved().agents[0].kind.as_deref(), Some("claude-code"));
     }
 
@@ -1705,7 +1858,7 @@ mod tests {
         assert_eq!(ask(&mut ws, 3), yes(3));
 
         // And a new one, started by the user.
-        ws.start_new("claude", root("b")).unwrap();
+        ws.start_as_named("claude", root("b")).unwrap();
         assert_eq!(ask(&mut ws, 4), yes(4));
     }
 
@@ -1862,7 +2015,7 @@ mod tests {
         let names: Vec<_> = ws.entries().iter().map(|e| e.label()).collect();
         assert_eq!(names, ["Codex (web)", "Codex 2 (web)", "codexplorer (docs)", "Claude Code (api)"]);
         // A new one beside them is numbered after them, not given a twin's name.
-        assert!(ws.start_new("codex", root("web")).is_err(), "the fake backend starts only claude");
+        assert!(ws.start_as_named("codex", root("web")).is_err(), "the fake backend starts only claude");
         // Once the kind is saved the name is left alone, whatever it is.
         let again = ws.to_saved();
         let mut ws = Workspace::new(Fake::default(), SIZE);

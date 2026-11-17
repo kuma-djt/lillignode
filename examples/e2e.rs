@@ -236,6 +236,7 @@ impl Session {
         self.keys(command.as_bytes());
         self.keys(b"\r");
         self.keys(b"\r");
+        self.keys(b"\r");
     }
 
     /// Quit through the menu, answering the confirmation if one is asked.
@@ -340,6 +341,7 @@ fn cost(sb: &Sandbox) {
     s.keys(b"n");
     s.keys(b"\r");
     s.keys(b"\r");
+    s.keys(b"\r");
     s.expect("a new Claude Code agent", "STANDIN CLAUDE new ");
     s.keys(b"early");
     s.keys(b"\r");
@@ -360,6 +362,7 @@ fn cost(sb: &Sandbox) {
     std::fs::write(state.join("config.json"), r#"{ "cost": true, "cost_warning_tokens": 30000 }"#).unwrap();
     let mut s = Session::start_in(sb, &state);
     s.keys(b"n");
+    s.keys(b"\r");
     s.keys(b"\r");
     s.keys(b"\r");
     s.expect("a new Claude Code agent, with cost switched on", "STANDIN CLAUDE new ");
@@ -779,6 +782,67 @@ fn any_program(sb: &Sandbox, standin: &Path) {
     check("it is saved as a plain program", saved.contains("\"kind\": \"program\""), &saved);
 }
 
+/// Options typed when starting an agent, and a kind stated for it.
+fn start_options(sb: &Sandbox, standin: &Path) {
+    println!("R. Starting an agent with options and a stated kind");
+    let dir = sb.root.join("start-options");
+    std::fs::create_dir_all(&dir).unwrap();
+    launcher(&dir, standin, "teller", "args");
+    let teller = dir.join("teller").display().to_string();
+    let state = sb.root.join("state-start-options");
+    let mut s = Session::start_in(sb, &state);
+    s.keys(b"n");
+    s.keys(format!("{teller}\r").as_bytes());
+    s.expect("options are asked for after the program", "as a plain program:");
+    s.keys(b"one \"two three\"\r\r");
+    s.expect("what will start is shown first", "Start it as a plain program? y / n / k");
+    s.expect("with the options as they were split", "Options [one][two three]. n: change it");
+    s.never("nothing has started yet", "STANDIN ARGS");
+    s.keys(b"y");
+    s.expect("the program gets them as split, a space kept inside one", "STANDIN ARGS [one][two three]");
+
+    // A stated kind: a program not named claude, started as Claude Code,
+    // is given a conversation.
+    s.raw(CTRL_Q);
+    s.keys(b"n");
+    s.keys(format!("{teller}\r").as_bytes());
+    s.keys(b"\t");
+    s.expect("Tab changes the kind on the same line", "as Claude Code:");
+    s.keys(b"\r\r");
+    s.expect("a kind the name does not suggest is asked about", "Start it as Claude Code? y / n / k");
+    s.expect("and what that means is said", "As Claude Code: it continues its conversation next time.");
+    s.keys(b"y");
+    s.expect("it is given a conversation, after nothing typed", "STANDIN ARGS [--session-id][");
+
+    // Options Claude Code would take as a second conversation.
+    s.raw(CTRL_Q);
+    s.keys(b"n");
+    s.keys(b"\r--resume x\r\r");
+    s.expect("are refused before anything starts", "Cannot start it as typed. n: change it, k: another kind");
+    s.expect("with what to do first", "Esc: cancel   Take out --resume: Lillignode gives Claude Code");
+    s.keys(b"y");
+    s.keys(ESC);
+    s.expect("Esc leaves it", "Cancelled. Nothing was started.");
+
+    if cfg!(windows) {
+        // teller is a .cmd launcher here: the command interpreter would act
+        // on an & in its options.
+        s.raw(CTRL_Q);
+        s.keys(b"n");
+        s.keys(format!("{teller}\ra&b\r\r").as_bytes());
+        s.expect(
+            "options a launcher would act on are refused at the form",
+            "Esc: cancel   Take out the \"&\": this program is a launcher",
+        );
+        s.keys(ESC);
+    }
+    drop(s.quit("quit", true));
+    let saved = std::fs::read_to_string(state.join("workspace.json")).unwrap();
+    check("the options are saved as split", saved.contains("\"two three\""), &saved);
+    check("and the stated kind", saved.contains("\"kind\": \"claude-code\""), &saved);
+    check("only two agents were started", saved.matches("\"command\"").count() == 2, &saved);
+}
+
 fn contains(hay: &[u8], needle: &[u8]) -> bool {
     hay.windows(needle.len()).any(|w| w == needle)
 }
@@ -828,6 +892,8 @@ fn main() {
     s.keys(b"n");
     s.expect("n asks which agent", "Agent to start:");
     s.keys(b"nosuchagent\r");
+    s.expect("then asks for its options", "Options for nosuchagent as a plain program:");
+    s.keys(b"\r");
     s.expect("then asks which folder", "Folder to work in:");
     s.keys(b"\r");
     s.expect("unknown program: says so", "\"nosuchagent\" is not installed or not on PATH");
@@ -837,7 +903,7 @@ fn main() {
     s.expect("failed start added nothing", "No agents yet. Press n.");
 
     s.keys(b"n");
-    s.keys(format!("{shell}\r").as_bytes());
+    s.keys(format!("{shell}\r\r").as_bytes());
     s.keys(b"no-such-folder\r");
     s.expect("missing folder: says so", "does not exist");
     s.keys(&[0x7f; 14]);
@@ -850,7 +916,7 @@ fn main() {
     s.raw(CTRL_Q);
     s.expect("Ctrl+Q opens the menu", "MENU");
     s.keys(b"n");
-    s.keys(format!("{shell}\r").as_bytes());
+    s.keys(format!("{shell}\r\r").as_bytes());
     s.keys(b"\r");
     s.expect("second agent in the same folder starts with a numbered name", &format!("Started {shell} 2 in"));
 
@@ -1190,6 +1256,7 @@ fn main() {
     s.keys(b"n");
     s.keys(b"\r");
     s.keys(b"\r");
+    s.keys(b"\r");
     s.expect("a new Claude Code agent starts a new conversation", "STANDIN CLAUDE new ");
     s.expect("sidebar uses its name, under a hat, and marks it as in front", ">/\\. Claude Code");
     s.keys(b"remember-this");
@@ -1210,6 +1277,7 @@ fn main() {
     let file = state.join("workspace.json");
     let mut s = Session::start_in(&sb, &state);
     s.keys(b"n");
+    s.keys(b"\r");
     s.keys(b"\r");
     s.keys(b"\r");
     s.expect("a second agent, in which nothing is said", "STANDIN CLAUDE new ");
@@ -1453,6 +1521,7 @@ fn main() {
     side_by_side(&sb, &standin);
     codex(&sb, &standin);
     any_program(&sb, &standin);
+    start_options(&sb, &standin);
 
     let _ = std::fs::remove_dir_all(&sb.root);
     println!("\nAll checks passed.");
