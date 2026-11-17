@@ -10,13 +10,11 @@ use std::fs;
 use std::path::Path;
 
 /// Runs agents, tracks them, saves them. No screen, no keyboard.
-const ENGINE: &[&str] = &["agent", "cost", "kind", "local", "state", "status", "terminal", "workspace"];
+const ENGINE: &[&str] =
+    &["agent", "config", "cost", "kind", "local", "state", "status", "terminal", "workspace"];
 
 /// Draws, reads keys, and words what the engine decided.
-///
-/// `config` is here only because a menu key is stored as the keyboard
-/// library's own type. It belongs with the engine once that is separated.
-const FACE: &[&str] = &["app", "config", "input", "keys", "look", "main", "ui", "view"];
+const FACE: &[&str] = &["app", "input", "keys", "look", "main", "ui", "view"];
 
 /// Declares the modules and nothing else.
 const ROOT: &str = "lib";

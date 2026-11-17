@@ -38,42 +38,8 @@ pub const GNOME: [&str; 7] = [
 /// How many of the gnome's rows are hat.
 pub const GNOME_HAT_ROWS: usize = 4;
 
-/// How many colours the terminal can show.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Depth {
-    /// Any colour.
-    Full,
-    /// The 256 numbered colours.
-    Indexed,
-    /// The 16 named colours, which the terminal's own theme decides.
-    Basic,
-    /// No colour: bold and reversed only.
-    None,
-}
-
-/// What the user asked for in the settings file.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Colors {
-    /// Work it out from the terminal.
-    #[default]
-    Auto,
-    Set(Depth),
-}
-
-impl Colors {
-    pub fn parse(text: &str) -> Result<Colors, String> {
-        match text {
-            "auto" => Ok(Colors::Auto),
-            "full" => Ok(Colors::Set(Depth::Full)),
-            "256" => Ok(Colors::Set(Depth::Indexed)),
-            "16" => Ok(Colors::Set(Depth::Basic)),
-            "none" => Ok(Colors::Set(Depth::None)),
-            other => Err(format!(
-                "make \"colors\" \"auto\", \"full\", \"256\", \"16\" or \"none\"; it is \"{other}\""
-            )),
-        }
-    }
-}
+// The colours setting is read with the rest of the settings file.
+pub use crate::config::{Colors, Depth};
 
 /// How many colours to use, from what the terminal says about itself.
 /// `var` reads an environment variable. A terminal that says nothing gets

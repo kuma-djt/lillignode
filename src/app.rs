@@ -376,7 +376,7 @@ impl<B: AgentBackend> App<B> {
     }
 
     pub fn on_key(&mut self, key: KeyEvent) {
-        let menu_key = self.config.is_menu_key(&key);
+        let menu_key = keys::is_menu_key(&self.config, &key);
         let running = self.focused_running();
         match self.mode {
             Mode::Normal if menu_key => self.mode = Mode::Menu,

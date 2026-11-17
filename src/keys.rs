@@ -1,6 +1,27 @@
-//! Turn a key press into the bytes a terminal program expects to receive.
+//! Turn a key press into the bytes a terminal program expects to receive,
+//! and tell whether it is one of the menu keys.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+use crate::config::{Config, MenuKey};
+
+/// True if `key` is one of the menu keys in the settings.
+pub fn is_menu_key(config: &Config, key: &KeyEvent) -> bool {
+    config.menu_keys.iter().any(|menu| matches(*menu, key))
+}
+
+fn matches(menu: MenuKey, key: &KeyEvent) -> bool {
+    // Shift is ignored: some terminals report it with function keys.
+    let modifiers = key.modifiers - KeyModifiers::SHIFT;
+    match (menu, key.code) {
+        (MenuKey::F(n), KeyCode::F(m)) => n == m && modifiers == KeyModifiers::NONE,
+        (MenuKey::Ctrl(a), KeyCode::Char(b)) => {
+            a == b.to_ascii_lowercase() && modifiers == KeyModifiers::CONTROL
+        }
+        (MenuKey::Alt(a), KeyCode::Char(b)) => a == b.to_ascii_lowercase() && modifiers == KeyModifiers::ALT,
+        _ => false,
+    }
+}
 
 /// `app_cursor` is true when the agent asked for application cursor keys.
 /// Returns None for keys with no terminal encoding (for example a bare Shift).
@@ -92,6 +113,27 @@ mod tests {
 
     fn k(code: KeyCode, mods: KeyModifiers) -> Option<Vec<u8>> {
         encode(KeyEvent::new(code, mods), false)
+    }
+
+    fn press(code: KeyCode, mods: KeyModifiers) -> KeyEvent {
+        KeyEvent::new(code, mods)
+    }
+
+    #[test]
+    fn the_menu_keys_are_the_keys_the_settings_name_and_no_others() {
+        let c = Config::default();
+        assert!(is_menu_key(&c, &press(KeyCode::Char('q'), KeyModifiers::CONTROL)));
+        assert!(is_menu_key(&c, &press(KeyCode::Char('Q'), KeyModifiers::CONTROL | KeyModifiers::SHIFT)));
+        assert!(is_menu_key(&c, &press(KeyCode::F(12), KeyModifiers::NONE)));
+        assert!(is_menu_key(&c, &press(KeyCode::F(12), KeyModifiers::SHIFT)));
+        assert!(!is_menu_key(&c, &press(KeyCode::Char('q'), KeyModifiers::NONE)));
+        assert!(!is_menu_key(&c, &press(KeyCode::Char('q'), KeyModifiers::ALT)));
+        assert!(!is_menu_key(&c, &press(KeyCode::F(12), KeyModifiers::CONTROL)));
+        let c = Config { menu_keys: vec![MenuKey::Alt('m'), MenuKey::F(9)], ..Config::default() };
+        assert!(is_menu_key(&c, &press(KeyCode::Char('m'), KeyModifiers::ALT)));
+        assert!(is_menu_key(&c, &press(KeyCode::F(9), KeyModifiers::NONE)));
+        assert!(!is_menu_key(&c, &press(KeyCode::Char('q'), KeyModifiers::CONTROL)));
+        assert!(!is_menu_key(&c, &press(KeyCode::F(12), KeyModifiers::NONE)));
     }
 
     #[test]

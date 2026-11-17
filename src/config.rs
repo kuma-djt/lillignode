@@ -27,19 +27,21 @@
 
 use std::path::Path;
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde::Deserialize;
-
-use crate::look::Colors;
 
 pub const FILE: &str = "config.json";
 pub const DEFAULT_MENU_KEYS: [&str; 2] = ["ctrl+q", "f12"];
 
-/// A key that opens Lillignode's menu.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct MenuKey {
-    code: KeyCode,
-    modifiers: KeyModifiers,
+/// A key that opens Lillignode's menu, as the settings file names it. The
+/// terminal face decides whether a key pressed is this one (`keys`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MenuKey {
+    /// Ctrl and a lower-case letter.
+    Ctrl(char),
+    /// Alt and a lower-case letter.
+    Alt(char),
+    /// F1 to F12.
+    F(u8),
 }
 
 impl MenuKey {
@@ -49,45 +51,66 @@ impl MenuKey {
             format!("change \"{spec}\" to ctrl+letter, alt+letter or f1 to f12; Lillignode cannot use it as a key")
         };
         if let Some(n) = lower.strip_prefix('f').and_then(|n| n.parse::<u8>().ok()) {
-            return if (1..=12).contains(&n) {
-                Ok(MenuKey { code: KeyCode::F(n), modifiers: KeyModifiers::NONE })
-            } else {
-                Err(bad())
-            };
+            return if (1..=12).contains(&n) { Ok(MenuKey::F(n)) } else { Err(bad()) };
         }
-        let (modifiers, letter) = match lower.split_once('+') {
-            Some(("ctrl", l)) => (KeyModifiers::CONTROL, l),
-            Some(("alt", l)) => (KeyModifiers::ALT, l),
+        let (ctrl, letter) = match lower.split_once('+') {
+            Some(("ctrl", l)) => (true, l),
+            Some(("alt", l)) => (false, l),
             _ => return Err(bad()),
         };
         let mut chars = letter.chars();
         let (Some(c @ 'a'..='z'), None) = (chars.next(), chars.next()) else { return Err(bad()) };
         // These reach a terminal program as Enter, Tab, Backspace, or are the
         // keys every agent relies on to interrupt and to end input.
-        if modifiers == KeyModifiers::CONTROL && "cdhijm".contains(c) {
+        if ctrl && "cdhijm".contains(c) {
             return Err(format!("pick another menu key than \"{spec}\"; agents need it"));
         }
-        Ok(MenuKey { code: KeyCode::Char(c), modifiers })
-    }
-
-    pub fn matches(&self, key: &KeyEvent) -> bool {
-        // Shift is ignored: some terminals report it with function keys.
-        let modifiers = key.modifiers - KeyModifiers::SHIFT;
-        match (self.code, key.code) {
-            (KeyCode::Char(a), KeyCode::Char(b)) => {
-                a == b.to_ascii_lowercase() && modifiers == self.modifiers
-            }
-            (a, b) => a == b && modifiers == self.modifiers,
-        }
+        Ok(if ctrl { MenuKey::Ctrl(c) } else { MenuKey::Alt(c) })
     }
 
     /// How the key is written on screen: "Ctrl+Q", "F12".
     pub fn label(&self) -> String {
-        match (self.code, self.modifiers) {
-            (KeyCode::F(n), _) => format!("F{n}"),
-            (KeyCode::Char(c), m) if m == KeyModifiers::ALT => format!("Alt+{}", c.to_ascii_uppercase()),
-            (KeyCode::Char(c), _) => format!("Ctrl+{}", c.to_ascii_uppercase()),
-            _ => String::new(),
+        match self {
+            MenuKey::F(n) => format!("F{n}"),
+            MenuKey::Alt(c) => format!("Alt+{}", c.to_ascii_uppercase()),
+            MenuKey::Ctrl(c) => format!("Ctrl+{}", c.to_ascii_uppercase()),
+        }
+    }
+}
+
+/// How many colours the terminal can show.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Depth {
+    /// Any colour.
+    Full,
+    /// The 256 numbered colours.
+    Indexed,
+    /// The 16 named colours, which the terminal's own theme decides.
+    Basic,
+    /// No colour: bold and reversed only.
+    None,
+}
+
+/// What the user asked for in the settings file.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Colors {
+    /// Work it out from the terminal.
+    #[default]
+    Auto,
+    Set(Depth),
+}
+
+impl Colors {
+    pub fn parse(text: &str) -> Result<Colors, String> {
+        match text {
+            "auto" => Ok(Colors::Auto),
+            "full" => Ok(Colors::Set(Depth::Full)),
+            "256" => Ok(Colors::Set(Depth::Indexed)),
+            "16" => Ok(Colors::Set(Depth::Basic)),
+            "none" => Ok(Colors::Set(Depth::None)),
+            other => Err(format!(
+                "make \"colors\" \"auto\", \"full\", \"256\", \"16\" or \"none\"; it is \"{other}\""
+            )),
         }
     }
 }
@@ -143,16 +166,12 @@ impl Config {
         self.menu_keys.iter().map(MenuKey::label).collect::<Vec<_>>().join(" or ")
     }
 
-    pub fn is_menu_key(&self, key: &KeyEvent) -> bool {
-        self.menu_keys.iter().any(|k| k.matches(key))
-    }
-
     /// Name function keys first, keeping the user's order otherwise. For
     /// terminals that take Ctrl and Alt keys for themselves (VS Code takes
     /// Ctrl+Q), so the first key named on screen is one that works there.
     /// Every key still opens the menu.
     pub fn function_keys_first(&mut self) {
-        self.menu_keys.sort_by_key(|k| !matches!(k.code, KeyCode::F(_)));
+        self.menu_keys.sort_by_key(|k| !matches!(k, MenuKey::F(_)));
     }
 }
 
@@ -256,25 +275,18 @@ pub fn load(dir: &Path) -> (Config, Option<String>) {
 mod tests {
     use super::*;
 
-    fn press(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
-        KeyEvent::new(code, modifiers)
-    }
-
     #[test]
     fn defaults_are_two_different_kinds_of_key() {
         let c = Config::default();
         assert_eq!(c.menu_keys_label(), "Ctrl+Q or F12");
-        assert!(c.is_menu_key(&press(KeyCode::Char('q'), KeyModifiers::CONTROL)));
-        assert!(c.is_menu_key(&press(KeyCode::F(12), KeyModifiers::NONE)));
-        assert!(!c.is_menu_key(&press(KeyCode::Char('q'), KeyModifiers::NONE)));
+        assert_eq!(c.menu_keys, [MenuKey::Ctrl('q'), MenuKey::F(12)]);
     }
 
     #[test]
     fn reads_the_users_keys() {
         let c = parse(r#"{"menu_keys": ["Alt+M", "f9"]}"#).unwrap();
         assert_eq!(c.menu_keys_label(), "Alt+M or F9");
-        assert!(c.is_menu_key(&press(KeyCode::Char('m'), KeyModifiers::ALT)));
-        assert!(!c.is_menu_key(&press(KeyCode::Char('q'), KeyModifiers::CONTROL)));
+        assert_eq!(c.menu_keys, [MenuKey::Alt('m'), MenuKey::F(9)]);
     }
 
     #[test]
@@ -285,7 +297,7 @@ mod tests {
         let mut c = Config::default();
         c.function_keys_first();
         assert_eq!(c.menu_keys_label(), "F12 or Ctrl+Q");
-        assert!(c.is_menu_key(&press(KeyCode::Char('q'), KeyModifiers::CONTROL)));
+        assert!(c.menu_keys.contains(&MenuKey::Ctrl('q')));
         // The user's own order is kept among keys of one kind.
         let mut c = parse(r#"{"menu_keys": ["alt+m", "f9", "ctrl+t", "f2"]}"#).unwrap();
         c.function_keys_first();
