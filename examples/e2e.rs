@@ -799,7 +799,10 @@ fn main() {
     assert!(standin.is_file(), "build the stand-in first: {}", standin.display());
     let shell = if cfg!(windows) { "cmd" } else { "sh" };
 
-    let root: PathBuf = std::env::temp_dir().join(format!("lillignode-e2e-{}", std::process::id()));
+    // macOS gives each user a long temporary folder, and a notice that
+    // names a file in it is shortened to fit. /tmp keeps paths short there.
+    let temp = if cfg!(target_os = "macos") { PathBuf::from("/tmp") } else { std::env::temp_dir() };
+    let root: PathBuf = temp.join(format!("lillignode-e2e-{}", std::process::id()));
     let sb = Sandbox {
         exe,
         state: root.join("state"),
@@ -988,6 +991,7 @@ fn main() {
 
     println!("H. Getting to the menu");
     let mut s = Session::start(&sb);
+    s.expect("Lillignode is up", "Ctrl+Q or F12:");
     s.new_agent("echoer");
     s.expect("stand-in agent is running", "STANDIN READY echo");
     s.expect("bar names both menu keys while an agent has the keyboard", "Ctrl+Q or F12: Lillignode menu");
@@ -1086,6 +1090,8 @@ fn main() {
 
     println!("J. A long streamed output, and reading it back");
     let mut s = Session::start(&sb);
+    // Until Lillignode has the terminal, Linux takes Ctrl+Q as flow control.
+    s.expect("Lillignode is up", "Ctrl+Q or F12:");
     let started = Instant::now();
     s.new_agent("streamer");
     s.expect("3000 lines stream to the end", "STREAM DONE 3000");
