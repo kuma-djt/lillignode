@@ -317,6 +317,9 @@ pub struct Workspace<B: AgentBackend> {
     /// The count at which a conversation's cost is marked and the user is
     /// told. A warning only: nothing is stopped or held.
     cost_warning: Option<u64>,
+    /// Lines of the saved workspace this Lillignode does not know, saved
+    /// back as they were read.
+    saved_other: serde_json::Map<String, serde_json::Value>,
 }
 
 impl<B: AgentBackend> Workspace<B> {
@@ -331,6 +334,7 @@ impl<B: AgentBackend> Workspace<B> {
             cost_on: false,
             claude_folder: None,
             cost_warning: None,
+            saved_other: serde_json::Map::new(),
         }
     }
 
@@ -531,6 +535,7 @@ impl<B: AgentBackend> Workspace<B> {
         }
         // A focus index pointing past the list is stale, not fatal.
         self.focused = saved.focused.filter(|&i| i < self.entries.len()).unwrap_or(0);
+        self.saved_other = saved.other;
         report
     }
 
@@ -544,6 +549,7 @@ impl<B: AgentBackend> Workspace<B> {
             args: Vec::new(),
             folder: folder.clone(),
             conversation: kind.keeps_conversations().then(new_conversation_id),
+            other: Default::default(),
         };
         let spec =
             AgentSpec { command: command.to_string(), args: launch_args(&saved, Conversation::New), folder };
@@ -813,6 +819,7 @@ impl<B: AgentBackend> Workspace<B> {
             version: VERSION,
             agents: self.entries.iter().map(|e| e.saved.clone()).collect(),
             focused: self.focused_index(),
+            other: self.saved_other.clone(),
         }
     }
 
@@ -882,11 +889,12 @@ mod tests {
             args: vec![],
             folder: root(folder),
             conversation: kind.keeps_conversations().then(|| ID.to_string()),
+            other: Default::default(),
         }
     }
 
     fn saved(agents: Vec<SavedAgent>, focused: Option<usize>) -> SavedWorkspace {
-        SavedWorkspace { version: VERSION, agents, focused }
+        SavedWorkspace { version: VERSION, agents, focused, other: Default::default() }
     }
 
     fn log(ws: &Workspace<Fake>) -> Vec<String> {
@@ -927,6 +935,25 @@ mod tests {
         assert!(report.not_restored[1].1.contains("not a full path"));
         // A stale focus index falls back to the first agent.
         assert_eq!(ws.focused_index(), Some(0));
+    }
+
+    #[test]
+    fn unknown_lines_survive_restore_restart_and_save() {
+        let mut ws = Workspace::new(Fake::default(), SIZE);
+        let mut a = agent("claude", "api");
+        a.other.insert("colour".into(), "red".into());
+        let mut saved_ws = saved(vec![a], Some(0));
+        saved_ws.other.insert("team".into(), "web".into());
+        ws.restore(saved_ws);
+        // Started again after it stopped: still the same saved agent.
+        ws.handle(AgentEvent::Exited(AgentId(1), Exit { code: 0 }));
+        ws.restart_focused();
+        let back = ws.to_saved();
+        assert_eq!(back.other["team"], "web");
+        assert_eq!(back.agents[0].other["colour"], "red");
+        // A new agent has none.
+        ws.start_new("claude", root("web")).unwrap();
+        assert!(ws.to_saved().agents[1].other.is_empty());
     }
 
     #[test]
@@ -1685,6 +1712,7 @@ mod tests {
             args: vec![],
             folder: root(folder),
             conversation: None,
+            other: Default::default(),
         }
     }
 

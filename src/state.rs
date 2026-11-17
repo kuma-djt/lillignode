@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 
 /// Bumped only when an older Lillignode could misread the file.
 pub const VERSION: u32 = 1;
@@ -44,6 +45,10 @@ pub struct SavedAgent {
     /// not a key and grants nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversation: Option<String>,
+    /// Lines this Lillignode does not know, which a newer one may have
+    /// written. Kept as they were and saved back, so they are not lost.
+    #[serde(flatten)]
+    pub other: Map<String, Value>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -53,11 +58,14 @@ pub struct SavedWorkspace {
     /// Index into `agents` of the one in front. Absent when there are none.
     #[serde(default)]
     pub focused: Option<usize>,
+    /// Lines this Lillignode does not know, kept and saved back.
+    #[serde(flatten)]
+    pub other: Map<String, Value>,
 }
 
 impl Default for SavedWorkspace {
     fn default() -> Self {
-        Self { version: VERSION, agents: Vec::new(), focused: None }
+        Self { version: VERSION, agents: Vec::new(), focused: None, other: Map::new() }
     }
 }
 
@@ -249,8 +257,10 @@ mod tests {
                 args: vec![],
                 folder: PathBuf::from("C:/work"),
                 conversation: Some("0b0e7f0a-0000-4000-8000-000000000001".into()),
+                other: Default::default(),
             }],
             focused: Some(0),
+            other: Default::default(),
         }
     }
 
@@ -275,6 +285,23 @@ mod tests {
         ws.agents[0].kind = Some("from-a-newer-lillignode".into());
         save(&dir, &ws).unwrap();
         assert_eq!(load(&dir).workspace, ws);
+    }
+
+    #[test]
+    fn lines_this_lillignode_does_not_know_are_kept_and_saved_back() {
+        let dir = temp_dir("unknown-lines");
+        let text = r#"{"version":1,"team":{"name":"web"},"agents":[{"name":"Claude Code","command":"claude",
+            "kind":"claude-code","args":[],"folder":"C:/work","colour":"red","limits":[1,2]}],"focused":0}"#;
+        fs::write(file_in(&dir), text).unwrap();
+        let loaded = load(&dir);
+        assert_eq!(loaded.outcome, LoadOutcome::Loaded);
+        assert_eq!(loaded.workspace.other["team"], serde_json::json!({"name": "web"}));
+        assert_eq!(loaded.workspace.agents[0].other["colour"], "red");
+        save(&dir, &loaded.workspace).unwrap();
+        let again = load(&dir).workspace;
+        assert_eq!(again, loaded.workspace, "nothing lost on the way round");
+        let written = fs::read_to_string(file_in(&dir)).unwrap();
+        assert!(written.contains("\"limits\"") && written.contains("\"team\""), "{written}");
     }
 
     #[test]

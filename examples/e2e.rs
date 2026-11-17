@@ -955,9 +955,9 @@ fn main() {
     std::fs::write(
         &refused_file,
         format!(
-            r#"{{"version": 1, "focused": 0, "agents": [
+            r#"{{"version": 1, "focused": 0, "from_a_newer_one": true, "agents": [
   {{"name": "echoer", "command": "echoer", "args": {launcher_args}, "folder": "{w}"}},
-  {{"name": "bell\u0007", "command": "echoer", "args": [], "folder": "{w}"}}
+  {{"name": "bell\u0007", "command": "echoer", "args": [], "folder": "{w}", "colour": "red"}}
 ]}}"#,
             w = json_path(&sb.work)
         ),
@@ -980,6 +980,11 @@ fn main() {
     drop(s.quit("quit", cfg!(not(windows))));
     let saved = std::fs::read_to_string(&refused_file).unwrap();
     check("the refused entries are saved back as they were", saved.contains("bell\\u0007"), &saved);
+    check(
+        "lines this Lillignode does not know are saved back",
+        saved.contains("\"from_a_newer_one\": true") && saved.contains("\"colour\": \"red\""),
+        &saved,
+    );
 
     println!("F. Damaged saved workspace");
     std::fs::write(&file, "{ \"version\": 1, \"agents\": [ tru").unwrap();
