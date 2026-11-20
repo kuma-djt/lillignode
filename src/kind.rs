@@ -81,13 +81,13 @@ impl AgentKind {
         }
     }
 
-    /// The name shown for an agent of this kind. A plain program is shown
-    /// as typed.
+    /// The name a new agent of this kind is given. A plain program is named
+    /// by its file's short name.
     pub fn name(self, command: &str) -> String {
         match self {
             AgentKind::ClaudeCode => "Claude Code".to_string(),
             AgentKind::Codex => "Codex".to_string(),
-            AgentKind::Program => command.to_string(),
+            AgentKind::Program => short_name(command),
         }
     }
 
@@ -144,9 +144,43 @@ impl AgentKind {
     }
 }
 
+/// A program's short name: its file's name without the folder or the
+/// extension, split at either kind of slash on every system, so a Windows
+/// path saved on Windows is named the same everywhere. A command with
+/// nothing left after that is shown as typed.
+fn short_name(command: &str) -> String {
+    let file = command.trim_end_matches(['/', '\\']).rsplit(['/', '\\']).next().unwrap_or(command);
+    let stem = match file.rsplit_once('.') {
+        Some((stem, _)) if !stem.is_empty() => stem,
+        _ => file,
+    };
+    if stem.trim().is_empty() {
+        command.to_string()
+    } else {
+        stem.to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_plain_program_is_named_by_its_file_without_folder_or_extension() {
+        let name = |c| AgentKind::Program.name(c);
+        assert_eq!(name(r"C:\temp\lg-opts\two words\tell"), "tell");
+        assert_eq!(name(r"C:\tools\tell.cmd"), "tell");
+        assert_eq!(name("/usr/local/bin/aider"), "aider");
+        assert_eq!(name("powershell"), "powershell");
+        assert_eq!(name("powershell.exe"), "powershell");
+        assert_eq!(name(".hidden"), ".hidden");
+        assert_eq!(name("C:/mixed\\slashes/run.ps1"), "run");
+        // Nothing left: shown as typed rather than as nothing.
+        assert_eq!(name("/"), "/");
+        // Claude Code and Codex keep their own names, from any path.
+        assert_eq!(AgentKind::ClaudeCode.name(r"C:\npm\claude.cmd"), "Claude Code");
+        assert_eq!(AgentKind::Codex.name("/bin/codex"), "Codex");
+    }
 
     #[test]
     fn a_program_is_known_by_the_name_of_its_file_and_by_nothing_looser() {

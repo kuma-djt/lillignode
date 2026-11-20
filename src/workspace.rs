@@ -574,11 +574,14 @@ impl<B: AgentBackend> Workspace<B> {
             saved.kind = Some(kind.saved_word().to_string());
             // Then, an agent that was not known by name was named as it
             // was typed ("codex", "codex 2"). It gets the name a new one of
-            // its kind would, keeping its number.
-            let number = saved
-                .name
-                .strip_prefix(&saved.command)
-                .filter(|rest| rest.strip_prefix(' ').map_or(rest.is_empty(), |n| n.parse::<u32>().is_ok()));
+            // its kind would, keeping its number. A plain program keeps
+            // the name it was saved with: a saved name is not changed.
+            let number = match kind {
+                AgentKind::Program => None,
+                _ => saved.name.strip_prefix(&saved.command).filter(|rest| {
+                    rest.strip_prefix(' ').map_or(rest.is_empty(), |n| n.parse::<u32>().is_ok())
+                }),
+            };
             if let Some(number) = number {
                 saved.name = format!("{}{number}", kind.name(&saved.command));
             }
@@ -1035,7 +1038,9 @@ mod tests {
             if spec.folder.to_string_lossy().contains("gone") {
                 return Err(StartError::FolderMissing(spec.folder.clone()));
             }
-            if spec.command != "claude" {
+            // Only `claude` is found, and the one program given by a full
+            // path in the test of names.
+            if spec.command != "claude" && !spec.command.ends_with("tell.cmd") {
                 return Err(StartError::CommandNotFound(spec.command.clone()));
             }
             self.next += 1;
@@ -1186,6 +1191,32 @@ mod tests {
         let id = ws.to_saved().agents[1].conversation.clone().unwrap();
         assert_eq!(log(&ws)[1], format!("start 2 --model x --session-id {id}"));
         assert!(ws.entries()[1].kind_by_name());
+    }
+
+    #[test]
+    fn a_program_started_from_a_full_path_is_named_by_its_file_and_a_saved_name_is_kept() {
+        let path = if cfg!(windows) { r"C:\temp\two words\tell.cmd" } else { "/tmp/two words/tell.cmd" };
+        let mut ws = Workspace::new(Fake::default(), SIZE);
+        ws.start_new(path, vec![], AgentKind::Program, root("a")).unwrap();
+        ws.start_new(path, vec![], AgentKind::Program, root("a")).unwrap();
+        let saved = ws.to_saved();
+        assert_eq!(saved.agents[0].name, "tell");
+        assert_eq!(saved.agents[1].name, "tell 2");
+        assert_eq!(saved.agents[0].command, path, "the program itself is unchanged");
+
+        // Saved by an earlier version under the whole path, with and without
+        // a recorded kind: loaded, the name is as it was saved.
+        for kind in [None, Some("program".to_string())] {
+            let mut ws = Workspace::new(Fake::default(), SIZE);
+            let old = SavedAgent { name: format!("{path} 2"), kind, ..agent(path, "a") };
+            ws.restore(SavedWorkspace {
+                version: crate::state::VERSION,
+                agents: vec![old],
+                focused: Some(0),
+                other: Default::default(),
+            });
+            assert_eq!(ws.to_saved().agents[0].name, format!("{path} 2"));
+        }
     }
 
     #[test]
