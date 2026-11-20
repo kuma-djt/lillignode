@@ -247,14 +247,10 @@ pub struct App<B: AgentBackend> {
     /// The value of Claude Code's status off switch where Lillignode was
     /// started, if set. Every agent inherits it. Lillignode leaves it alone.
     status_off_switch: Option<String>,
-    /// The notice that Claude Code's status is not reaching Lillignode is
-    /// given once per run.
-    unknown_notice_given: Vec<AgentKind>,
     /// The Unknown notices now on screen, each with its words, so one that
-    /// stops being true can be taken back.
+    /// stops being true can be taken back. The engine says when each is
+    /// given and when it is taken back.
     unknown_notice_up: Vec<(AgentKind, String)>,
-    /// The notice that a cost could not be read is given once per run too.
-    cost_notice_given: bool,
     /// Windows only: Microsoft's newer pseudo-terminal is not beside
     /// `lillignode.exe`, so Claude Code's status cannot get through.
     pub newer_pty_missing: bool,
@@ -464,9 +460,7 @@ impl<B: AgentBackend> App<B> {
             window: Rect::default(),
             launch_dir,
             status_off_switch: std::env::var(status::OFF_SWITCH).ok(),
-            unknown_notice_given: Vec::new(),
             unknown_notice_up: Vec::new(),
-            cost_notice_given: false,
             newer_pty_missing: newer_pty_missing(),
         };
         app.say_events();
@@ -486,49 +480,98 @@ impl<B: AgentBackend> App<B> {
 
     /// Say what the engine reports has happened, oldest first. The engine
     /// saves the workspace after a change; a save that failed is one of the
-    /// things said.
-    fn say_events(&mut self) {
-        for event in self.engine.take_events() {
-            self.notice = Some(self.event_text(event));
-        }
-    }
-
-    fn event_text(&self, event: Event) -> String {
+    /// things said. Returns true if an agent began to need you.
+    fn say_events(&mut self) -> bool {
         let still_here =
             "It is still in your workspace. Switch to it, then r to start it again or x to remove it.";
-        match event {
-            Event::SaveFailed { why } => save_failed(&why),
-            Event::Exited { label, exit } if exit.clean() => format!("{label} exited. {still_here}"),
-            Event::Exited { label, exit } => {
-                // Started as a kind its name does not suggest, it may have
-                // been given options it does not take.
-                let chosen = self
-                    .engine.ws
-                    .entries()
-                    .iter()
-                    .find(|e| e.label() == label)
-                    .filter(|e| e.kind() != AgentKind::Program && !e.kind_by_name())
-                    .map(|e| {
-                        format!(
-                            " It was started as {0}: if it is not {0}, x removes it, then start it again \
-                             as a plain program.",
-                            kind_words(e.kind())
-                        )
-                    })
-                    .unwrap_or_default();
-                format!("{label} stopped with an error (exit code {}). {still_here}{chosen}", exit.code)
-            }
-            Event::StartedNewConversation { label } => {
-                format!(
-                    "{label} could not continue its earlier conversation (there may have been nothing \
-                     in it yet), so it started a new conversation. If there was an earlier one, the \
-                     agent's own resume command may still find it."
-                )
-            }
-            Event::CouldNotContinue { label, why } => format!(
-                "{label} could not continue its earlier conversation, and starting a new one failed: {why}. {still_here}"
-            ),
+        let mut began = false;
+        for event in self.engine.take_events() {
+            // What happened to an agent or to the saved workspace replaces
+            // the notice. What is said once in a run goes before it.
+            let text = match event {
+                Event::BeganNeedingYou => {
+                    began = true;
+                    continue;
+                }
+                Event::StatusBack { kind } => {
+                    self.take_back_unknown_notice(kind);
+                    continue;
+                }
+                // Never replaces a notice already up (it may be a failure
+                // the user still has to act on): it goes first, the other
+                // after it.
+                Event::StatusUnavailable { kind, why } => {
+                    if let Some(who) = kind.reporter() {
+                        let text = self.unknown_notice(who, why);
+                        self.unknown_notice_up.push((kind, text.clone()));
+                        self.say_first(text);
+                    }
+                    continue;
+                }
+                Event::CostUnreadable { label } => {
+                    let menu = self.config.menu_keys.first().map(|k| k.label()).unwrap_or_default();
+                    self.say_first(format!(
+                        "Cost shows unknown for {label}: Lillignode could not read Claude Code's record of \
+                         it. Agents work as before; nothing was changed. {menu} then s says why."
+                    ));
+                    continue;
+                }
+                // Only told: no key is held, no agent stopped, no bell rung.
+                Event::PassedCostWarning { label, tokens } => {
+                    let menu = self.config.menu_keys.first().map(|k| k.label()).unwrap_or_default();
+                    let limit = self.engine.ws.cost_warning().map(cost::short).unwrap_or_default();
+                    self.say_first(format!(
+                        "Warning only, nothing stopped: {label} is past your cost warning ({} tokens; \
+                         warning at {limit} a conversation). {menu} then s shows the detail.",
+                        cost::short(tokens)
+                    ));
+                    continue;
+                }
+                Event::SaveFailed { why } => save_failed(&why),
+                Event::Exited { label, exit } if exit.clean() => format!("{label} exited. {still_here}"),
+                Event::Exited { label, exit } => {
+                    // Started as a kind its name does not suggest, it may
+                    // have been given options it does not take.
+                    let chosen = self
+                        .engine
+                        .ws
+                        .entries()
+                        .iter()
+                        .find(|e| e.label() == label)
+                        .filter(|e| e.kind() != AgentKind::Program && !e.kind_by_name())
+                        .map(|e| {
+                            format!(
+                                " It was started as {0}: if it is not {0}, x removes it, then start it \
+                                 again as a plain program.",
+                                kind_words(e.kind())
+                            )
+                        })
+                        .unwrap_or_default();
+                    format!("{label} stopped with an error (exit code {}). {still_here}{chosen}", exit.code)
+                }
+                Event::StartedNewConversation { label } => {
+                    format!(
+                        "{label} could not continue its earlier conversation (there may have been nothing \
+                         in it yet), so it started a new conversation. If there was an earlier one, the \
+                         agent's own resume command may still find it."
+                    )
+                }
+                Event::CouldNotContinue { label, why } => format!(
+                    "{label} could not continue its earlier conversation, and starting a new one failed: \
+                     {why}. {still_here}"
+                ),
+            };
+            self.notice = Some(text);
         }
+        began
+    }
+
+    /// Put before the notice already up, which stays after it.
+    fn say_first(&mut self, text: String) {
+        self.notice = Some(match self.notice.take() {
+            Some(earlier) => format!("{text}  {earlier}"),
+            None => text,
+        });
     }
 
     fn focused_running(&self) -> bool {
@@ -1471,106 +1514,36 @@ impl<B: AgentBackend> App<B> {
         tries.iter().find(|t| t.chars().count() <= room).or(tries.last()).cloned().unwrap_or_default()
     }
 
-    /// Call after each batch of events and ticks. Gives the Unknown notice
-    /// the first time the reporting of a program expected to report (Claude
-    /// Code, Codex) is seen not to reach Lillignode,
-    /// and returns true if the bell should ring: an agent has just started
-    /// needing you, and the bell is not switched off.
+    /// Call after each batch of events and ticks. The engine says what has
+    /// become true and is said once: the Unknown notice, the first time the
+    /// reporting of a program expected to report (Claude Code, Codex) is
+    /// seen not to reach Lillignode; a cost that could not be read; a cost
+    /// warning passed. Returns true if the bell should ring: an agent has
+    /// just started needing you, and the bell is not switched off.
     pub fn after_events(&mut self) -> bool {
-        let began = self.engine.ws.take_began_needing_you();
-        self.withdraw_unknown_notices();
-        // Said once for each kind of agent: one kind's reporting failing
-        // says nothing about another's.
-        let broken = self.engine.ws.entries().iter().find_map(|e| {
-            let who = e.kind().reporter()?;
-            match e.reported() {
-                Some(AgentStatus::Unknown(why))
-                    if why.is_breakage() && !self.unknown_notice_given.contains(&e.kind()) =>
-                {
-                    Some((e.kind(), who, why))
-                }
-                _ => None,
-            }
-        });
-        if let Some((kind, who, why)) = broken {
-            self.unknown_notice_given.push(kind);
-            // Never replaces a notice already up (it may be a failure the
-            // user still has to act on): it goes first, the other after it.
-            let text = self.unknown_notice(who, why);
-            self.unknown_notice_up.push((kind, text.clone()));
-            self.notice = Some(match self.notice.take() {
-                Some(earlier) => format!("{text}  {earlier}"),
-                None => text,
-            });
-        }
-        if !self.cost_notice_given {
-            // A cost Lillignode tried to read and could not. Pending, and an
-            // agent that is not Claude Code, are not failures.
-            let failed = self.engine.ws.entries().iter().find(|e| {
-                matches!(
-                    e.cost(),
-                    Cost::Unknown(WhyNot::NotUnderstood { .. } | WhyNot::CannotRead(_) | WhyNot::NoFolder)
-                )
-            });
-            if let Some(entry) = failed {
-                self.cost_notice_given = true;
-                let menu = self.config.menu_keys.first().map(|k| k.label()).unwrap_or_default();
-                let text = format!(
-                    "Cost shows unknown for {}: Lillignode could not read Claude Code's record of it. Agents \
-                     work as before; nothing was changed. {menu} then s says why.",
-                    entry.label()
-                );
-                self.notice = Some(match self.notice.take() {
-                    Some(earlier) => format!("{text}  {earlier}"),
-                    None => text,
-                });
-            }
-        }
-        // A conversation that has passed the user's cost warning is named
-        // once. Only told: no key is held, no agent stopped, no bell rung.
-        for (label, count) in self.engine.ws.take_passed_cost_warning() {
-            let menu = self.config.menu_keys.first().map(|k| k.label()).unwrap_or_default();
-            let limit = self.engine.ws.cost_warning().map(cost::short).unwrap_or_default();
-            let text = format!(
-                "Warning only, nothing stopped: {label} is past your cost warning ({} tokens; warning \
-                 at {limit} a conversation). {menu} then s shows the detail.",
-                cost::short(count)
-            );
-            self.notice = Some(match self.notice.take() {
-                Some(earlier) => format!("{text}  {earlier}"),
-                None => text,
-            });
-        }
+        self.engine.settle();
+        let began = self.say_events();
         began && self.config.bell
     }
 
     /// A warning that has stopped being true does not stay on screen. Once
     /// no agent of a kind shows Unknown for want of reports (it reported
-    /// after all, or was closed), the notice about that kind is taken out,
-    /// and whatever else the notice says is left. Seen with Claude Code: it
-    /// reports nothing while it asks whether to trust a folder, and
-    /// reports as usual once that is answered. If that kind's reporting
-    /// fails again later, the notice is given again.
-    fn withdraw_unknown_notices(&mut self) {
-        let entries = self.engine.ws.entries();
-        let still = |kind: AgentKind| {
-            entries.iter().any(|e| {
-                e.kind() == kind
-                    && matches!(e.reported(), Some(AgentStatus::Unknown(why)) if why.is_breakage())
-            })
-        };
-        let (kept, gone): (Vec<_>, Vec<_>) =
-            std::mem::take(&mut self.unknown_notice_up).into_iter().partition(|(kind, _)| still(*kind));
+    /// after all, or was closed), the engine says so, the notice about that
+    /// kind is taken out, and whatever else the notice says is left. Seen
+    /// with Claude Code: it reports nothing while it asks whether to trust
+    /// a folder, and reports as usual once that is answered. If that kind's
+    /// reporting fails again later, the notice is given again.
+    fn take_back_unknown_notice(&mut self, kind: AgentKind) {
+        let (gone, kept): (Vec<_>, Vec<_>) =
+            std::mem::take(&mut self.unknown_notice_up).into_iter().partition(|(up, _)| *up == kind);
         self.unknown_notice_up = kept;
-        for (kind, text) in gone {
-            self.unknown_notice_given.retain(|given| *given != kind);
+        for (_, text) in gone {
             if let Some(notice) = self.notice.take() {
                 let rest = notice.replace(&text, "");
                 self.notice = Some(rest.trim().to_string()).filter(|rest| !rest.is_empty());
             }
         }
     }
-
     /// Why every Claude Code agent shows Unknown, said once per run. The
     /// most specific cause Lillignode can see comes first. Each fits the two
     /// notice rows of the narrowest window Lillignode draws in
@@ -3559,7 +3532,7 @@ Cost",
         // Said once, in the notice rows, with where the reason is; and it
         // never replaces a notice already up.
         app.notice = Some("Earlier.".into());
-        app.unknown_notice_given = vec![AgentKind::ClaudeCode, AgentKind::Codex];
+        app.engine.status_already_said(&[AgentKind::ClaudeCode, AgentKind::Codex]);
         app.after_events();
         let notice = app.notice.clone().unwrap();
         assert!(

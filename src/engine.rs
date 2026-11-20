@@ -5,15 +5,18 @@
 //! The rules are moving here from the terminal face (`app.rs`) one at a
 //! time; until each has moved, the face still holds it. Quitting, closing
 //! an agent, starting one again, the paste rule, the rules of the view
-//! (one agent on screen or two, and what size each is given) and saving the
-//! workspace after a change have moved.
+//! (one agent on screen or two, and what size each is given), saving the
+//! workspace after a change, and what is said once in a run (an agent began
+//! to need you, status or cost cannot be read, a cost warning was passed)
+//! have moved.
 
 use std::path::PathBuf;
 
 use crate::agent::{AgentBackend, AgentEvent, Exit, Size, StartError};
+use crate::cost::{Cost, WhyNot};
 use crate::kind::AgentKind;
 use crate::state::{self, SavedWorkspace};
-use crate::status::AgentStatus;
+use crate::status::{AgentStatus, Why};
 use crate::workspace::{AgentKey, Entry, Happened, NoPair, Pair, RestoreReport, Workspace};
 
 /// Something that happened, for a face to say in its own words. A face
@@ -32,6 +35,23 @@ pub enum Event {
     /// The workspace could not be saved after a change. What was saved
     /// before is left as it was; nothing in memory is lost.
     SaveFailed { why: String },
+    /// An agent has just begun to need the user: the edge a bell rings on.
+    /// Whether to ring is the face's setting. Who needs you now is read
+    /// from the agents, not from this.
+    BeganNeedingYou,
+    /// The status of an agent of this kind, which is expected to report it,
+    /// is not reaching Lillignode. Once for each kind, until it is back.
+    StatusUnavailable { kind: AgentKind, why: Why },
+    /// No agent of this kind shows that any more: what was said about it
+    /// has stopped being true. If it fails again it is said again.
+    StatusBack { kind: AgentKind },
+    /// The cost of this agent was looked for and could not be read. Once in
+    /// a run.
+    CostUnreadable { label: String },
+    /// This agent's conversation has passed the user's cost warning, at
+    /// this many tokens. Once for a conversation. A warning only: nothing
+    /// was stopped.
+    PassedCostWarning { label: String, tokens: u64 },
 }
 
 /// Names one question the engine asked. An answer carries it, so a "yes"
@@ -240,6 +260,11 @@ pub struct Engine<B: AgentBackend> {
     save_in: Option<PathBuf>,
     /// What has happened since a face last took them.
     events: Vec<Event>,
+    /// The kinds of agent whose status has been said not to reach
+    /// Lillignode, and has not come back since.
+    status_said: Vec<AgentKind>,
+    /// A cost that could not be read has been said in this run.
+    cost_said: bool,
 }
 
 impl<B: AgentBackend> Engine<B> {
@@ -256,7 +281,68 @@ impl<B: AgentBackend> Engine<B> {
             room,
             save_in: None,
             events: Vec::new(),
+            status_said: Vec::new(),
+            cost_said: false,
         }
+    }
+
+    /// Call after each batch of agent output and each tick. What has become
+    /// true since the last call, and is said once, becomes an event, in
+    /// this order: an agent began to need you; status that was said to be
+    /// unavailable is back; status is unavailable, for one kind of agent at
+    /// a time; a cost could not be read; a cost warning was passed.
+    pub fn settle(&mut self) {
+        if self.ws.take_began_needing_you() {
+            self.events.push(Event::BeganNeedingYou);
+        }
+        let broken = |e: &Entry| match e.reported() {
+            Some(AgentStatus::Unknown(why)) if why.is_breakage() => Some(why),
+            _ => None,
+        };
+        // Once no agent of a kind shows it (it reported after all, or was
+        // closed), what was said about that kind is taken back.
+        let entries = self.ws.entries();
+        let (still, back): (Vec<_>, Vec<_>) = std::mem::take(&mut self.status_said)
+            .into_iter()
+            .partition(|kind| entries.iter().any(|e| e.kind() == *kind && broken(e).is_some()));
+        self.status_said = still;
+        self.events.extend(back.into_iter().map(|kind| Event::StatusBack { kind }));
+        // Said once for each kind of agent: one kind's reporting failing
+        // says nothing about another's. Only of a kind expected to report.
+        let unavailable = entries.iter().find_map(|e| {
+            let kind = e.kind();
+            kind.reporter()?;
+            let why = broken(e)?;
+            (!self.status_said.contains(&kind)).then_some((kind, why))
+        });
+        if let Some((kind, why)) = unavailable {
+            self.status_said.push(kind);
+            self.events.push(Event::StatusUnavailable { kind, why });
+        }
+        if !self.cost_said {
+            // A cost Lillignode tried to read and could not. Pending, and an
+            // agent that is not Claude Code, are not failures.
+            let failed = entries.iter().find(|e| {
+                matches!(
+                    e.cost(),
+                    Cost::Unknown(WhyNot::NotUnderstood { .. } | WhyNot::CannotRead(_) | WhyNot::NoFolder)
+                )
+            });
+            if let Some(entry) = failed {
+                self.cost_said = true;
+                self.events.push(Event::CostUnreadable { label: entry.label() });
+            }
+        }
+        for (label, tokens) in self.ws.take_passed_cost_warning() {
+            self.events.push(Event::PassedCostWarning { label, tokens });
+        }
+    }
+
+    /// For a test of something else: as if status had already been said to
+    /// be unavailable for these kinds.
+    #[cfg(test)]
+    pub(crate) fn status_already_said(&mut self, kinds: &[AgentKind]) {
+        self.status_said = kinds.to_vec();
     }
 
     /// Where the workspace is saved from now on. Until this is called
@@ -1069,6 +1155,70 @@ mod tests {
         e.answer(q.id, true).unwrap();
         e.handle(AgentEvent::Exited(AgentId(1), crate::agent::Exit { code: 1 }));
         assert!(e.take_events().is_empty());
+    }
+
+    fn report(e: &mut Engine<Fake>, id: u32, body: &str) {
+        e.handle(AgentEvent::Output(AgentId(id), format!("\x1b]7501;{body}\x1b\\").into_bytes()));
+    }
+
+    #[test]
+    fn beginning_to_need_you_is_said_once_for_each_time_it_begins() {
+        let mut e = engine(&["state=idle"]);
+        e.settle();
+        assert!(e.take_events().is_empty());
+        report(&mut e, 1, "state=blocked:kind=permission");
+        e.settle();
+        assert_eq!(e.take_events(), [Event::BeganNeedingYou]);
+        e.settle();
+        assert!(e.take_events().is_empty(), "still waiting: not said again");
+        report(&mut e, 1, "state=working");
+        report(&mut e, 1, "state=blocked");
+        e.settle();
+        assert_eq!(e.take_events(), [Event::BeganNeedingYou], "it began again");
+    }
+
+    #[test]
+    fn status_that_does_not_arrive_is_said_once_for_a_kind_and_taken_back_when_it_does() {
+        let mut ws = Workspace::new(Fake::default(), Size { rows: 24, cols: 80 });
+        for kind in [AgentKind::ClaudeCode, AgentKind::ClaudeCode, AgentKind::Codex, AgentKind::Program] {
+            ws.start_new("x", Vec::new(), kind, std::env::temp_dir()).unwrap();
+        }
+        let mut e = Engine::new(ws);
+        let unavailable = |kind| Event::StatusUnavailable { kind, why: crate::status::Why::NotUnderstood };
+        // A plain program is expected to report nothing: nothing is said.
+        report(&mut e, 4, "state=pondering");
+        e.settle();
+        assert!(e.take_events().is_empty());
+
+        report(&mut e, 1, "state=pondering:app=claude-code");
+        e.settle();
+        assert_eq!(e.take_events(), [unavailable(AgentKind::ClaudeCode)]);
+        // A second agent of the same kind: said already.
+        report(&mut e, 2, "state=pondering:app=claude-code");
+        e.settle();
+        assert!(e.take_events().is_empty(), "once for a kind");
+        // Another kind is its own matter.
+        report(&mut e, 3, "state=pondering:app=codex");
+        e.settle();
+        assert_eq!(e.take_events(), [unavailable(AgentKind::Codex)]);
+
+        // One Claude Code agent reports after all; the other still does not.
+        report(&mut e, 1, "state=idle:app=claude-code");
+        e.settle();
+        assert!(e.take_events().is_empty(), "still true of the kind");
+        report(&mut e, 2, "state=idle:app=claude-code");
+        e.settle();
+        assert_eq!(e.take_events(), [Event::StatusBack { kind: AgentKind::ClaudeCode }]);
+        // It fails again later: said again.
+        report(&mut e, 2, "state=pondering:app=claude-code");
+        e.settle();
+        assert_eq!(e.take_events(), [unavailable(AgentKind::ClaudeCode)]);
+        // Closing the last agent that shows it takes it back too.
+        let codex = key(&e, 2);
+        let Ok(Outcome::Asked(q)) = e.close(codex) else { panic!("asked") };
+        e.answer(q.id, true).unwrap();
+        e.settle();
+        assert_eq!(e.take_events(), [Event::StatusBack { kind: AgentKind::Codex }]);
     }
 
     const ONE: Size = Size { rows: 30, cols: 120 };
