@@ -6,9 +6,9 @@ The name is said "Lilli-node": the g is silent, as in gnome.
 
 ![Four Claude Code agents: one working, one waiting for you, two idle](assets/screenshot.png)
 
-**Status: v0.1, rough.** Built and tested on Windows 11. It builds and passes its automated checks on Linux and macOS; nobody has run an agent in it on either. Expect sharp edges.
+**Status: v0.2, rough.** Built and tested on Windows 11. It builds and passes its automated checks on Linux and macOS; nobody has run an agent in it on either. Expect sharp edges.
 
-## What v0.1 does
+## What v0.2 does
 
 - **Several Claude Code agents in one window.** Each has its own folder and its own screen. One agent is in front and takes your typing; the sidebar lists the rest.
 - **Hop between them.** Press the menu key (Ctrl+Q or F12), then Tab.
@@ -27,7 +27,7 @@ Each agent in the sidebar has two lines: a gnome mark and its name, then its fol
 | Sign | Status |
 |---|---|
 | `+` and `*`, turning about once a second | Working |
-| `+` held still | Working, but nothing drawn for a minute or more ("Working, quiet 2 min") |
+| `+` held still | Working, but the agent has drawn nothing at all for a minute or more ("Working, quiet 2 min"). Claude Code 2.1.325 redraws about once a second while it works, even during a long command, so with it this appears only if it stops drawing altogether |
 | `!` | Needs you |
 | `=` | Done |
 | `z` | Idle |
@@ -46,10 +46,10 @@ The bottom line always starts with the menu keys. After them it says where your 
 
 ## Get it (Windows)
 
-1. Download `lillignode-0.1.0-windows-x64.zip` from the [latest release](https://github.com/kuma-djt/lillignode/releases/latest). The release page lists the zip's SHA-256, so you can check the download (`Get-FileHash lillignode-0.1.0-windows-x64.zip` in PowerShell).
+1. Download `lillignode-0.2.0-windows-x64.zip` from the [latest release](https://github.com/kuma-djt/lillignode/releases/latest). The release page lists the zip's SHA-256, so you can check the download (`Get-FileHash lillignode-0.2.0-windows-x64.zip` in PowerShell).
 2. Unzip it anywhere. It unpacks into one folder.
 3. Open Windows Terminal in that folder and run `.\lillignode.exe`.
-4. Press `n` to start an agent: Enter for Claude Code, then type the folder it should work in and press Enter. (Enter alone uses the folder Lillignode was started in.)
+4. Press `n` to start an agent: Enter for Claude Code, Enter again for no options, then type the folder it should work in and press Enter. (Enter alone uses the folder Lillignode was started in.)
 
 You need [Claude Code](https://claude.com/claude-code) installed and signed in. The program is not signed, so Windows may warn you the first time you run it.
 
@@ -165,6 +165,7 @@ Three levels of evidence, strongest first. Everything checked by hand was on Win
 | Program | Status in Lillignode | How we know |
 |---|---|---|
 | Claude Code 2.1.325 | Starting, Idle, Working, Needs you with one bell, Done | **Checked by hand** |
+| Claude Code 2.1.329 | At its "do you trust this folder" question: Needs you with one bell, then Idle once answered. Nothing else was checked with this version | **Checked by hand** |
 | Codex CLI 0.169.0 | The same. It asks permission, and so shows Needs you, only when started with `-a on-request` (see [Codex](#codex)) | **Checked by hand** |
 | Grok Build 1.0.77 | The same, but only with `program_status = "on"` in Grok Build's own settings file. Without it Grok Build sent nothing here and showed Unknown | **Checked by hand** |
 | A program that prints a report itself | Needs you with one bell, Done | **Checked by hand,** with reports printed from PowerShell |
@@ -172,7 +173,7 @@ Three levels of evidence, strongest first. Everything checked by hand was on Win
 | Gemini CLI 0.68.0, Cursor's CLI (build of 2026-11-13) | Unknown: each was started once, by script, and sent nothing | **Checked by a scripted run** |
 | Devin CLI, Amp | Not run, source not read | **Claimed** by the vendor's changelog (Devin CLI) or by a third-party list (Amp) |
 
-Lillignode changes no other program's settings. Reports from a program not in the first four rows are read the same way and have not been seen by anyone here.
+Lillignode changes no other program's settings. Reports from a program not in the first five rows are read the same way and have not been seen by anyone here.
 
 What Lillignode does with a report that is not as expected:
 
@@ -209,15 +210,22 @@ What to watch for:
 - **Signed out, Codex reports nothing** (seen with 0.169.0). Its row shows Unknown after 15 seconds, and a notice says so. The same notice appears if Codex is silent for any other reason.
 - **History.** Codex draws on a full-screen display, which leaves Lillignode no history to keep. Scroll with Codex's own keys.
 
-## Known limits in 0.1
+## Known limits in 0.2
 
 These are known and not yet fixed. Please do not report them as security problems.
 
 - **The saved workspace is trusted at launch, within limits.** When Lillignode starts, it runs the agents listed in its workspace file as they are written there: the command, its arguments and its folder. It checks the file first and starts nothing it would never have written itself: a control character in a name, command, argument or folder, a conversation id that is not one it writes, an argument a `.cmd` or `.bat` launcher would act on (`& | < > ^ % "` or a line break), a launcher whose own path holds one of those characters (npm's launchers read their own folder back without quotes, so a folder such as `C:\Users\R&D` would split there), more than 64 agents, or a file over 1 MB. Each such agent stays in the sidebar, not started, with the reason. But a well-formed entry naming another program is started: anyone who can change that file can make Lillignode start a program the next time you open it. The file is in your own user folder (`lillignode --where` says where); keep it there and do not point `LILLIGNODE_STATE_DIR` at a shared folder.
-- **A paste can still say anything in plain words.** Lillignode takes control characters (Ctrl+C, Ctrl+D, Escape and the like) out of every paste and says how many it left out, so a paste cannot interrupt an agent or speak to its terminal. Words that tell an agent to do something are passed on as they are. Paste only what you meant to type.
-- **In Windows Terminal, a paste reaches Lillignode as ordinary key presses.** Seen with Windows Terminal 1.25 on Windows 11, pasting with Ctrl+V: the terminal does not mark the paste for Lillignode, whether asked to or not, and it removes control characters such as Ctrl+D and Escape itself, before any program sees them. So they do not reach an agent, and Lillignode, never having seen them, does not say they were left out. A tab is not removed. Lillignode takes text that arrives in one go with a line break or a tab in it as a paste. What that gets wrong: a paste that is a single tab and nothing else is taken as the Tab key; a very long paste that the terminal hands over in pieces could leave a tab alone in one piece; and typing that arrives all at once (over a slow remote link, say) with a Tab or Enter in it is taken as a paste. The rule for tabs has been tested against a recording of what Windows Terminal sends and not yet by a person pasting. Right-click paste and other terminals have not been recorded.
-- **Cost is experimental.** Its figures have not been compared with Claude Code's own `/usage`. Trust `/usage`.
-- **Only Windows has been run by a person.** Linux and macOS (Apple Silicon) build and pass the unit tests, the lint and the end-to-end check against a stand-in agent in CI. Nobody has started an agent in Lillignode on either. If you test it on one and it works, thanks. Please let me know.
+- **A paste can still say anything in plain words.** Where Lillignode sees control characters (Ctrl+C, Ctrl+D, Escape and the like) in a paste, it takes them out and says how many it left out, so a paste cannot interrupt an agent or speak to its terminal. Words that tell an agent to do something are passed on as they are. Paste only what you meant to type.
+- **Done means the agent's turn ended.** It may have ended on a question written as ordinary text. Lillignode shows what the agent reports.
+- **Codex** asks permission only when started with `-a on-request`. On at least one of its own set-up screens it reports Idle while it waits for an answer. It reports Done for a turn that failed.
+- **Grok Build** is silent unless its own status setting is on.
+- **Claude Code 2.1.325** sends no report at its "do you trust this folder" question, so the row does not say it is waiting. 2.1.329 does report there.
+- **A helper agent waiting inside a program** is not shown yet. The format lets a program report each helper separately; Lillignode counts those reports and does not show them yet.
+- **Gemini CLI and Cursor's CLI** sent no status reports in the versions tried (Gemini CLI 0.68.0, Cursor's CLI build of 2026-11-13, each started once by script). They show Unknown.
+- **Cost** has not been compared with Claude Code's own `/usage`. Trust `/usage`.
+- **Pasting on Windows.** Windows Terminal hands a paste to Lillignode as ordinary key presses, so Lillignode cannot always tell a paste from typing. In our checks Windows Terminal itself removed Ctrl+D and Esc from pasted text, so Lillignode never saw them and says nothing about them. Text with a tab or a line break in it that arrives in one go is taken as a paste, and its tabs are sent as spaces. A paste that is only a tab is still taken as the Tab key, and typing that arrives all at once with a Tab or Enter in it (over a slow remote link, say) is taken as a paste.
+- **A launcher file in a folder whose path holds `&`** (for example `C:\Users\R&D`), or another character the command interpreter acts on, is refused. Start the program itself, not its launcher.
+- **Windows is the only system checked by hand.** Linux and macOS (Apple Silicon) build and pass the unit tests, the lint and the end-to-end check against a stand-in agent in CI on every change. Nobody has started an agent in Lillignode on either, and no download is offered for them yet. If you test it on one and it works, thanks. Please let me know.
 
 ## Other limits
 
@@ -251,7 +259,7 @@ The last one drives the real program against a stand-in agent and takes about tw
 
 ## How it is built
 
-Most of Lillignode's code is written by an AI coding agent, Claude Code, directed by a person. Every change passes the five checks above and independent reviews, and each release is checked by hand by a person against real Claude Code. What has not been checked yet is listed under [Known limits in 0.1](#known-limits-in-01).
+Most of Lillignode's code is written by an AI coding agent, Claude Code, directed by a person. Every change passes the five checks above and independent reviews, and each release is checked by hand by a person against real Claude Code. What has not been checked yet is listed under [Known limits in 0.2](#known-limits-in-02).
 
 ## Licence
 
