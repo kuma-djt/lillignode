@@ -16,7 +16,7 @@ The name is said "Lilli-node": the g is silent, as in gnome.
 - **Two side by side, when you want.** Menu key, then `v`: the agent in front on the left, the next one beside it, each half the width. `v` again goes back to one. See [Two side by side](#two-side-by-side).
 - **Come back to where you were.** Quit and start again: the same agents reopen in the same folders, and Claude Code continues each conversation. Any other agent, Codex included, is started again and begins a new conversation; Lillignode says which.
 - **Read back what scrolled away.** The last 5,000 lines per agent, with Shift+PgUp.
-- **Paste safely.** A multi-line paste reaches the agent as one paste, never as a string of Enter presses. Control characters are left out, and you are told when they were (not yet in every case on Windows: see Known limits). Where a paste has to be sent as typed keys, its tabs are sent as spaces.
+- **Paste safely.** A multi-line paste reaches the agent as one paste, never as a string of Enter presses. Control characters are left out, and you are told when they were (in Windows Terminal the terminal removes them first, so you are not told: see Known limits). Where a paste has to be sent as typed keys, its tabs are sent as spaces.
 - **Run any other command-line agent too.** If it reports its status in the open format, the sidebar shows it. If it does not, it runs all the same and its status shows Unknown.
 - **Cost, if you switch it on.** Experimental and off by default. See [Cost](#cost-experimental-off-by-default).
 
@@ -154,8 +154,23 @@ An agent's status is what the agent says it is. Lillignode reads the status repo
 
 - **Any program that reports gets a status,** with the yellow block and the bell when it needs you. Lillignode's terminal answers "yes" to a program that asks whether reports are taken.
 - **A program that reports nothing shows Unknown,** and the status report says no report has come. Claude Code and Codex are expected to report, so for them a notice says so once, with the likeliest cause.
-- **Checked with** Claude Code 2.1.325 and Codex 0.169.0, on Windows 11. Any other program's reports are read the same way and have not been checked by anyone.
-- **Done means its turn ended,** not that the work succeeded.
+- **Done means the agent's turn ended.** It does not mean the work succeeded, and the turn may have ended on a question written as ordinary text, which no report marks as waiting for you. Seen with Grok Build.
+
+### Which programs, and how we know
+
+Three levels of evidence, strongest first. Everything checked by hand was on Windows 11 in Windows Terminal, in November 2026.
+
+| Program | Status in Lillignode | How we know |
+|---|---|---|
+| Claude Code 2.1.325 | Starting, Idle, Working, Needs you with one bell, Done | **Checked by hand** |
+| Codex CLI 0.169.0 | The same. It asks permission, and so shows Needs you, only when started with `-a on-request` (see [Codex](#codex)) | **Checked by hand** |
+| Grok Build 1.0.77 | The same, but only with `program_status = "on"` in Grok Build's own settings file. Without it Grok Build sent nothing here and showed Unknown | **Checked by hand** |
+| A program that prints a report itself | Needs you with one bell, Done | **Checked by hand,** with reports printed from PowerShell |
+| OpenCode 2.2.0 and later, Pi 1.1.0 and later, omp 18.8.7 and later | Not run in Lillignode | **Checked by source:** the code that sends the reports was read in each project's public repository |
+| Gemini CLI 0.68.0, Cursor's CLI (build of 2026-11-13) | Unknown: each was started once, by script, and sent nothing | **Checked by a scripted run** |
+| Devin CLI, Amp | Not run, source not read | **Claimed** by the vendor's changelog (Devin CLI) or by a third-party list (Amp) |
+
+Lillignode changes no other program's settings. Reports from a program not in the first four rows are read the same way and have not been seen by anyone here.
 
 What Lillignode does with a report that is not as expected:
 
@@ -175,7 +190,9 @@ What to watch for:
 
 Start Codex CLI like any agent: press `n`, type `codex`, then the folder. A program whose file is named `codex` is taken for Codex. Lillignode adds nothing to how Codex is started and changes none of its settings.
 
-**Checked by script, not yet by a person in a real window.** With Codex 0.169.0 on Windows 11, inside Lillignode: Starting, Idle, Working, Needs you with one bell at an approval, Done, and Unknown when signed out. Not seen from real Codex: an error, a question, Esc in the middle of a turn. That check was made before status was opened to every program and has not been repeated since.
+**Codex asks permission only when it is started with `-a on-request`.** Started plainly it may never ask: a command it is not allowed to run ends its turn, and the row says Done. Lillignode adds no option for you.
+
+**Checked by hand** with Codex 0.169.0 on Windows 11 in Windows Terminal, started with `-a on-request`: Starting, Idle, Working, Needs you with one bell at an approval, Done, two side by side with Claude Code, and the quit rules. Unknown when signed out was seen by script only. Not seen from real Codex: an error, a question.
 
 What Codex gets, and what it does not:
 
@@ -187,7 +204,6 @@ What Codex gets, and what it does not:
 What to watch for:
 
 - **Codex says Idle on at least one of its own set-up screens that is waiting for you.** Seen with Codex 0.169.0 at its first-run sandbox question; there may be others. Lillignode shows Idle there, with no yellow block and no bell, because that is what Codex reported. A request for permission while it was working was seen to be reported as it should be.
-- **Whether Codex asks permission depends on how it is started and set up.** Started plainly it may never ask: a blocked command ends its turn, and the row says Done.
 - **Signed out, Codex reports nothing** (seen with 0.169.0). Its row shows Unknown after 15 seconds, and a notice says so. The same notice appears if Codex is silent for any other reason.
 - **History.** Codex draws on a full-screen display, which leaves Lillignode no history to keep. Scroll with Codex's own keys.
 
@@ -196,7 +212,8 @@ What to watch for:
 These are known and not yet fixed. Please do not report them as security problems.
 
 - **The saved workspace is trusted at launch, within limits.** When Lillignode starts, it runs the agents listed in its workspace file as they are written there: the command, its arguments and its folder. It checks the file first and starts nothing it would never have written itself: a control character in a name, command, argument or folder, a conversation id that is not one it writes, an argument a `.cmd` or `.bat` launcher would act on (`& | < > ^ % "` or a line break), more than 64 agents, or a file over 1 MB. Each such agent stays in the sidebar, not started, with the reason. But a well-formed entry naming another program is started: anyone who can change that file can make Lillignode start a program the next time you open it. The file is in your own user folder (`lillignode --where` says where); keep it there and do not point `LILLIGNODE_STATE_DIR` at a shared folder.
-- **A paste can still say anything in plain words.** Lillignode takes control characters (Ctrl+C, Ctrl+D, Escape and the like) out of every paste and says how many it left out, so a paste cannot interrupt an agent or speak to its terminal. Words that tell an agent to do something are passed on as they are. **On Windows this is not yet whole:** in a test through Windows' pseudo-terminal a paste arrived split at its control character, so the text before it was typed and the control key reached the agent. Paste only what you meant to type.
+- **A paste can still say anything in plain words.** Lillignode takes control characters (Ctrl+C, Ctrl+D, Escape and the like) out of every paste and says how many it left out, so a paste cannot interrupt an agent or speak to its terminal. Words that tell an agent to do something are passed on as they are. Paste only what you meant to type.
+- **In Windows Terminal, a paste reaches Lillignode as ordinary key presses.** Seen with Windows Terminal 1.25 on Windows 11, pasting with Ctrl+V: the terminal does not mark the paste for Lillignode, whether asked to or not, and it removes control characters such as Ctrl+D and Escape itself, before any program sees them. So they do not reach an agent, and Lillignode, never having seen them, does not say they were left out. A tab is not removed. Lillignode takes text that arrives in one go with a line break or a tab in it as a paste. What that gets wrong: a paste that is a single tab and nothing else is taken as the Tab key; a very long paste that the terminal hands over in pieces could leave a tab alone in one piece; and typing that arrives all at once (over a slow remote link, say) with a Tab or Enter in it is taken as a paste. The rule for tabs has been tested against a recording of what Windows Terminal sends and not yet by a person pasting. Right-click paste and other terminals have not been recorded.
 - **Cost is experimental.** Its figures have not been compared with Claude Code's own `/usage`. Trust `/usage`.
 - **Only Windows has been run by a person.** Linux and macOS (Apple Silicon) build and pass the unit tests, the lint and the end-to-end check against a stand-in agent in CI. Nobody has started an agent in Lillignode on either. If you test it on one and it works, thanks. Please let me know.
 
