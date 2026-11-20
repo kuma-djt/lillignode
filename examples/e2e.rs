@@ -138,6 +138,13 @@ impl Session {
         }
     }
 
+    /// Takes output until none has come for 100 ms (at most 10 s), so a
+    /// screen is read whole and not halfway through being drawn.
+    fn settle(&mut self) {
+        let end = Instant::now() + Duration::from_secs(10);
+        while self.pump(Duration::from_millis(100)) && Instant::now() < end {}
+    }
+
     fn rows(&self) -> Vec<String> {
         let cols = self.term.screen().size().1.get();
         self.term.screen().rows(0, cols).collect()
@@ -1231,21 +1238,41 @@ fn main() {
     s.expect("PgUp in the menu shows history", "HISTORY of streamer (work)");
     s.raw(HOME);
     s.expect("Home reaches the first line", "stream line 00001 of 03000");
+    // Each page is read only once it has been drawn in full: after PgDn,
+    // wait for the first line shown to change and the output to go quiet.
+    // A fixed pause read a page early on a busy machine and lost lines that
+    // were never missing.
+    let stream_lines = |s: &Session| -> Vec<u32> {
+        s.rows()
+            .iter()
+            .filter_map(|row| {
+                let at = row.find("stream line ")?;
+                row[at + 12..].chars().take(5).collect::<String>().parse().ok()
+            })
+            .collect()
+    };
+    s.settle();
     let mut seen: BTreeSet<u32> = BTreeSet::new();
     for _ in 0..400 {
-        for row in s.rows() {
-            if let Some(at) = row.find("stream line ") {
-                if let Ok(n) = row[at + 12..].chars().take(5).collect::<String>().parse() {
-                    seen.insert(n);
-                }
-            }
-        }
+        let shown = stream_lines(&s);
+        seen.extend(&shown);
         if !s.flat().contains("HISTORY of") {
             break;
         }
         s.writer.write_all(PAGE_DOWN).unwrap();
         s.writer.flush().unwrap();
-        s.pump_for(Duration::from_millis(70));
+        let end = Instant::now() + Duration::from_secs(10);
+        while s.flat().contains("HISTORY of") && stream_lines(&s).first() == shown.first() {
+            if Instant::now() > end {
+                check(
+                    "PgDn moves through history",
+                    false,
+                    &format!("no change in 10 s from {:?}", shown.first()),
+                );
+            }
+            s.pump(Duration::from_millis(20));
+        }
+        s.settle();
     }
     let missing: Vec<u32> = (1..=3000).filter(|n| !seen.contains(n)).collect();
     check(

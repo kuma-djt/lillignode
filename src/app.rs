@@ -1206,9 +1206,11 @@ impl<B: AgentBackend> App<B> {
 
     /// The quit question, fitted to the window's one line. Its keys come
     /// first, then which agents may be in the middle of something, which is
-    /// why it is asked. When the whole does not fit, what is given up, in
-    /// this order: the words saying the agents come back (the line printed
-    /// on closing says so again), then all the names but the first. That a
+    /// why it is asked, those that need you named first. When the whole
+    /// does not fit, what is given up, in this order: the words saying the
+    /// agents come back (the line printed on closing says so again), then
+    /// the names of agents that do not need you, counted instead (the
+    /// first is kept when none needs you). That a
     /// Codex agent starts a new conversation is kept: it is what is lost.
     fn quit_question(&self) -> String {
         let running = self.ws.running_labels().len();
@@ -1227,15 +1229,20 @@ impl<B: AgentBackend> App<B> {
             [one] => format!(" {one} starts a new conversation next time."),
             many => format!(" {} start new conversations next time.", many.join(", ")),
         };
-        let unfinished = self.unfinished();
+        // Shortened, an agent that needs you is still named: it is the one
+        // quitting would interrupt in the middle of asking you something.
+        // Only the others are counted instead.
+        let (need, rest) = self.unfinished_by_need();
+        let kept = if need.is_empty() { rest.len().min(1) } else { need.len() };
+        let unfinished: Vec<String> = need.into_iter().chain(rest).collect();
         let head = format!(
             "Quit and stop {}? y / n   Not finished or not known: ",
             plural(running, "running agent", "running agents")
         );
         let all = unfinished.join(", ");
-        let first = match unfinished.as_slice() {
-            [one, more @ ..] if !more.is_empty() => format!("{one} and {} more", more.len()),
-            _ => all.clone(),
+        let first = match unfinished.len() - kept {
+            0 => all.clone(),
+            more => format!("{} and {more} more", unfinished[..kept].join(", ")),
         };
         let back = if running == 1 { "It comes back" } else { "They come back" };
         let tries = [
@@ -1710,15 +1717,27 @@ impl<B: AgentBackend> App<B> {
     /// Running agents that may be in the middle of something: not Done,
     /// Idle, or Error. Quitting asks first only if there are any.
     fn unfinished(&self) -> Vec<String> {
-        self.ws
-            .entries()
-            .iter()
-            .filter(|e| e.is_running() && !e.is_settled())
-            .map(|e| match e.reported() {
+        let (need, rest) = self.unfinished_by_need();
+        need.into_iter().chain(rest).collect()
+    }
+
+    /// The agents quitting would interrupt, as `unfinished` names them:
+    /// first those that need you, then the rest, each in sidebar order.
+    fn unfinished_by_need(&self) -> (Vec<String>, Vec<String>) {
+        let mut need = Vec::new();
+        let mut rest = Vec::new();
+        for e in self.ws.entries().iter().filter(|e| e.is_running() && !e.is_settled()) {
+            let name = match e.reported() {
                 Some(s) => format!("{} ({})", e.label(), s.text()),
                 None => e.label(),
-            })
-            .collect()
+            };
+            if e.needs_you().is_some() {
+                need.push(name)
+            } else {
+                rest.push(name)
+            }
+        }
+        (need, rest)
     }
 
     /// What the status report panel says about the focused agent: what the
@@ -2675,6 +2694,47 @@ Cost",
             "{}",
             seen[3]
         );
+    }
+
+    /// An agent that needs you is named first, and is never one of the
+    /// "and 1 more" when the question is shortened, even when it comes
+    /// after another in the sidebar.
+    #[test]
+    fn the_quit_question_names_agents_that_need_you_first_and_never_folds_them_away() {
+        let mut app = app_with_claude_and_codex();
+        report(&mut app, 1, "state=working:app=claude-code");
+        codex_reports(&mut app, 2, "state=blocked:app=codex:kind=permission");
+        app.on_key(press(KeyCode::F(12)));
+        app.on_key(press(KeyCode::Char('q')));
+        let needs = "Codex (web) (Needs you: permission)";
+        let whole = app.bar();
+        assert!(
+            whole.contains(&format!("Not finished or not known: {needs}, Claude Code (a) (Working).")),
+            "{whole}"
+        );
+        // Narrow enough that only the shortest form fits, which is where
+        // names are given up.
+        let mut shortened = false;
+        for width in (60..=whole.chars().count() as u16).rev() {
+            app.set_window(Rect::new(0, 0, width, 30));
+            let bar = app.bar();
+            assert!(bar.starts_with("Quit and stop 2 running agents? y / n"), "{width}: {bar}");
+            assert!(bar.contains(needs), "{width}: {bar}");
+            if bar.contains("and 1 more") {
+                shortened = true;
+                assert!(bar.contains(&format!("{needs} and 1 more.")), "{width}: {bar}");
+                assert!(!bar.contains("Claude Code (a) (Working)"), "{width}: {bar}");
+            }
+        }
+        assert!(shortened, "the test never reached the shortened form");
+
+        // Both need you: both are named, in sidebar order, however narrow,
+        // and nothing is counted.
+        report(&mut app, 1, PERMISSION);
+        app.set_window(Rect::new(0, 0, 60, 30));
+        let bar = app.bar();
+        assert!(bar.contains(&format!("Claude Code (a) (Needs you: permission), {needs}.")), "{bar}");
+        assert!(!bar.contains("more"), "{bar}");
     }
 
     /// Found in a check by hand: the screen said r would not help and the
