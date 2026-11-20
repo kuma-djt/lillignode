@@ -280,8 +280,6 @@ fn control_names(left_out: &[char]) -> String {
     }
 }
 
-/// " 2 control characters were left out (Ctrl+C, Ctrl+D).", or empty
-/// when none were. Starts with a space, to follow a sentence.
 /// Said after a paste was sent, with what was taken out of it and whether
 /// its tabs became spaces.
 fn pasted_sentence(sent: &Sent) -> String {
@@ -290,6 +288,8 @@ fn pasted_sentence(sent: &Sent) -> String {
     format!("Pasted into {}{how}.{}{tabs}", sent.label, left_out_sentence(&sent.left_out))
 }
 
+/// " 2 control characters were left out (Ctrl+C, Ctrl+D).", or empty
+/// when none were. Starts with a space, to follow a sentence.
 fn left_out_sentence(left_out: &[char]) -> String {
     match left_out.len() {
         0 => String::new(),
@@ -2396,6 +2396,17 @@ mod tests {
         app.on_paste("one\ntwo".into());
         app.on_key(press(KeyCode::Char('y')));
         assert_eq!(*sent.borrow(), vec!["one\rtwo".to_string()]);
+    }
+
+    #[test]
+    fn a_yes_to_a_held_paste_whose_agent_stopped_says_nothing_was_sent() {
+        let (mut app, sent) = app_with_agent();
+        app.on_paste("one\ntwo".into());
+        app.on_agent_event(AgentEvent::Exited(AgentId(1), crate::agent::Exit { code: 0 }));
+        app.on_key(press(KeyCode::Char('y')));
+        assert!(sent.borrow().is_empty());
+        // Not "Pasted into …": it was not.
+        assert_eq!(app.notice.as_deref(), Some("Paste discarded. Nothing was sent."));
     }
 
     #[test]
