@@ -224,6 +224,7 @@ fn main() -> ExitCode {
     }
 
     let stopped = app.ws.running_labels();
+    let ended = app.ws.ended_labels();
     let saved = app.save();
     app.ws.stop_all();
     restore_terminal();
@@ -231,11 +232,7 @@ fn main() -> ExitCode {
     if let Some(e) = draw_error {
         eprintln!("Lillignode could not draw to this terminal ({e}) and closed.");
     }
-    match stopped.len() {
-        0 => println!("Lillignode closed."),
-        1 => println!("Lillignode closed and stopped 1 agent: {}.", stopped[0]),
-        n => println!("Lillignode closed and stopped {n} agents: {}.", stopped.join(", ")),
-    }
+    println!("{}", lillignode::workspace::closing_line(&stopped, &ended));
     let remembered = app.ws.entries().len();
     match saved {
         Ok(()) if remembered > 0 => {

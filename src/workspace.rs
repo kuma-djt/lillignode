@@ -90,6 +90,13 @@ impl Entry {
         self.status == Status::Running
     }
 
+    /// True for an agent Lillignode refused to start because of what its
+    /// saved entry holds. Starting it again reads the same entry, so the
+    /// key for that is not offered.
+    pub fn start_again_cannot_help(&self) -> bool {
+        matches!(&self.status, Status::NotStarted(why) if why.contains(FIX_IN_THE_FILE))
+    }
+
     pub fn kind(&self) -> AgentKind {
         kind_of(&self.saved)
     }
@@ -837,6 +844,47 @@ impl<B: AgentBackend> Workspace<B> {
                 self.backend.close(id);
             }
         }
+    }
+
+    /// Agents whose program had already ended by itself, so closing
+    /// Lillignode stops nothing of theirs.
+    pub fn ended_labels(&self) -> Vec<String> {
+        self.entries.iter().filter(|e| matches!(e.status, Status::Exited(_))).map(Entry::label).collect()
+    }
+}
+
+/// The line printed when Lillignode closes. Every agent it stops is named
+/// and counted. One whose program had already ended is named apart, so
+/// the count is of what was stopped and no agent goes unmentioned.
+pub fn closing_line(stopped: &[String], ended: &[String]) -> String {
+    let mut line = match stopped {
+        [] => "Lillignode closed.".to_string(),
+        [one] => format!("Lillignode closed and stopped 1 agent: {one}."),
+        many => format!("Lillignode closed and stopped {} agents: {}.", many.len(), many.join(", ")),
+    };
+    if !ended.is_empty() {
+        line += &format!(" Already ended, so not stopped now: {}.", ended.join(", "));
+    }
+    line
+}
+
+#[cfg(test)]
+mod closing_tests {
+    use super::closing_line;
+
+    #[test]
+    fn the_closing_line_names_every_agent_and_counts_only_those_it_stopped() {
+        let s = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+        assert_eq!(closing_line(&[], &[]), "Lillignode closed.");
+        assert_eq!(
+            closing_line(&s(&["Codex (work)", "Claude Code (cc)"]), &[]),
+            "Lillignode closed and stopped 2 agents: Codex (work), Claude Code (cc)."
+        );
+        assert_eq!(
+            closing_line(&s(&["Claude Code (cc)"]), &s(&["Codex (work)"])),
+            "Lillignode closed and stopped 1 agent: Claude Code (cc). Already ended, so not stopped now: \
+             Codex (work)."
+        );
     }
 }
 

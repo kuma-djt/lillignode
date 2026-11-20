@@ -58,6 +58,10 @@ impl fmt::Display for StartError {
     }
 }
 
+/// Said in every refusal that goes on to say what to do itself, so the
+/// place that shows it adds no generic way out of its own.
+pub const NOTHING_RUN: &str = "Nothing was run.";
+
 /// What to do about a saved entry Lillignode refuses to start. Starting it
 /// again cannot help: the entry is the cause, and a running Lillignode would
 /// save its own copy over a fix made to the file meanwhile.

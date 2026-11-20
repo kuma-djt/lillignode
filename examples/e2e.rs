@@ -929,7 +929,7 @@ fn main() {
         "its own screen gives the reason",
         "nosuchagent (work) was not started: \"nosuchagent\" is not installed or not on PATH.",
     );
-    s.expect("and what to do", "then r to try again. Or the menu key, then x to remove it.");
+    s.expect("and what to do", "then r starts it again. Or the menu key, then x removes it.");
     s.keys(b"\t");
     s.expect("missing folder gets its own reason", "does not exist");
     std::fs::create_dir_all(&gone).unwrap();

@@ -415,22 +415,28 @@ fn draw_welcome<B: AgentBackend>(frame: &mut Frame, area: Rect, app: &App<B>, p:
     );
 }
 
+/// What an agent that was not started shows in place of its screen. A
+/// reason that already says what to do is not followed by a second, generic
+/// way out that could contradict it.
+fn not_started_text(entry: &Entry, why: &str) -> String {
+    let next = if why.contains(crate::agent::NOTHING_RUN) {
+        "It is still in your workspace."
+    } else {
+        "Nothing was changed, and it is still in your workspace.\n\n\
+         Once the cause is fixed: the menu key, then r starts it again. Or the menu key, then x removes it."
+    };
+    format!(
+        "{} was not started: {why}.\n\n{next}\n\nCommand: {}\nFolder:  {}",
+        entry.label(),
+        printable(&entry.saved.command),
+        printable(&entry.saved.folder.display().to_string())
+    )
+}
+
 /// One agent's own screen, or why it has none.
 fn draw_entry(frame: &mut Frame, area: Rect, entry: &Entry) {
     match &entry.status {
-        Status::NotStarted(why) => message(
-            frame,
-            area,
-            format!(
-                "{} was not started: {why}.\n\n\
-                 Nothing was changed, and it is still in your workspace.\n\n\
-                 Fix the cause, then the menu key, then r to try again. Or the menu key, then x to remove it.\n\n\
-                 Command: {}\nFolder:  {}",
-                entry.label(),
-                printable(&entry.saved.command),
-                printable(&entry.saved.folder.display().to_string())
-            ),
-        ),
+        Status::NotStarted(why) => message(frame, area, not_started_text(entry, why)),
         // An exited agent keeps its last screen, so what it said before
         // stopping can still be read.
         _ => view::draw_screen(entry.term.screen(), area, frame.buffer_mut()),
@@ -453,6 +459,9 @@ fn pane_head(entry: &Entry, front: bool, keys_go_to_agents: bool, width: usize, 
         (true, true) if typing => (" > NEEDS YOU - you are typing here", p.needs_you_block()),
         (true, true) => (" > NEEDS YOU - in front, keys are Lillignode's now", p.needs_you_block()),
         (false, true) if typing => (" > TYPING GOES HERE", p.mode()),
+        (false, true) if entry.start_again_cannot_help() => {
+            (" > NOT STARTED - menu, then x remove", p.mode())
+        }
         (false, true) if !entry.is_running() => (" > STOPPED - menu, then r start again, x remove", p.mode()),
         (false, true) => (" > IN FRONT - keys are Lillignode's now", p.mode()),
         (false, false) if !entry.is_running() => (" - stopped, its last screen", p.dim()),
