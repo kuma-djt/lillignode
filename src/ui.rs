@@ -469,6 +469,9 @@ fn pane_head(entry: &Entry, front: bool, keys_go_to_agents: bool, width: usize, 
         (true, true) if typing => (" > NEEDS YOU - you are typing here", p.needs_you_block()),
         (true, true) => (" > NEEDS YOU - in front, keys are Lillignode's now", p.needs_you_block()),
         (false, true) if typing => (" > TYPING GOES HERE", p.mode()),
+        (false, true) if entry.start_again_cannot_help() => {
+            (" > NOT STARTED - menu, then x remove", p.mode())
+        }
         (false, true) if !entry.is_running() => (" > STOPPED - menu, then r start again, x remove", p.mode()),
         (false, true) => (" > IN FRONT - keys are Lillignode's now", p.mode()),
         (false, false) if !entry.is_running() => (" - stopped, its last screen", p.dim()),

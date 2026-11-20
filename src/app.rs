@@ -218,6 +218,9 @@ pub struct App<B: AgentBackend> {
     /// The notice that Claude Code's status is not reaching Lillignode is
     /// given once per run.
     unknown_notice_given: Vec<AgentKind>,
+    /// The Unknown notices now on screen, each with its words, so one that
+    /// stops being true can be taken back.
+    unknown_notice_up: Vec<(AgentKind, String)>,
     /// The notice that a cost could not be read is given once per run too.
     cost_notice_given: bool,
     /// Windows only: Microsoft's newer pseudo-terminal is not beside
@@ -389,6 +392,7 @@ impl<B: AgentBackend> App<B> {
             launch_dir,
             status_off_switch: std::env::var(status::OFF_SWITCH).ok(),
             unknown_notice_given: Vec::new(),
+            unknown_notice_up: Vec::new(),
             cost_notice_given: false,
             newer_pty_missing: newer_pty_missing(),
         };
@@ -1072,6 +1076,13 @@ impl<B: AgentBackend> App<B> {
             Mode::Normal if self.ws.entries().is_empty() => {
                 format!("{menu}: menu   {} new agent   {} quit", key("n"), key("q"))
             }
+            // A key that cannot help is not offered.
+            Mode::Normal if self.ws.focused().is_some_and(Entry::start_again_cannot_help) => format!(
+                "{menu}: menu, then {} remove   {} next agent   {} quit",
+                key("x"),
+                key("Tab"),
+                key("q")
+            ),
             Mode::Normal => format!(
                 "{menu}: menu, then {} start again   {} remove   {} next agent   {} quit",
                 key("r"),
@@ -1172,31 +1183,7 @@ impl<B: AgentBackend> App<B> {
                  workspace.",
                 self.focused_label()
             ),
-            Mode::Confirm(Confirm::Quit) => {
-                let running = self.ws.running_labels().len();
-                // Only Claude Code is asked to continue its conversation.
-                // Every other agent begins afresh, so what it was doing is
-                // not picked up when it comes back.
-                let fresh: Vec<String> = self
-                    .ws
-                    .entries()
-                    .iter()
-                    .filter(|e| e.is_running() && !e.kind().keeps_conversations())
-                    .map(Entry::label)
-                    .collect();
-                let fresh = match fresh.as_slice() {
-                    [] => String::new(),
-                    [one] => format!(" {one} starts a new conversation next time."),
-                    many => format!(" {} start new conversations next time.", many.join(", ")),
-                };
-                format!(
-                    "Quit and stop {}? y / n   Not finished or not known: {}. {} back next time you \
-                     start Lillignode.{fresh}",
-                    plural(running, "running agent", "running agents"),
-                    self.unfinished().join(", "),
-                    if running == 1 { "It comes" } else { "They come" },
-                )
-            }
+            Mode::Confirm(Confirm::Quit) => self.quit_question(),
             Mode::Confirm(Confirm::View) => {
                 let waiting: Vec<String> =
                     self.ws.entries().iter().filter(|e| e.needs_you().is_some()).map(Entry::label).collect();
@@ -1217,6 +1204,55 @@ impl<B: AgentBackend> App<B> {
         }
     }
 
+    /// The quit question, fitted to the window's one line. Its keys come
+    /// first, then which agents may be in the middle of something, which is
+    /// why it is asked. When the whole does not fit, what is given up, in
+    /// this order: the words saying the agents come back (the line printed
+    /// on closing says so again), then all the names but the first. That a
+    /// Codex agent starts a new conversation is kept: it is what is lost.
+    fn quit_question(&self) -> String {
+        let running = self.ws.running_labels().len();
+        // Only Claude Code is asked to continue its conversation. Every
+        // other agent begins afresh, so what it was doing is not picked up
+        // when it comes back.
+        let fresh: Vec<String> = self
+            .ws
+            .entries()
+            .iter()
+            .filter(|e| e.is_running() && !e.kind().keeps_conversations())
+            .map(Entry::label)
+            .collect();
+        let fresh = match fresh.as_slice() {
+            [] => String::new(),
+            [one] => format!(" {one} starts a new conversation next time."),
+            many => format!(" {} start new conversations next time.", many.join(", ")),
+        };
+        let unfinished = self.unfinished();
+        let head = format!(
+            "Quit and stop {}? y / n   Not finished or not known: ",
+            plural(running, "running agent", "running agents")
+        );
+        let all = unfinished.join(", ");
+        let first = match unfinished.as_slice() {
+            [one, more @ ..] if !more.is_empty() => format!("{one} and {} more", more.len()),
+            _ => all.clone(),
+        };
+        let back = if running == 1 { "It comes back" } else { "They come back" };
+        let tries = [
+            format!("{head}{all}. {back} next time you start Lillignode.{fresh}"),
+            format!("{head}{all}. {back} next time.{fresh}"),
+            format!("{head}{all}.{fresh}"),
+            format!("{head}{first}.{fresh}"),
+        ];
+        // No window yet: nothing to fit to.
+        let room = match self.window.width {
+            0 => usize::MAX,
+            width => width as usize,
+        };
+        let [.., shortest] = &tries;
+        tries.iter().find(|t| t.chars().count() <= room).unwrap_or(shortest).clone()
+    }
+
     /// Call after each batch of events and ticks. Gives the Unknown notice
     /// the first time the reporting of a program expected to report (Claude
     /// Code, Codex) is seen not to reach Lillignode,
@@ -1224,6 +1260,7 @@ impl<B: AgentBackend> App<B> {
     /// needing you, and the bell is not switched off.
     pub fn after_events(&mut self) -> bool {
         let began = self.ws.take_began_needing_you();
+        self.withdraw_unknown_notices();
         // Said once for each kind of agent: one kind's reporting failing
         // says nothing about another's.
         let broken = self.ws.entries().iter().find_map(|e| {
@@ -1242,6 +1279,7 @@ impl<B: AgentBackend> App<B> {
             // Never replaces a notice already up (it may be a failure the
             // user still has to act on): it goes first, the other after it.
             let text = self.unknown_notice(who, why);
+            self.unknown_notice_up.push((kind, text.clone()));
             self.notice = Some(match self.notice.take() {
                 Some(earlier) => format!("{text}  {earlier}"),
                 None => text,
@@ -1286,6 +1324,33 @@ impl<B: AgentBackend> App<B> {
             });
         }
         began && self.config.bell
+    }
+
+    /// A warning that has stopped being true does not stay on screen. Once
+    /// no agent of a kind shows Unknown for want of reports (it reported
+    /// after all, or was closed), the notice about that kind is taken out,
+    /// and whatever else the notice says is left. Seen with Claude Code: it
+    /// reports nothing while it asks whether to trust a folder, and
+    /// reports as usual once that is answered. If that kind's reporting
+    /// fails again later, the notice is given again.
+    fn withdraw_unknown_notices(&mut self) {
+        let entries = self.ws.entries();
+        let still = |kind: AgentKind| {
+            entries.iter().any(|e| {
+                e.kind() == kind
+                    && matches!(e.reported(), Some(AgentStatus::Unknown(why)) if why.is_breakage())
+            })
+        };
+        let (kept, gone): (Vec<_>, Vec<_>) =
+            std::mem::take(&mut self.unknown_notice_up).into_iter().partition(|(kind, _)| still(*kind));
+        self.unknown_notice_up = kept;
+        for (kind, text) in gone {
+            self.unknown_notice_given.retain(|given| *given != kind);
+            if let Some(notice) = self.notice.take() {
+                let rest = notice.replace(&text, "");
+                self.notice = Some(rest.trim().to_string()).filter(|rest| !rest.is_empty());
+            }
+        }
     }
 
     /// Why every Claude Code agent shows Unknown, said once per run. The
@@ -1781,8 +1846,14 @@ impl<B: AgentBackend> App<B> {
                     are waiting for an answer it reports Idle, so Lillignode shows Idle there and does \
                     not say it needs you. And Done means its turn ended, not that the work succeeded.";
         }
-        out += "\n\n";
-        out += &self.cost_report(e);
+        // Cost is read for Claude Code only. While it is off, how to turn it
+        // on is said on a Claude Code agent's report and nowhere else.
+        if self.cost_shown() || e.is_claude_code() {
+            out += "\n\n";
+            out += &self.cost_report(e);
+        } else {
+            out += "\n";
+        }
         out
     }
 
@@ -2196,7 +2267,7 @@ mod tests {
         assert!(matches!(app.mode, Mode::StatusReport));
         assert!(app.bar().starts_with("STATUS REPORT  Any key: back to the agent.  Of cmd"), "{}", app.bar());
         let text = app.status_report_text();
-        assert!(text.contains("Cost: off."), "{text}");
+        assert!(text.contains("Status: Unknown: no report."), "{text}");
         app.on_key(press(KeyCode::Char('z')));
         assert!(matches!(app.mode, Mode::Normal));
         assert!(sent.borrow().is_empty(), "the closing key reached the agent: {:?}", sent.borrow());
@@ -2513,6 +2584,149 @@ Cost",
         assert!(text.starts_with("Status shows Unknown: Claude Code is not reporting it."), "{text}");
     }
 
+    /// Found in a check by hand: Claude Code sat at its folder trust
+    /// question past the deadline, then reported Idle, and the notice
+    /// saying it was not reporting stayed for the rest of the run.
+    #[test]
+    fn an_unknown_notice_that_stops_being_true_is_taken_back() {
+        let mut app = app_with_claude_agents(1);
+        app.notice = None;
+        app.ws.tick(Instant::now() + status::STARTING_DEADLINE);
+        app.after_events();
+        let notice = app.notice.clone().unwrap();
+        assert!(notice.starts_with("Status shows Unknown: Claude Code is not reporting it."), "{notice}");
+        // Still true: it stays.
+        app.after_events();
+        assert_eq!(app.notice.as_deref(), Some(notice.as_str()));
+        // It reports after all: the warning goes.
+        report(&mut app, 1, "state=idle:app=claude-code");
+        app.after_events();
+        assert_eq!(app.notice, None);
+
+        // Only its own words go: a notice it was joined to is left.
+        let mut app = app_with_claude_agents(1);
+        app.notice = Some("Could not save your workspace (disk full).".into());
+        app.ws.tick(Instant::now() + status::STARTING_DEADLINE);
+        app.after_events();
+        report(&mut app, 1, "state=idle:app=claude-code");
+        app.after_events();
+        assert_eq!(app.notice.as_deref(), Some("Could not save your workspace (disk full)."));
+
+        // A later notice that replaced it is not touched.
+        let mut app = app_with_claude_agents(1);
+        app.notice = None;
+        app.ws.tick(Instant::now() + status::STARTING_DEADLINE);
+        app.after_events();
+        app.notice = Some("later".into());
+        report(&mut app, 1, "state=idle:app=claude-code");
+        app.after_events();
+        assert_eq!(app.notice.as_deref(), Some("later"));
+
+        // If the reporting fails again, it is said again.
+        report(&mut app, 1, "state=pondering:app=claude-code");
+        app.after_events();
+        let notice = app.notice.clone().unwrap();
+        assert!(notice.starts_with("Status shows Unknown: Claude Code sent a status"), "{notice}");
+    }
+
+    /// Found in a check by hand, in a wide window: the question ran past
+    /// the edge and its end was lost.
+    #[test]
+    fn the_quit_question_is_shortened_to_fit_and_keeps_its_keys_and_its_reason() {
+        let mut app = app_with_claude_and_codex();
+        report(&mut app, 1, PERMISSION);
+        codex_reports(&mut app, 2, "state=working:app=codex");
+        app.on_key(press(KeyCode::F(12)));
+        app.on_key(press(KeyCode::Char('q')));
+        let reason =
+            "Not finished or not known: Claude Code (a) (Needs you: permission), Codex (web) (Working).";
+        let fresh = " Codex (web) starts a new conversation next time.";
+        let count = |s: &str| s.chars().count();
+        let whole = app.bar();
+        assert!(
+            whole.ends_with(&format!("They come back next time you start Lillignode.{fresh}")),
+            "{whole}"
+        );
+        let mut seen = vec![whole.clone()];
+        for width in (80..=count(&whole) as u16).rev() {
+            app.set_window(Rect::new(0, 0, width, 30));
+            let bar = app.bar();
+            assert!(bar.starts_with("Quit and stop 2 running agents? y / n   Not finished or not known: "));
+            assert!(bar.ends_with(fresh), "{width}: {bar}");
+            if count(&bar) <= width as usize {
+                // Whenever every name fits, every name is there.
+                let names = bar.contains(reason);
+                assert!(
+                    names
+                        || count(&bar.replace("Claude Code (a) (Needs you: permission) and 1 more", ""))
+                            < count(&bar)
+                );
+            }
+            if seen.last() != Some(&bar) {
+                seen.push(bar);
+            }
+        }
+        // Each step gives up one thing, in this order.
+        assert_eq!(seen.len(), 4, "{seen:#?}");
+        assert!(seen[1].contains(&format!("{reason} They come back next time.{fresh}")), "{}", seen[1]);
+        assert!(seen[2].ends_with(&format!("{reason}{fresh}")), "{}", seen[2]);
+        assert!(
+            seen[3].ends_with(&format!("Claude Code (a) (Needs you: permission) and 1 more.{fresh}")),
+            "{}",
+            seen[3]
+        );
+    }
+
+    /// Found in a check by hand: the screen said r would not help and the
+    /// bar offered r.
+    #[test]
+    fn an_agent_refused_for_its_saved_entry_is_not_offered_start_again() {
+        let mut app = app_with_claude_agents(0);
+        let refused = state::SavedAgent {
+            name: "bell\u{7}".into(),
+            command: "claude".into(),
+            kind: None,
+            args: vec![],
+            folder: std::env::temp_dir(),
+            conversation: None,
+            other: Default::default(),
+        };
+        let stops = state::SavedAgent { name: "Claude Code".into(), ..refused.clone() };
+        app.ws.restore(state::SavedWorkspace {
+            version: state::VERSION,
+            agents: vec![refused, stops],
+            focused: Some(0),
+            other: Default::default(),
+        });
+        app.on_agent_event(AgentEvent::Exited(AgentId(1), crate::agent::Exit { code: 0 }));
+        assert!(app.ws.focused().unwrap().start_again_cannot_help());
+        let bar = app.bar();
+        assert!(bar.starts_with("Ctrl+Q or F12: menu, then x remove"), "{bar}");
+        assert!(!bar.contains("start again"), "{bar}");
+        // One that only needs its cause fixed still is.
+        app.on_key(press(KeyCode::F(12)));
+        app.on_key(press(KeyCode::Tab));
+        app.on_key(press(KeyCode::Esc));
+        assert!(!app.ws.focused().unwrap().start_again_cannot_help());
+        assert!(app.bar().starts_with("Ctrl+Q or F12: menu, then r start again"), "{}", app.bar());
+    }
+
+    /// Found in a check by hand: Codex, Grok Build and a plain program each
+    /// showed the paragraph about turning on Claude Code's cost.
+    #[test]
+    fn how_to_turn_cost_on_is_said_only_on_a_claude_code_agent() {
+        let mut app = app_with_claude_and_codex();
+        let text = app.status_report_text();
+        assert!(text.starts_with("Status report for Codex (web)"), "{text}");
+        assert!(!text.contains("Cost"), "{text}");
+        assert!(!text.contains("Claude Code"), "{text}");
+        assert!(text.ends_with(".\n") && !text.ends_with("\n\n"), "{text:?}");
+        app.ws.focus_previous();
+        let text = app.status_report_text();
+        assert!(text.starts_with("Status report for Claude Code (a)"), "{text}");
+        assert!(text.contains("Cost: off."), "{text}");
+    }
+
     #[test]
     fn every_unknown_notice_fits_two_rows_of_the_narrowest_window() {
         // Found in a check by hand: the missing-files notice was cut
@@ -2659,9 +2873,12 @@ Cost",
         assert!(!app.cost_shown());
         look(&mut app, 0);
         assert!(app.cost_total().is_empty());
+        // Said on a Claude Code agent's report; the plain program is in front.
+        app.ws.focus_previous();
         assert!(app.status_report_text().contains("Cost: off. To see what each"));
         assert!(app.status_report_text().contains("add \"cost\": true to the settings file"));
         assert!(app.status_report_text().contains("and start Lillignode again."));
+        app.ws.focus_next();
         app.ws.read_cost_from(Some(folder.clone()));
         assert_eq!(
             app.cost_total(),
