@@ -44,6 +44,16 @@ impl AgentKind {
         }
     }
 
+    /// The kind after this one, in the order the new-agent form offers
+    /// them, coming round again after the last.
+    pub fn next(self) -> AgentKind {
+        match self {
+            AgentKind::ClaudeCode => AgentKind::Codex,
+            AgentKind::Codex => AgentKind::Program,
+            AgentKind::Program => AgentKind::ClaudeCode,
+        }
+    }
+
     /// The word saved with an agent of this kind.
     pub fn saved_word(self) -> &'static str {
         match self {
@@ -140,19 +150,35 @@ mod tests {
 
     #[test]
     fn a_program_is_known_by_the_name_of_its_file_and_by_nothing_looser() {
-        for command in
-            ["claude", "claude.cmd", "CLAUDE.EXE", "C:\\tools\\claude.exe", "/usr/local/bin/claude"]
-        {
+        for command in ["claude", "claude.cmd", "CLAUDE.EXE", "/usr/local/bin/claude"] {
             assert_eq!(AgentKind::of_command(command), AgentKind::ClaudeCode, "{command}");
         }
-        for command in ["codex", "codex.cmd", "Codex.EXE", "C:\\npm\\codex.cmd", "/usr/local/bin/codex"] {
+        for command in ["codex", "codex.cmd", "Codex.EXE", "/usr/local/bin/codex"] {
             assert_eq!(AgentKind::of_command(command), AgentKind::Codex, "{command}");
+        }
+        // A path is split by the rules of the system Lillignode runs on, so
+        // a Windows path is a path only there.
+        if cfg!(windows) {
+            assert_eq!(AgentKind::of_command("C:\\tools\\claude.exe"), AgentKind::ClaudeCode);
+            assert_eq!(AgentKind::of_command("C:\\npm\\codex.cmd"), AgentKind::Codex);
         }
         for command in
             ["aider", "claude-wrapper", "cc.cmd", "myclaude", "", "claude code", "codex-cli", "xcodex"]
         {
             assert_eq!(AgentKind::of_command(command), AgentKind::Program, "{command:?}");
         }
+    }
+
+    #[test]
+    fn the_form_offers_every_kind_in_turn_and_comes_round_again() {
+        let mut seen = vec![AgentKind::ClaudeCode];
+        while seen.len() < 4 {
+            seen.push(seen.last().unwrap().next());
+        }
+        assert_eq!(
+            seen,
+            [AgentKind::ClaudeCode, AgentKind::Codex, AgentKind::Program, AgentKind::ClaudeCode]
+        );
     }
 
     #[test]

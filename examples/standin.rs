@@ -8,6 +8,8 @@
 //!   standin echo-plain      do not ask for pastes as one block
 //!   standin stream <n>      print n numbered lines quickly, then echo
 //!   standin fullscreen      switch to a full-screen mode with no history
+//!   standin args ...        say the arguments it was given, each in [ ],
+//!                           as `STANDIN ARGS [a][b c]`, then echo
 //!   standin size            on each Enter, say what was typed and the size
 //!                           the terminal says it is: `SIZE <typed> is <c> by <r>`
 //!   standin claude ...      behave like Claude Code for conversation ids:
@@ -438,6 +440,10 @@ fn main() {
         }
         "echo-plain" => {
             say("STANDIN READY echo-plain");
+            echo(|_| {});
+        }
+        "args" => {
+            say(&format!("STANDIN ARGS [{}]", args[1..].join("][")));
             echo(|_| {});
         }
         "stream" => {

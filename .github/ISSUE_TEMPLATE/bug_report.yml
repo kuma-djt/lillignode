@@ -5,7 +5,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Thanks for reporting. Lillignode is v0.1 and rough, so this helps.
+        Thanks for reporting. Lillignode is v0.2 and rough, so this helps.
 
         **Security problems do not go here.** Use the Security tab, "Report a vulnerability".
         **Leave out anything secret:** no API keys, and no conversation contents you would not post in public.
