@@ -10,7 +10,11 @@
 //!    recognised here rather than by the input library.
 //! 2. Bursts. Where a terminal does not mark pastes, its keys still arrive
 //!    all at once. Several text keys read in one go that include an Enter
-//!    cannot be typing, so they are treated as a paste too.
+//!    cannot be typing, so they are treated as a paste too. So is text read
+//!    in one go with a Tab in it. Windows Terminal 1.25 sends no markers to
+//!    a program that reads the console as Lillignode does, asked or not: a
+//!    paste arrives there as plain key presses in one read, so this check
+//!    is the one that runs.
 
 use std::sync::mpsc::Sender;
 use std::thread;
@@ -205,14 +209,18 @@ fn ends_with_marker(run: &[KeyEvent], n: usize) -> bool {
 /// Deliver a run of keys read together: as a paste if it can only have been
 /// one, otherwise key by key.
 ///
-/// Text keys with a line break cannot be typing. Nor can several words' worth
+/// Text keys with a line break cannot be typing. Nor can text with a Tab
+/// in it: typed, the Tab would be read on its own. (Typing that a slow link
+/// hands over in one read is taken as a paste too; a Tab alone, or Tab held
+/// down, is still the key.) Nor can several words' worth
 /// of text with a control key in it: a terminal that does not mark pastes
 /// sends a paste's control characters as keys held with Ctrl, in the same
 /// burst. A control key read with a little typing (a letter, then Ctrl+C or
 /// the menu key, in one read over a slow link) is still keys.
 fn flush_run(run: &mut Vec<KeyEvent>, out: &mut Vec<Input>) {
     let plain: Option<String> = run.iter().map(as_text).collect();
-    if let Some(text) = plain.filter(|t| run.len() >= 2 && t.contains('\n')) {
+    let tab_in_text = |t: &str| t.contains('\t') && t.chars().any(|c| c != '\t');
+    if let Some(text) = plain.filter(|t| run.len() >= 2 && (t.contains('\n') || tab_in_text(t))) {
         out.push(Input::Paste(clean(&text)));
         run.clear();
         return;
@@ -336,6 +344,36 @@ mod tests {
         let mut d = PasteDetector::default();
         let out = d.push_batch(typed("rm -rf build\nmake\n"));
         assert_eq!(out, vec![Input::Paste("rm -rf build\nmake\n".into())]);
+    }
+
+    /// As recorded from Windows Terminal 1.25.3131 for "a", Tab, "b" pasted
+    /// with Ctrl+V: one read, no markers, each key pressed and released,
+    /// then the release of the V that was held.
+    #[test]
+    fn a_burst_of_text_with_a_tab_is_a_paste_and_a_tab_alone_is_the_key() {
+        let release = |code, modifiers| {
+            let mut k = KeyEvent::new(code, modifiers);
+            k.kind = KeyEventKind::Release;
+            Event::Key(k)
+        };
+        let mut events = Vec::new();
+        for code in [KeyCode::Char('a'), KeyCode::Tab, KeyCode::Char('b')] {
+            events.push(key(code));
+            events.push(release(code, KeyModifiers::NONE));
+        }
+        events.push(release(KeyCode::Char('v'), KeyModifiers::CONTROL));
+        let mut d = PasteDetector::default();
+        assert_eq!(d.push_batch(events), vec![Input::Paste("a\tb".into())]);
+        // An indented line, pasted.
+        assert_eq!(pastes(&d.push_batch(vec![key(KeyCode::Tab), key(KeyCode::Char('x'))])), vec!["\tx"]);
+        // Tab on its own, and Tab held down, are the key.
+        assert!(pastes(&d.push_batch(vec![key(KeyCode::Tab)])).is_empty());
+        let out = d.push_batch(vec![key(KeyCode::Tab), key(KeyCode::Tab)]);
+        assert_eq!(out.len(), 2);
+        assert!(pastes(&out).is_empty());
+        // The menu key and then Tab, read together, are keys.
+        let out = d.push_batch(vec![key(KeyCode::F(12)), key(KeyCode::Tab)]);
+        assert!(pastes(&out).is_empty());
     }
 
     #[test]
