@@ -14,7 +14,9 @@ use crate::action::Action;
 use crate::agent::{AgentBackend, AgentEvent, Size, StartError};
 use crate::config::{Billing, Config};
 use crate::cost::{self, Cost, Usage, Waiting, WhyNot};
-use crate::engine::{About, Answered, Engine, Outcome, QuestionId, Refused, Unfinished};
+use crate::engine::{
+    About, Answered, Engine, Outcome, PasteOutcome, QuestionId, Refused, Sent, SentAs, Unfinished,
+};
 use crate::input::Pasted;
 use crate::keys;
 use crate::kind::AgentKind;
@@ -191,9 +193,10 @@ pub enum Confirm {
     Close(QuestionId),
     /// The engine's question about quitting, by its id.
     Quit(QuestionId),
-    /// A paste of several lines into an agent that would take each line as
-    /// a separate Enter. The text waits in `App::held_paste`.
-    Paste,
+    /// The engine's question about a paste of several lines into an agent
+    /// that would take each line as a separate Enter, by its id. The
+    /// engine holds the paste.
+    Paste(QuestionId),
     /// Changing between one agent on screen and two, while an agent is
     /// waiting for the user: every agent is told a new size and redraws.
     View,
@@ -235,7 +238,6 @@ pub struct App<B: AgentBackend> {
     /// The window, as last told by `set_window`. Decides whether two
     /// agents fit side by side, and what size agents are given.
     window: Rect,
-    held_paste: Option<HeldPaste>,
     /// Where the workspace is saved, or why it cannot be.
     state_dir: Result<PathBuf, String>,
     /// The folder Lillignode was started in: the default for a new agent.
@@ -256,19 +258,6 @@ pub struct App<B: AgentBackend> {
     pub newer_pty_missing: bool,
 }
 
-/// A paste waiting for the user to agree to it being sent line by line,
-/// and what to say about it once it is.
-#[derive(Default)]
-struct HeldPaste {
-    /// Tabs already turned into spaces.
-    text: String,
-    /// The sentence about control characters taken out, or empty.
-    left_out: String,
-    tabs: bool,
-}
-
-/// What a tab becomes in a paste sent as typed keys.
-const TAB_AS_SPACES: &str = "    ";
 /// Said after a paste whose tabs became spaces.
 const TABS_SAID: &str = " Its tabs were sent as spaces, so none was taken as a press of Tab.";
 
@@ -293,6 +282,14 @@ fn control_names(left_out: &[char]) -> String {
 
 /// " 2 control characters were left out (Ctrl+C, Ctrl+D).", or empty
 /// when none were. Starts with a space, to follow a sentence.
+/// Said after a paste was sent, with what was taken out of it and whether
+/// its tabs became spaces.
+fn pasted_sentence(sent: &Sent) -> String {
+    let how = if sent.how == SentAs::LineByLine { " line by line" } else { "" };
+    let tabs = if sent.tabs { TABS_SAID } else { "" };
+    format!("Pasted into {}{how}.{}{tabs}", sent.label, left_out_sentence(&sent.left_out))
+}
+
 fn left_out_sentence(left_out: &[char]) -> String {
     match left_out.len() {
         0 => String::new(),
@@ -448,7 +445,6 @@ impl<B: AgentBackend> App<B> {
             report_top: 0,
             sidebar_top: std::cell::Cell::new(0),
             window: Rect::default(),
-            held_paste: None,
             state_dir,
             launch_dir,
             status_off_switch: std::env::var(status::OFF_SWITCH).ok(),
@@ -591,8 +587,10 @@ impl<B: AgentBackend> App<B> {
                                 )
                             }
                             Ok(Answered::Nothing) => {}
-                            // An answer about closing never quits.
-                            Ok(Answered::Closing) => unreachable!("an answer about closing quit"),
+                            // An answer about closing never quits or pastes.
+                            Ok(Answered::Closing | Answered::Pasted(_) | Answered::PasteDropped) => {
+                                unreachable!("an answer about closing did something else")
+                            }
                             Err(why) => self.refuse(self.refusal(why, "")),
                         }
                     }
@@ -621,19 +619,12 @@ impl<B: AgentBackend> App<B> {
                     Confirm::View => {
                         self.notice = Some("The view was left as it was. No agent was resized.".to_string());
                     }
-                    Confirm::Paste => {
-                        let HeldPaste { text, left_out, tabs } = self.held_paste.take().unwrap_or_default();
-                        if yes {
-                            self.engine.ws.send_to_focused(text.replace('\n', "\r").as_bytes());
-                            let tabs = if tabs { TABS_SAID } else { "" };
-                            self.notice = Some(format!(
-                                "Pasted into {} line by line.{left_out}{tabs}",
-                                self.focused_label()
-                            ));
-                        } else {
-                            self.notice = Some("Paste discarded. Nothing was sent.".to_string());
-                        }
-                    }
+                    Confirm::Paste(id) => match self.engine.answer(id, yes) {
+                        Ok(Answered::Pasted(sent)) => self.notice = Some(pasted_sentence(&sent)),
+                        // No, or its agent stopped while the question was up.
+                        Ok(_) => self.notice = Some("Paste discarded. Nothing was sent.".to_string()),
+                        Err(why) => self.refuse(self.refusal(why, "")),
+                    },
                 }
             }
         }
@@ -660,45 +651,29 @@ impl<B: AgentBackend> App<B> {
             }
             return;
         }
-        let can_take_it = self.focused_running() && !self.too_small;
-        match self.mode {
-            Mode::Normal if can_take_it && text.is_empty() && !left_out.is_empty() => {
-                self.notice = Some(format!(
-                    "Nothing was pasted: the text was only control characters ({}). Nothing was sent.",
-                    control_names(&left_out)
-                ));
+        // A window too small to show an agent takes no paste (the face
+        // knows what is shown); every other rule is the engine's.
+        let agent = self.engine.ws.focused().map(Entry::key);
+        let outcome = match (&self.mode, agent) {
+            (Mode::Normal, Some(agent)) if !self.too_small => self.engine.paste(agent, text, left_out).ok(),
+            _ => None,
+        };
+        self.notice = Some(match outcome {
+            Some(PasteOutcome::OnlyControls(left_out)) => format!(
+                "Nothing was pasted: the text was only control characters ({}). Nothing was sent.",
+                control_names(&left_out)
+            ),
+            // A clean paste sent whole or on one line says nothing.
+            Some(PasteOutcome::Sent(sent)) if sent.left_out.is_empty() && !sent.tabs => return,
+            Some(PasteOutcome::Sent(sent)) => pasted_sentence(&sent),
+            Some(PasteOutcome::Asked(question)) => {
+                self.mode = Mode::Confirm(Confirm::Paste(question.id));
+                return;
             }
-            Mode::Normal if can_take_it => {
-                let whole = self.engine.ws.focused().is_some_and(|e| e.term.takes_pastes_whole());
-                let left_out = left_out_sentence(&left_out);
-                if whole {
-                    let body = text.replace('\n', "\r");
-                    self.engine.ws.send_to_focused(format!("\x1b[200~{body}\x1b[201~").as_bytes());
-                    if !left_out.is_empty() {
-                        self.notice = Some(format!("Pasted into {}.{left_out}", self.focused_label()));
-                    }
-                    return;
-                }
-                let tabs = text.contains('\t');
-                let text = text.replace('\t', TAB_AS_SPACES);
-                if !text.contains('\n') {
-                    self.engine.ws.send_to_focused(text.as_bytes());
-                    if tabs || !left_out.is_empty() {
-                        let tabs = if tabs { TABS_SAID } else { "" };
-                        self.notice = Some(format!("Pasted into {}.{left_out}{tabs}", self.focused_label()));
-                    }
-                } else {
-                    self.held_paste = Some(HeldPaste { text, left_out, tabs });
-                    self.mode = Mode::Confirm(Confirm::Paste);
-                }
+            None => {
+                "Paste ignored: it can only go to a running agent in front. Nothing was sent.".to_string()
             }
-            _ => {
-                self.notice = Some(
-                    "Paste ignored: it can only go to a running agent in front. Nothing was sent."
-                        .to_string(),
-                );
-            }
-        }
+        });
     }
 
     /// A Lillignode command key. Unknown keys do nothing.
@@ -940,7 +915,7 @@ impl<B: AgentBackend> App<B> {
     fn close_subject(&self, id: QuestionId) -> Option<&Entry> {
         let subject = self.engine.question().filter(|q| q.id == id).and_then(|q| match q.about {
             About::Close(agent) => self.engine.ws.by_key(agent),
-            About::Quit => None,
+            About::Quit | About::Paste(_) => None,
         });
         debug_assert!(subject.is_some(), "the face shows the engine's question, never one of its own");
         subject
@@ -968,6 +943,7 @@ impl<B: AgentBackend> App<B> {
             Refused::AlreadyRunning => {
                 format!("{label} is already running, so it was not started again. Nothing was changed.")
             }
+            Refused::AgentStopped => format!("{label} is not running, so nothing was sent to it."),
         }
     }
 
@@ -1392,8 +1368,10 @@ impl<B: AgentBackend> App<B> {
                     waiting.join(", ")
                 )
             }
-            Mode::Confirm(Confirm::Paste) => {
-                let lines = self.held_paste.as_ref().map(|p| p.text.split('\n').count()).unwrap_or(0);
+            Mode::Confirm(Confirm::Paste(id)) => {
+                // The face shows the engine's question, never one of its own.
+                debug_assert_eq!(self.engine.question().map(|q| q.id), Some(*id));
+                let lines = self.engine.held_paste_lines().unwrap_or(0);
                 format!(
                     "Paste {lines} lines into {} one line at a time? y / n   It does not take a paste as \
                      one block, so each line would be entered as if you pressed Enter after it.",

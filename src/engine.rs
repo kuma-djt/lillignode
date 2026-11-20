@@ -23,6 +23,59 @@ pub enum About {
     /// Close this agent: stop it if it runs and take it out of the
     /// workspace, with its conversation.
     Close(AgentKey),
+    /// Send the held paste to this agent line by line: it does not take a
+    /// paste as one block, so each line is entered as if Enter were
+    /// pressed after it. How many lines it has is `Engine::held_paste_lines`.
+    Paste(AgentKey),
+}
+
+/// What a tab becomes in a paste sent as typed keys, so none is taken as a
+/// press of Tab.
+const TAB_AS_SPACES: &str = "    ";
+
+/// A paste waiting for the answer to the question about it.
+struct HeldPaste {
+    /// Tabs already turned into spaces.
+    text: String,
+    left_out: Vec<char>,
+    tabs: bool,
+}
+
+/// What became of a paste that was sent.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Sent {
+    /// The agent's name and folder.
+    pub label: String,
+    /// The control characters taken out of it before it came, said back.
+    pub left_out: Vec<char>,
+    /// Its tabs were sent as spaces.
+    pub tabs: bool,
+    /// How it went.
+    pub how: SentAs,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SentAs {
+    /// As one marked paste, which the agent takes whole.
+    Whole,
+    /// As typed keys, on one line.
+    Typed,
+    /// Line by line, after the user agreed.
+    LineByLine,
+}
+
+/// What a paste came to.
+#[must_use]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PasteOutcome {
+    Sent(Sent),
+    /// Nothing was left once control characters were taken out: these.
+    /// Nothing was sent.
+    OnlyControls(Vec<char>),
+    /// It has more than one line and the agent does not take a paste
+    /// whole: this question is open, and the paste is held until it is
+    /// answered.
+    Asked(Question),
 }
 
 /// A question the engine has asked and is waiting for an answer to.
@@ -55,6 +108,8 @@ pub enum Refused {
     NoSuchAgent,
     /// The agent is running, so it cannot be started again.
     AlreadyRunning,
+    /// The agent is not running, so nothing can be sent to it.
+    AgentStopped,
 }
 
 /// What an answer did.
@@ -68,6 +123,11 @@ pub enum Answered {
     Closed { label: String },
     /// Yes to closing, but the agent was already gone. Nothing was done.
     AlreadyGone,
+    /// Yes to a held paste: it was sent line by line.
+    Pasted(Sent),
+    /// Yes to a held paste, but its agent had stopped or gone. The paste
+    /// was dropped and nothing was sent.
+    PasteDropped,
 }
 
 /// A running agent that quitting would stop in the middle of something,
@@ -92,11 +152,59 @@ pub struct Engine<B: AgentBackend> {
     /// The user has decided to quit: every agent is to be stopped and the
     /// face closed.
     closing: bool,
+    /// The paste the open question is about, if it is about one.
+    held: Option<HeldPaste>,
 }
 
 impl<B: AgentBackend> Engine<B> {
     pub fn new(ws: Workspace<B>) -> Self {
-        Self { ws, question: None, asked: 0, closing: false }
+        Self { ws, question: None, asked: 0, closing: false, held: None }
+    }
+
+    /// Text pasted into an agent, with the control characters already taken
+    /// out of it (`left_out`). Its line breaks never reach the agent as
+    /// Enter presses unless the user agrees:
+    ///
+    /// - an agent that takes a paste whole gets it as one marked paste;
+    /// - otherwise it goes as typed keys, its tabs as spaces, if it is one
+    ///   line;
+    /// - and if it is more than one, it is held and a question asked.
+    pub fn paste(
+        &mut self,
+        agent: AgentKey,
+        text: String,
+        left_out: Vec<char>,
+    ) -> Result<PasteOutcome, Refused> {
+        let entry = self.ws.by_key(agent).ok_or(Refused::NoSuchAgent)?;
+        if !entry.is_running() {
+            return Err(Refused::AgentStopped);
+        }
+        if self.question.is_some() {
+            return Err(Refused::QuestionOpen);
+        }
+        if text.is_empty() && !left_out.is_empty() {
+            return Ok(PasteOutcome::OnlyControls(left_out));
+        }
+        let label = entry.label();
+        if entry.term.takes_pastes_whole() {
+            let body = text.replace('\n', "\r");
+            self.ws.send_to(agent, format!("\x1b[200~{body}\x1b[201~").as_bytes());
+            return Ok(PasteOutcome::Sent(Sent { label, left_out, tabs: false, how: SentAs::Whole }));
+        }
+        let tabs = text.contains('\t');
+        let text = text.replace('\t', TAB_AS_SPACES);
+        if text.contains('\n') {
+            self.held = Some(HeldPaste { text, left_out, tabs });
+            return Ok(PasteOutcome::Asked(self.ask(About::Paste(agent))));
+        }
+        self.ws.send_to(agent, text.as_bytes());
+        Ok(PasteOutcome::Sent(Sent { label, left_out, tabs, how: SentAs::Typed }))
+    }
+
+    /// How many lines the held paste has, while the question about it is
+    /// open.
+    pub fn held_paste_lines(&self) -> Option<usize> {
+        self.held.as_ref().map(|p| p.text.split('\n').count())
     }
 
     /// The question waiting for an answer, if any.
@@ -154,6 +262,8 @@ impl<B: AgentBackend> Engine<B> {
     pub fn answer(&mut self, id: QuestionId, yes: bool) -> Result<Answered, Refused> {
         let question = self.question.filter(|q| q.id == id).ok_or(Refused::NoSuchQuestion)?;
         self.question = None;
+        // A held paste goes with its question, whatever the answer.
+        let held = self.held.take();
         if !yes {
             return Ok(Answered::Nothing);
         }
@@ -166,6 +276,18 @@ impl<B: AgentBackend> Engine<B> {
                 Some(label) => Answered::Closed { label },
                 None => Answered::AlreadyGone,
             },
+            About::Paste(agent) => {
+                let Some(HeldPaste { text, left_out, tabs }) = held else {
+                    return Ok(Answered::PasteDropped);
+                };
+                let label = self.ws.by_key(agent).map(Entry::label);
+                match label {
+                    Some(label) if self.ws.send_to(agent, text.replace('\n', "\r").as_bytes()) => {
+                        Answered::Pasted(Sent { label, left_out, tabs, how: SentAs::LineByLine })
+                    }
+                    _ => Answered::PasteDropped,
+                }
+            }
         })
     }
 
@@ -221,19 +343,24 @@ mod tests {
     use crate::kind::AgentKind;
     use crate::status::Kind;
 
-    /// Starts anything, and keeps the ids it was asked to stop.
+    /// Starts anything, and keeps the ids it was asked to stop and what was
+    /// sent to each.
     #[derive(Default)]
     struct Fake {
         next: u32,
         stopped: std::rc::Rc<std::cell::RefCell<Vec<u32>>>,
+        sent: Sent,
     }
+
+    type Sent = std::rc::Rc<std::cell::RefCell<Vec<(u32, String)>>>;
 
     impl AgentBackend for Fake {
         fn start(&mut self, _: &AgentSpec, _: Size) -> Result<AgentId, StartError> {
             self.next += 1;
             Ok(AgentId(self.next))
         }
-        fn send(&mut self, _: AgentId, _: &[u8]) -> std::io::Result<()> {
+        fn send(&mut self, id: AgentId, bytes: &[u8]) -> std::io::Result<()> {
+            self.sent.borrow_mut().push((id.0, String::from_utf8_lossy(bytes).into_owned()));
             Ok(())
         }
         fn resize(&mut self, _: AgentId, _: Size) {}
@@ -480,5 +607,103 @@ mod tests {
         assert_eq!(e.start_again(a), Ok(false));
         assert!(!e.ws.entries()[0].is_running());
         assert_eq!(e.ws.entries()[0].key(), a);
+    }
+
+    /// Plain programs as `engine` makes them, and what is sent to them.
+    fn engine_and_sent(reports: &[&str]) -> (Engine<Fake>, Sent) {
+        let fake = Fake::default();
+        let sent = fake.sent.clone();
+        let mut ws = Workspace::new(fake, Size { rows: 24, cols: 80 });
+        for (n, body) in reports.iter().enumerate() {
+            let name = ["a", "b"][n];
+            ws.start_new(name, Vec::new(), AgentKind::Program, std::env::temp_dir().join("work")).unwrap();
+            let report = format!("\x1b]7501;{body}\x1b\\");
+            ws.handle(AgentEvent::Output(AgentId(n as u32 + 1), report.into_bytes()));
+        }
+        (Engine::new(ws), sent)
+    }
+
+    fn got(sent: &Sent) -> Vec<(u32, String)> {
+        sent.borrow().clone()
+    }
+
+    #[test]
+    fn a_paste_into_an_agent_that_takes_pastes_goes_as_one_marked_block() {
+        let (mut e, sent) = engine_and_sent(&["state=idle"]);
+        // The program asks to have pastes marked.
+        e.ws.handle(AgentEvent::Output(AgentId(1), b"\x1b[?2004h".to_vec()));
+        let a = key(&e, 0);
+        let Ok(PasteOutcome::Sent(s)) = e.paste(a, "one\ttwo\nthree".into(), vec!['\x03']) else {
+            panic!("sent")
+        };
+        assert_eq!(s.how, SentAs::Whole);
+        assert!(!s.tabs, "a tab inside the markers is text");
+        assert_eq!(s.left_out, ['\x03']);
+        assert_eq!(got(&sent), [(1, "\x1b[200~one\ttwo\rthree\x1b[201~".to_string())]);
+        assert_eq!(e.question(), None);
+    }
+
+    #[test]
+    fn one_line_goes_as_typed_keys_with_tabs_as_spaces() {
+        let (mut e, sent) = engine_and_sent(&["state=idle"]);
+        let a = key(&e, 0);
+        let Ok(PasteOutcome::Sent(s)) = e.paste(a, "a\tb".into(), vec![]) else { panic!("sent") };
+        assert_eq!((s.how, s.tabs), (SentAs::Typed, true));
+        assert_eq!(got(&sent), [(1, "a    b".to_string())], "no tab reaches the agent");
+        let Ok(PasteOutcome::Sent(s)) = e.paste(a, "plain".into(), vec![]) else { panic!("sent") };
+        assert!(!s.tabs && s.left_out.is_empty());
+    }
+
+    #[test]
+    fn several_lines_are_held_until_the_user_agrees() {
+        let (mut e, sent) = engine_and_sent(&["state=idle", "state=idle"]);
+        let b = key(&e, 1);
+        let Ok(PasteOutcome::Asked(q)) = e.paste(b, "one\ttwo\nthree".into(), vec![]) else {
+            panic!("asked")
+        };
+        assert_eq!(q.about, About::Paste(b));
+        assert_eq!(e.held_paste_lines(), Some(2));
+        assert!(got(&sent).is_empty(), "nothing is sent before the answer");
+        // One question at a time.
+        assert_eq!(e.paste(b, "x".into(), vec![]), Err(Refused::QuestionOpen));
+        assert_eq!(e.quit(), Err(Refused::QuestionOpen));
+
+        let Ok(Answered::Pasted(s)) = e.answer(q.id, true) else { panic!("pasted") };
+        assert_eq!((s.how, s.tabs), (SentAs::LineByLine, true));
+        assert_eq!(got(&sent), [(2, "one    two\rthree".to_string())], "to the agent asked about");
+        assert_eq!(e.held_paste_lines(), None);
+
+        // No: nothing is sent, and the paste is gone.
+        let Ok(PasteOutcome::Asked(q)) = e.paste(b, "x\ny".into(), vec![]) else { panic!("asked") };
+        assert_eq!(e.answer(q.id, false), Ok(Answered::Nothing));
+        assert_eq!(e.held_paste_lines(), None);
+        assert_eq!(got(&sent).len(), 1);
+    }
+
+    #[test]
+    fn a_held_paste_is_dropped_if_its_agent_stops_before_the_answer() {
+        let (mut e, sent) = engine_and_sent(&["state=idle"]);
+        let a = key(&e, 0);
+        let Ok(PasteOutcome::Asked(q)) = e.paste(a, "x\ny".into(), vec![]) else { panic!("asked") };
+        e.ws.handle(AgentEvent::Exited(AgentId(1), crate::agent::Exit { code: 0 }));
+        assert_eq!(e.answer(q.id, true), Ok(Answered::PasteDropped));
+        assert!(got(&sent).is_empty());
+    }
+
+    #[test]
+    fn a_paste_is_refused_for_an_agent_that_is_stopped_or_gone() {
+        let (mut e, sent) = engine_and_sent(&["state=idle"]);
+        let a = key(&e, 0);
+        assert_eq!(
+            e.paste(a, String::new(), vec!['\x03', '\x04']),
+            Ok(PasteOutcome::OnlyControls(vec!['\x03', '\x04']))
+        );
+        assert!(got(&sent).is_empty(), "only control characters: nothing sent");
+        e.ws.handle(AgentEvent::Exited(AgentId(1), crate::agent::Exit { code: 0 }));
+        assert_eq!(e.paste(a, "x".into(), vec![]), Err(Refused::AgentStopped));
+        let Ok(Outcome::Asked(q)) = e.close(a) else { panic!("asked") };
+        e.answer(q.id, true).unwrap();
+        assert_eq!(e.paste(a, "x".into(), vec![]), Err(Refused::NoSuchAgent));
+        assert!(got(&sent).is_empty());
     }
 }

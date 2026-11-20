@@ -851,14 +851,21 @@ impl<B: AgentBackend> Workspace<B> {
     /// is not running. The view returns to the present, so the user sees
     /// where their typing lands.
     pub fn send_to_focused(&mut self, bytes: &[u8]) {
-        if let Some(entry) = self.entries.get_mut(self.focused) {
-            if let (Some(id), Status::Running) = (entry.id, &entry.status) {
-                entry.term.scroll_to_live();
-                // Once the user is using it, the resume worked.
-                entry.resuming_since = None;
-                let _ = self.backend.send(id, bytes);
-            }
+        if let Some(key) = self.focused().map(Entry::key) {
+            self.send_to(key, bytes);
         }
+    }
+
+    /// Send to the agent with this key, as `send_to_focused` does. False if
+    /// it is gone or not running, and nothing was sent.
+    pub fn send_to(&mut self, key: AgentKey, bytes: &[u8]) -> bool {
+        let Some(entry) = self.entries.iter_mut().find(|e| e.key == key) else { return false };
+        let (Some(id), Status::Running) = (entry.id, &entry.status) else { return false };
+        entry.term.scroll_to_live();
+        // Once the user is using it, the resume worked.
+        entry.resuming_since = None;
+        let _ = self.backend.send(id, bytes);
+        true
     }
 
     pub fn resize(&mut self, size: Size) {
