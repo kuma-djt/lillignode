@@ -167,14 +167,16 @@ fn named(u: &Unfinished) -> String {
 
 /// The line for options that cannot be started, longest first. What is said
 /// after the reason's first sentence goes first (another way out, which
-/// `k` offers too), then what the keys do, then the opening words. What to
-/// take out and why are kept to the last.
-fn refusal_tries(why: &str) -> [String; 4] {
+/// `k` offers too), then what the keys do is cut to one word each, then the
+/// opening words go. The keys are left bare only when even one word each
+/// does not fit. What to take out and why are kept to the last.
+fn refusal_tries(why: &str) -> [String; 5] {
     let first = why.split_once(". ").map_or(why, |(first, _)| first);
     [
         format!("Cannot start it as typed. n: change it, k: another kind, Esc: cancel   {why}."),
         format!("Cannot start it as typed. n: change it, k: another kind, Esc: cancel   {first}."),
-        format!("Cannot start it as typed. n / k / Esc   {first}."),
+        format!("Cannot start it as typed. n change, k kind, Esc cancel   {first}."),
+        format!("n change, k kind, Esc cancel   {first}."),
         format!("n / k / Esc   {first}."),
     ]
 }
@@ -4145,10 +4147,7 @@ Cost",
             let bar = app.bar();
             assert!(bar.contains(reason), "{width}: {bar}");
             // The keys come first at every width.
-            assert!(
-                bar.starts_with("Cannot start it as typed. n") || bar.starts_with("n / k / Esc"),
-                "{bar}"
-            );
+            assert!(bar.starts_with("Cannot start it as typed. n") || bar.starts_with("n "), "{bar}");
             if width >= 95 {
                 assert!(bar.chars().count() <= width as usize, "{width}: {bar}");
             }
@@ -4160,6 +4159,29 @@ Cost",
                 assert!(bar.ends_with("Or start it as a plain program."), "{bar}");
             }
         }
+    }
+
+    #[test]
+    fn a_refusal_names_what_its_keys_do_in_a_word_each_wherever_that_fits() {
+        let reason = "Take out --resume: Lillignode gives Claude Code its conversation itself.";
+        let at = |width| {
+            let mut app = app_with_claude_agents(0);
+            app.set_window(Rect::new(0, 0, width, 30));
+            answer_form(&mut app, &["claude", "--resume abc", ""]);
+            app.bar()
+        };
+        let long = "Cannot start it as typed. n: change it, k: another kind, Esc: cancel   ";
+        assert_eq!(at(143), format!("{long}{reason}"));
+        // One column less: a word for each key, and the opening words stay.
+        let worded = "n change, k kind, Esc cancel   ";
+        assert_eq!(at(142), format!("Cannot start it as typed. {worded}{reason}"));
+        assert_eq!(at(129), format!("Cannot start it as typed. {worded}{reason}"));
+        // Then the opening words go, and the keys keep their words.
+        assert_eq!(at(128), format!("{worded}{reason}"));
+        assert_eq!(at(103), format!("{worded}{reason}"));
+        // Bare keys only when even a word each does not fit.
+        assert_eq!(at(102), format!("n / k / Esc   {reason}"));
+        assert_eq!(at(95), format!("n / k / Esc   {reason}"));
     }
 
     #[test]
