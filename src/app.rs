@@ -15,7 +15,8 @@ use crate::agent::{AgentBackend, AgentEvent, Size, StartError};
 use crate::config::{Billing, Config};
 use crate::cost::{self, Cost, Usage, Waiting, WhyNot};
 use crate::engine::{
-    About, Answered, Engine, Outcome, PasteOutcome, QuestionId, Refused, Sent, SentAs, Unfinished,
+    About, Answered, Engine, Outcome, PasteOutcome, QuestionId, Refused, Room, RoomChange, Sent, SentAs,
+    Unfinished, ViewOutcome, Viewed,
 };
 use crate::input::Pasted;
 use crate::keys;
@@ -25,7 +26,7 @@ use crate::state::{self, LoadOutcome};
 use crate::status::{self, AgentStatus, Reading};
 use crate::terminal::HISTORY_ROWS;
 use crate::ui;
-use crate::workspace::{split_options, Entry, Happened, NoPair, RestoreReport, Status, Workspace};
+use crate::workspace::{split_options, Entry, Happened, RestoreReport, Status, Workspace};
 
 pub const DEFAULT_COMMAND: &str = "claude";
 const AGENT_PROMPT: &str = "Agent to start: ";
@@ -197,9 +198,10 @@ pub enum Confirm {
     /// that would take each line as a separate Enter, by its id. The
     /// engine holds the paste.
     Paste(QuestionId),
-    /// Changing between one agent on screen and two, while an agent is
-    /// waiting for the user: every agent is told a new size and redraws.
-    View,
+    /// The engine's question about changing between one agent on screen
+    /// and two while an agent is waiting for the user, by its id: every
+    /// agent is told a new size and redraws.
+    View(QuestionId),
     /// Stop showing the waiting parts of the agent in front. Asked from
     /// its status report.
     Parts,
@@ -257,6 +259,10 @@ pub struct App<B: AgentBackend> {
     /// `lillignode.exe`, so Claude Code's status cannot get through.
     pub newer_pty_missing: bool,
 }
+
+/// Said when the view cannot change because no agent can be shown at all.
+const TOO_SMALL_FOR_VIEW: &str =
+    "This window is too small to show agents at all, so the view was not changed. Make it bigger first.";
 
 /// Said after a paste whose tabs became spaces.
 const TABS_SAID: &str = " Its tabs were sent as spaces, so none was taken as a press of Tab.";
@@ -588,7 +594,13 @@ impl<B: AgentBackend> App<B> {
                             }
                             Ok(Answered::Nothing) => {}
                             // An answer about closing never quits or pastes.
-                            Ok(Answered::Closing | Answered::Pasted(_) | Answered::PasteDropped) => {
+                            Ok(
+                                Answered::Closing
+                                | Answered::Pasted(_)
+                                | Answered::PasteDropped
+                                | Answered::Viewed(_)
+                                | Answered::ViewRefused(_),
+                            ) => {
                                 unreachable!("an answer about closing did something else")
                             }
                             Err(why) => self.refuse(self.refusal(why, "")),
@@ -599,7 +611,6 @@ impl<B: AgentBackend> App<B> {
                             self.refuse(self.refusal(why, ""));
                         }
                     }
-                    Confirm::View if yes => self.change_view(),
                     Confirm::Parts => {
                         let label = self.focused_label();
                         let dismissed = match (yes, self.engine.ws.focused_mut()) {
@@ -616,9 +627,15 @@ impl<B: AgentBackend> App<B> {
                             ),
                         });
                     }
-                    Confirm::View => {
-                        self.notice = Some("The view was left as it was. No agent was resized.".to_string());
-                    }
+                    Confirm::View(id) => match self.engine.answer(id, yes) {
+                        Ok(Answered::Viewed(viewed)) => self.viewed(viewed),
+                        Ok(Answered::ViewRefused(why)) => self.refuse(self.view_refusal(why)),
+                        Ok(_) => {
+                            self.notice =
+                                Some("The view was left as it was. No agent was resized.".to_string())
+                        }
+                        Err(why) => self.refuse(self.refusal(why, "")),
+                    },
                     Confirm::Paste(id) => match self.engine.answer(id, yes) {
                         Ok(Answered::Pasted(sent)) => self.notice = Some(pasted_sentence(&sent)),
                         // No, or its agent stopped while the question was up.
@@ -758,23 +775,18 @@ impl<B: AgentBackend> App<B> {
             // redraws. While one is waiting for an answer, that is asked
             // about first. A change that would be refused anyway is refused
             // at once, without a question.
-            Action::ShowOne if !self.two_shown() => {
-                // Two were asked for and the window has no room, so one is
-                // on screen already. Nothing is resized: this only stops two
-                // coming back when the window is widened.
-                self.engine.ws.show_one();
-                self.notice = Some(
-                    "One agent on screen. Two side by side will not come back when the window is widened. No agent was resized."
-                        .to_string(),
-                );
+            Action::ShowOne => {
+                let outcome = self.engine.show_one();
+                self.view_outcome(outcome);
             }
-            Action::ShowOne | Action::ShowTwo => {
-                let would_change = self.engine.ws.pair().is_some() || self.can_show_two().is_ok();
-                if would_change && self.needs_you_count() > 0 {
-                    self.mode = Mode::Confirm(Confirm::View);
-                } else {
-                    self.change_view();
-                }
+            // A window too small to show agents at all is the face's to know
+            // and to say; every other rule is the engine's.
+            Action::ShowTwo if self.too_small || ui::areas(self.window).is_none() => {
+                self.refuse(TOO_SMALL_FOR_VIEW.to_string());
+            }
+            Action::ShowTwo => {
+                let outcome = self.engine.show_two();
+                self.view_outcome(outcome);
             }
             // The engine decides whether to ask; the face shows its question.
             Action::Quit => match self.engine.quit() {
@@ -901,7 +913,7 @@ impl<B: AgentBackend> App<B> {
         let mut said = format!("Closed {label} and removed it from your workspace.");
         if two_before && self.engine.ws.pair().is_none() {
             // Fewer than two agents are left to show side by side.
-            self.apply_size();
+            self.engine.fit_agents();
             if let Some(left) = self.engine.ws.focused() {
                 said += &format!(" {} has the whole screen again.", left.label());
             }
@@ -915,7 +927,7 @@ impl<B: AgentBackend> App<B> {
     fn close_subject(&self, id: QuestionId) -> Option<&Entry> {
         let subject = self.engine.question().filter(|q| q.id == id).and_then(|q| match q.about {
             About::Close(agent) => self.engine.ws.by_key(agent),
-            About::Quit | About::Paste(_) => None,
+            About::Quit | About::Paste(_) | About::View { .. } => None,
         });
         debug_assert!(subject.is_some(), "the face shows the engine's question, never one of its own");
         subject
@@ -944,74 +956,81 @@ impl<B: AgentBackend> App<B> {
                 format!("{label} is already running, so it was not started again. Nothing was changed.")
             }
             Refused::AgentStopped => format!("{label} is not running, so nothing was sent to it."),
+            Refused::TooFewAgents(_) | Refused::TwoDoNotFit => self.view_refusal(why),
         }
     }
 
-    /// Tell Lillignode the size of its window. Agents are given the size
-    /// that fits: the whole agent area, or half of it each when two are
-    /// side by side and there is room.
+    /// Tell Lillignode the size of its window. The engine is told the room
+    /// agents have: the whole agent area, or half of it each when two fit
+    /// side by side. It decides what size agents are given.
     pub fn set_window(&mut self, window: Rect) {
-        let two_before = self.two_shown();
         let menu = self.config.menu_keys.first().map(|k| k.label()).unwrap_or_default();
         self.window = window;
-        self.apply_size();
-        let Some(pair) = self.engine.ws.pair() else { return };
-        if two_before && !self.two_shown() {
+        let room = Room {
+            one: ui::agent_size(window, false),
+            two: ui::fits_two(window).then(|| ui::agent_size(window, true)),
+        };
+        let Some(pair) = self.engine.ws.pair() else {
+            let _ = self.engine.set_room(room);
+            return;
+        };
+        match self.engine.set_room(room) {
             // The user asked for two and still wants them: say why only
             // one is on screen, that the other was left alone, and the way
             // to stay with one.
-            let other =
-                if self.engine.ws.focused_index() == Some(pair.left) { pair.right } else { pair.left };
-            let other = self.engine.ws.entries().get(other).map(Entry::label).unwrap_or_default();
-            self.notice = Some(format!(
-                "Too narrow for two agents now, so only {} is shown. {other} was not stopped or closed. \
-                 Widen to {} columns for both, or {menu} then v to stay with one.",
-                self.focused_label(),
-                ui::TWO_MIN_COLS
-            ));
-        } else if !two_before && self.two_shown() {
+            RoomChange::TwoGone => {
+                let other =
+                    if self.engine.ws.focused_index() == Some(pair.left) { pair.right } else { pair.left };
+                let other = self.engine.ws.entries().get(other).map(Entry::label).unwrap_or_default();
+                self.notice = Some(format!(
+                    "Too narrow for two agents now, so only {} is shown. {other} was not stopped or closed. \
+                     Widen to {} columns for both, or {menu} then v to stay with one.",
+                    self.focused_label(),
+                    ui::TWO_MIN_COLS
+                ));
+            }
             // Where typing goes is said by the headings and the bottom bar,
             // which follow every change. A notice stays up after it is true.
-            self.notice = Some("There is room again: two agents are side by side.".to_string());
+            RoomChange::TwoBack => {
+                self.notice = Some("There is room again: two agents are side by side.".to_string());
+            }
+            RoomChange::Same => {}
         }
     }
 
     /// True while two agents are side by side on screen: the user asked
     /// for two and the window has room.
     pub fn two_shown(&self) -> bool {
-        self.engine.ws.pair().is_some() && ui::fits_two(self.window)
-    }
-
-    fn apply_size(&mut self) {
-        self.engine.ws.resize(ui::agent_size(self.window, self.engine.ws.pair().is_some()));
+        self.engine.two_shown()
     }
 
     /// Why two agents cannot be put side by side right now, said in full.
     fn can_show_two(&self) -> Result<(), String> {
-        let menu = self.config.menu_keys.first().map(|k| k.label()).unwrap_or_default();
         if self.too_small || ui::areas(self.window).is_none() {
-            return Err("This window is too small to show agents at all, so the view was not changed. Make \
-                        it bigger first."
-                .to_string());
+            return Err(TOO_SMALL_FOR_VIEW.to_string());
         }
-        if !ui::fits_two(self.window) {
-            return Err(format!(
+        self.engine.can_show_two().map_err(|why| self.view_refusal(why))
+    }
+
+    /// Why the view was not changed, in full. Each says nothing was changed.
+    fn view_refusal(&self, why: Refused) -> String {
+        let menu = self.config.menu_keys.first().map(|k| k.label()).unwrap_or_default();
+        match why {
+            Refused::TwoDoNotFit => format!(
                 "This window is too narrow for two agents side by side: it is {} columns wide and that \
                  takes {}. Nothing was changed. Widen the window, then {menu} then v.",
                 self.window.width,
                 ui::TWO_MIN_COLS
-            ));
-        }
-        match self.engine.ws.entries().len() {
-            0 => Err(format!(
+            ),
+            Refused::TooFewAgents(0) => format!(
                 "Two agents side by side takes two agents, and none is open. Nothing was changed. {menu} \
                  then n starts one."
-            )),
-            1 => Err(format!(
+            ),
+            Refused::TooFewAgents(_) => format!(
                 "Two agents side by side takes two agents, and one is open. Nothing was changed. {menu} \
                  then n starts another."
-            )),
-            _ => Ok(()),
+            ),
+            other => self.refusal(other, ""),
         }
     }
 
@@ -1022,41 +1041,40 @@ impl<B: AgentBackend> App<B> {
         self.notice = Some(why);
     }
 
-    /// Change between one agent on screen and two side by side. Refused,
-    /// with the reason and nothing changed, when two cannot be shown.
-    fn change_view(&mut self) {
+    /// Show what became of a request to change the view.
+    fn view_outcome(&mut self, outcome: Result<ViewOutcome, Refused>) {
+        match outcome {
+            Ok(ViewOutcome::Done(viewed)) => self.viewed(viewed),
+            Ok(ViewOutcome::Asked(q)) => self.mode = Mode::Confirm(Confirm::View(q.id)),
+            Err(why) => self.refuse(self.view_refusal(why)),
+        }
+    }
+
+    /// Say what a change of view did.
+    fn viewed(&mut self, viewed: Viewed) {
         let menu = self.config.menu_keys.first().map(|k| k.label()).unwrap_or_default();
-        if self.engine.ws.pair().is_some() {
-            self.engine.ws.show_one();
-            self.apply_size();
-            self.notice = Some(format!(
-                "One agent on screen: {}. Every agent was told its new size.",
-                self.focused_label()
-            ));
-            return;
-        }
-        if let Err(why) = self.can_show_two() {
-            self.refuse(why);
-            return;
-        }
-        match self.engine.ws.show_two() {
-            Ok(pair) => {
-                self.apply_size();
+        self.notice = Some(match viewed {
+            Viewed::One => {
+                format!("One agent on screen: {}. Every agent was told its new size.", self.focused_label())
+            }
+            // Two were asked for and the window has no room, so one is on
+            // screen already. Nothing is resized: this only stops two
+            // coming back when the window is widened.
+            Viewed::OneKept => "One agent on screen. Two side by side will not come back when the window is \
+                                widened. No agent was resized."
+                .to_string(),
+            Viewed::Two(pair) => {
                 let label = |i: usize| self.engine.ws.entries().get(i).map(Entry::label).unwrap_or_default();
-                self.notice = Some(format!(
+                format!(
                     // Not where typing goes: that changes with Tab, and a
                     // notice stays up. The headings and the bar say it.
                     "{} and {} are side by side. Every agent was told its new size. If one draws badly, \
                      {menu} then v goes back to one.",
                     label(pair.left),
                     label(pair.right)
-                ));
+                )
             }
-            // Checked above; said again here so it can never pass silently.
-            Err(NoPair::TooFewAgents(_)) => {
-                self.notice = Some("Two agents side by side takes two agents. Nothing was changed.".into());
-            }
-        }
+        });
     }
 
     /// With two agents side by side: which side typing goes to.
@@ -1353,7 +1371,9 @@ impl<B: AgentBackend> App<B> {
                     self.focused_label()
                 )
             }
-            Mode::Confirm(Confirm::View) => {
+            Mode::Confirm(Confirm::View(id)) => {
+                // The face shows the engine's question, never one of its own.
+                debug_assert_eq!(self.engine.question().map(|q| q.id), Some(*id));
                 let waiting: Vec<String> = self
                     .engine
                     .ws
@@ -4418,7 +4438,7 @@ Cost",
         report(&mut app, 1, PERMISSION);
         app.on_key(press(KeyCode::F(12)));
         app.on_key(press(KeyCode::Char('v')));
-        assert!(matches!(app.mode, Mode::Confirm(Confirm::View)));
+        assert!(matches!(app.mode, Mode::Confirm(Confirm::View(_))));
         let narrow = app.bar().chars().take(usize::from(crate::ui::MIN_COLS)).collect::<String>();
         assert!(
             narrow.starts_with("Resize every agent now? y / n   Waiting for you: Claude Code (a)."),
@@ -4440,7 +4460,7 @@ Cost",
         // Going back is asked about too: it is the same resize.
         app.on_key(press(KeyCode::F(12)));
         app.on_key(press(KeyCode::Char('v')));
-        assert!(matches!(app.mode, Mode::Confirm(Confirm::View)));
+        assert!(matches!(app.mode, Mode::Confirm(Confirm::View(_))));
         app.on_key(press(KeyCode::Char('y')));
         assert_eq!((app.engine.ws.pair(), app.engine.ws.size()), (None, whole));
 

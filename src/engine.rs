@@ -4,11 +4,13 @@
 //!
 //! The rules are moving here from the terminal face (`app.rs`) one at a
 //! time; until each has moved, the face still holds it. Quitting, closing
-//! an agent and starting one again have moved.
+//! an agent, starting one again, the paste rule and the rules of the view
+//! (one agent on screen or two, and what size each is given) have moved.
 
 use crate::agent::AgentBackend;
+use crate::agent::Size;
 use crate::status::AgentStatus;
-use crate::workspace::{AgentKey, Entry, Workspace};
+use crate::workspace::{AgentKey, Entry, NoPair, Pair, Workspace};
 
 /// Names one question the engine asked. An answer carries it, so a "yes"
 /// is never applied to a question the asker did not see.
@@ -27,6 +29,52 @@ pub enum About {
     /// paste as one block, so each line is entered as if Enter were
     /// pressed after it. How many lines it has is `Engine::held_paste_lines`.
     Paste(AgentKey),
+    /// Change the view, to two side by side (`two`) or to one, although an
+    /// agent is waiting for the user: every agent is told a new size and
+    /// redraws.
+    View { two: bool },
+}
+
+/// The room agents have, as the face measures it. The engine does not know
+/// widths; it is told the size each agent gets with one on screen, and with
+/// two side by side, or that two do not fit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Room {
+    pub one: Size,
+    /// None: two do not fit.
+    pub two: Option<Size>,
+}
+
+/// What a change of view did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Viewed {
+    /// One agent on screen. Every agent was told its new size.
+    One,
+    /// Two were asked for but did not fit, so one was on screen already.
+    /// Now two will not come back when there is room. Nothing was resized.
+    OneKept,
+    /// These two are side by side. Every agent was told its new size.
+    Two(Pair),
+}
+
+/// What a request to change the view came to.
+#[must_use]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ViewOutcome {
+    Done(Viewed),
+    /// An agent is waiting for the user: this question is open first.
+    Asked(Question),
+}
+
+/// What new room did to the view.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RoomChange {
+    Same,
+    /// Two were side by side and no longer fit: only the one in front is
+    /// shown. The other was not stopped or closed.
+    TwoGone,
+    /// Two were asked for and now fit again: they are side by side.
+    TwoBack,
 }
 
 /// What a tab becomes in a paste sent as typed keys, so none is taken as a
@@ -110,6 +158,10 @@ pub enum Refused {
     AlreadyRunning,
     /// The agent is not running, so nothing can be sent to it.
     AgentStopped,
+    /// Two side by side takes two agents; this many are open.
+    TooFewAgents(usize),
+    /// The face said two do not fit.
+    TwoDoNotFit,
 }
 
 /// What an answer did.
@@ -128,6 +180,11 @@ pub enum Answered {
     /// Yes to a held paste, but its agent had stopped or gone. The paste
     /// was dropped and nothing was sent.
     PasteDropped,
+    /// Yes to changing the view: it changed.
+    Viewed(Viewed),
+    /// Yes to changing the view, but by then it could not be changed.
+    /// Nothing was changed.
+    ViewRefused(Refused),
 }
 
 /// A running agent that quitting would stop in the middle of something,
@@ -154,11 +211,103 @@ pub struct Engine<B: AgentBackend> {
     closing: bool,
     /// The paste the open question is about, if it is about one.
     held: Option<HeldPaste>,
+    /// The room agents have, as last told by the face.
+    room: Room,
 }
 
 impl<B: AgentBackend> Engine<B> {
+    /// The workspace's agents keep the size they have until the face tells
+    /// the engine the room (`set_room`).
     pub fn new(ws: Workspace<B>) -> Self {
-        Self { ws, question: None, asked: 0, closing: false, held: None }
+        let room = Room { one: ws.size(), two: None };
+        Self { ws, question: None, asked: 0, closing: false, held: None, room }
+    }
+
+    /// The face's measure of the room agents have. Agents are given the
+    /// size that fits: one agent's, or two's when two are asked for and fit.
+    /// Says whether that took two off the screen or put them back.
+    pub fn set_room(&mut self, room: Room) -> RoomChange {
+        let before = self.two_shown();
+        self.room = room;
+        self.fit_agents();
+        match (before, self.two_shown()) {
+            (true, false) => RoomChange::TwoGone,
+            (false, true) => RoomChange::TwoBack,
+            _ => RoomChange::Same,
+        }
+    }
+
+    /// True while two agents are side by side: two were asked for and fit.
+    pub fn two_shown(&self) -> bool {
+        self.ws.pair().is_some() && self.room.two.is_some()
+    }
+
+    /// Two agents side by side: the one in front and the next. Refused
+    /// when two do not fit, then when fewer than two are open; asked first
+    /// while an agent is waiting for the user.
+    pub fn show_two(&mut self) -> Result<ViewOutcome, Refused> {
+        if let Some(open) = self.open_question(About::View { two: true })? {
+            return Ok(ViewOutcome::Asked(open));
+        }
+        self.can_show_two()?;
+        if self.anyone_needs_you() {
+            return Ok(ViewOutcome::Asked(self.ask(About::View { two: true })));
+        }
+        self.do_show_two().map(ViewOutcome::Done)
+    }
+
+    /// One agent on screen. When two were asked for but did not fit, one
+    /// is on screen already: nothing is resized and nothing is asked.
+    /// Otherwise asked first while an agent is waiting for the user.
+    pub fn show_one(&mut self) -> Result<ViewOutcome, Refused> {
+        if let Some(open) = self.open_question(About::View { two: false })? {
+            return Ok(ViewOutcome::Asked(open));
+        }
+        if !self.two_shown() {
+            self.ws.show_one();
+            return Ok(ViewOutcome::Done(Viewed::OneKept));
+        }
+        if self.anyone_needs_you() {
+            return Ok(ViewOutcome::Asked(self.ask(About::View { two: false })));
+        }
+        Ok(ViewOutcome::Done(self.do_show_one()))
+    }
+
+    /// Tell every agent the size for the view as it is now. Called after
+    /// anything that may have changed the view, such as closing one of two.
+    pub fn fit_agents(&mut self) {
+        let size = match self.room.two {
+            Some(two) if self.ws.pair().is_some() => two,
+            _ => self.room.one,
+        };
+        self.ws.resize(size);
+    }
+
+    pub fn can_show_two(&self) -> Result<(), Refused> {
+        if self.room.two.is_none() {
+            return Err(Refused::TwoDoNotFit);
+        }
+        match self.ws.entries().len() {
+            n if n < 2 => Err(Refused::TooFewAgents(n)),
+            _ => Ok(()),
+        }
+    }
+
+    fn do_show_two(&mut self) -> Result<Viewed, Refused> {
+        self.can_show_two()?;
+        let pair = self.ws.show_two().map_err(|NoPair::TooFewAgents(n)| Refused::TooFewAgents(n))?;
+        self.fit_agents();
+        Ok(Viewed::Two(pair))
+    }
+
+    fn do_show_one(&mut self) -> Viewed {
+        self.ws.show_one();
+        self.fit_agents();
+        Viewed::One
+    }
+
+    fn anyone_needs_you(&self) -> bool {
+        self.ws.entries().iter().any(|e| e.needs_you().is_some())
     }
 
     /// Text pasted into an agent, with the control characters already taken
@@ -288,6 +437,12 @@ impl<B: AgentBackend> Engine<B> {
                     _ => Answered::PasteDropped,
                 }
             }
+            // Checked again: the room may have changed while it was asked.
+            About::View { two: true } => match self.do_show_two() {
+                Ok(viewed) => Answered::Viewed(viewed),
+                Err(why) => Answered::ViewRefused(why),
+            },
+            About::View { two: false } => Answered::Viewed(self.do_show_one()),
         })
     }
 
@@ -705,5 +860,102 @@ mod tests {
         e.answer(q.id, true).unwrap();
         assert_eq!(e.paste(a, "x".into(), vec![]), Err(Refused::NoSuchAgent));
         assert!(got(&sent).is_empty());
+    }
+
+    const ONE: Size = Size { rows: 30, cols: 120 };
+    const TWO: Size = Size { rows: 29, cols: 59 };
+    const WIDE: Room = Room { one: ONE, two: Some(TWO) };
+    const NARROW: Room = Room { one: Size { rows: 30, cols: 80 }, two: None };
+
+    #[test]
+    fn the_room_decides_the_size_and_two_only_where_they_fit() {
+        let mut e = engine(&["state=idle", "state=idle"]);
+        assert_eq!(e.set_room(WIDE), RoomChange::Same);
+        assert_eq!(e.ws.size(), ONE);
+        assert_eq!(e.show_two(), Ok(ViewOutcome::Done(Viewed::Two(Pair { left: 1, right: 0 }))));
+        assert!(e.two_shown());
+        assert_eq!(e.ws.size(), TWO, "every agent is told the size for two");
+
+        // Narrowed: one shown, at one's size; the pair is kept.
+        assert_eq!(e.set_room(NARROW), RoomChange::TwoGone);
+        assert!(!e.two_shown() && e.ws.pair().is_some());
+        assert_eq!(e.ws.size(), NARROW.one);
+        // Widened again: two are back.
+        assert_eq!(e.set_room(WIDE), RoomChange::TwoBack);
+        assert_eq!(e.ws.size(), TWO);
+
+        assert_eq!(e.show_one(), Ok(ViewOutcome::Done(Viewed::One)));
+        assert_eq!(e.ws.size(), ONE);
+        assert_eq!(e.set_room(NARROW), RoomChange::Same);
+        assert_eq!(e.set_room(WIDE), RoomChange::Same, "one asked for: two do not come back");
+    }
+
+    #[test]
+    fn two_are_refused_where_they_do_not_fit_then_where_there_are_too_few() {
+        let mut e = engine(&["state=idle"]);
+        e.set_room(NARROW);
+        assert_eq!(e.show_two(), Err(Refused::TwoDoNotFit), "not fitting is said first");
+        e.set_room(WIDE);
+        assert_eq!(e.show_two(), Err(Refused::TooFewAgents(1)));
+        assert_eq!(engine(&[]).show_two(), Err(Refused::TwoDoNotFit), "no room told yet: two do not fit");
+        let mut none = engine(&[]);
+        none.set_room(WIDE);
+        assert_eq!(none.show_two(), Err(Refused::TooFewAgents(0)));
+        assert_eq!(e.ws.size(), ONE, "nothing was resized");
+        assert_eq!(e.question(), None);
+    }
+
+    #[test]
+    fn one_when_two_did_not_fit_is_kept_without_a_resize_or_a_question() {
+        let mut e = engine(&["state=blocked", "state=idle"]);
+        e.set_room(WIDE);
+        let Ok(ViewOutcome::Asked(q)) = e.show_two() else { panic!("asked: an agent needs you") };
+        assert_eq!(e.answer(q.id, true), Ok(Answered::Viewed(Viewed::Two(Pair { left: 1, right: 0 }))));
+        e.set_room(NARROW);
+        // Someone still needs you, but nothing would be resized: no question.
+        assert_eq!(e.show_one(), Ok(ViewOutcome::Done(Viewed::OneKept)));
+        assert_eq!(e.ws.pair(), None);
+        assert_eq!(e.ws.size(), NARROW.one);
+    }
+
+    #[test]
+    fn a_change_of_view_is_asked_about_while_an_agent_needs_you() {
+        let mut e = engine(&["state=idle", "state=blocked:kind=permission"]);
+        e.set_room(WIDE);
+        let Ok(ViewOutcome::Asked(q)) = e.show_two() else { panic!("asked") };
+        assert_eq!(q.about, About::View { two: true });
+        assert_eq!(e.ws.pair(), None, "nothing changes before the answer");
+        assert_eq!(e.ws.size(), ONE);
+        assert_eq!(e.show_two(), Ok(ViewOutcome::Asked(q)), "asked again: the same question");
+        assert_eq!(e.quit(), Err(Refused::QuestionOpen));
+        assert_eq!(e.answer(q.id, false), Ok(Answered::Nothing));
+        assert_eq!(e.ws.pair(), None);
+
+        // Yes, but the window narrowed while it was asked: refused then.
+        let Ok(ViewOutcome::Asked(q)) = e.show_two() else { panic!("asked") };
+        e.set_room(NARROW);
+        assert_eq!(e.answer(q.id, true), Ok(Answered::ViewRefused(Refused::TwoDoNotFit)));
+        assert_eq!(e.ws.pair(), None);
+
+        // Back to one is asked about too.
+        e.set_room(WIDE);
+        let Ok(ViewOutcome::Asked(q)) = e.show_two() else { panic!("asked") };
+        e.answer(q.id, true).unwrap();
+        let Ok(ViewOutcome::Asked(q)) = e.show_one() else { panic!("asked") };
+        assert_eq!(q.about, About::View { two: false });
+        assert_eq!(e.answer(q.id, true), Ok(Answered::Viewed(Viewed::One)));
+        assert_eq!(e.ws.size(), ONE);
+    }
+
+    #[test]
+    fn closing_one_of_two_gives_the_other_the_size_for_one() {
+        let mut e = engine(&["state=idle", "state=idle"]);
+        e.set_room(WIDE);
+        let _ = e.show_two();
+        let Ok(Outcome::Asked(q)) = e.close(key(&e, 1)) else { panic!("asked") };
+        e.answer(q.id, true).unwrap();
+        assert_eq!(e.ws.pair(), None);
+        e.fit_agents();
+        assert_eq!(e.ws.size(), ONE);
     }
 }
