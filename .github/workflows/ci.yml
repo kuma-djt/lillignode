@@ -8,8 +8,8 @@
 # and refuses them unless both hashes match and both are signed by
 # Microsoft (docs/packaging-windows.md).
 #
-# The macOS runner is Apple Silicon. Its release build is kept as a
-# download of the run, packed as a .tar.gz so the program keeps its
+# macOS runs twice, on Apple Silicon and on Intel. Each release build is
+# kept as a download of the run, packed as a .tar.gz so the program keeps its
 # permission to run, for anyone who wants to try it: it is not a release,
 # is not signed, and has not been run by a person.
 #
@@ -38,7 +38,7 @@ jobs:
       # One system failing must not hide what the others do.
       fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-latest, macos-latest]
+        os: [windows-latest, ubuntu-latest, macos-latest, macos-15-intel]
     steps:
       # Pinned to a commit, not a tag, so the code that runs cannot change
       # under the same name. This is actions/checkout v4.4.0.
@@ -72,14 +72,32 @@ jobs:
       # of a run does not.
       - name: Pack the macOS build
         if: runner.os == 'macOS' && !cancelled()
-        run: tar -czf lillignode-macos-arm64-untested.tar.gz -C target/release lillignode -C "$GITHUB_WORKSPACE" LICENSE README.md
+        run: tar -czf "lillignode-macos-$MAC_ARCH-untested.tar.gz" -C target/release lillignode -C "$GITHUB_WORKSPACE" LICENSE README.md
+        env:
+          MAC_ARCH: ${{ runner.arch == 'ARM64' && 'arm64' || 'x64' }}
+      # Unpacks the file just packed into an empty folder and starts the
+      # program from there, as someone who downloaded it would. Prints what
+      # kind of program it is, how it is signed, and the file's SHA-256.
+      - name: Try the packed macOS build
+        if: runner.os == 'macOS' && !cancelled()
+        run: |
+          shasum -a 256 "lillignode-macos-$MAC_ARCH-untested.tar.gz"
+          mkdir "$RUNNER_TEMP/try" "$RUNNER_TEMP/state" "$RUNNER_TEMP/cc"
+          tar -xzf "lillignode-macos-$MAC_ARCH-untested.tar.gz" -C "$RUNNER_TEMP/try"
+          cd "$RUNNER_TEMP/try"
+          ls -l
+          file lillignode
+          codesign -dv lillignode 2>&1 || true
+          LILLIGNODE_STATE_DIR="$RUNNER_TEMP/state" CLAUDE_CONFIG_DIR="$RUNNER_TEMP/cc" ./lillignode --version
+        env:
+          MAC_ARCH: ${{ runner.arch == 'ARM64' && 'arm64' || 'x64' }}
       # Kept whether or not the checks above passed, so a build that fails
       # a check can still be looked at. This is actions/upload-artifact v7.0.2.
       - name: Keep the macOS build
         if: runner.os == 'macOS' && !cancelled()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: lillignode-macos-arm64-untested
-          path: lillignode-macos-arm64-untested.tar.gz
+          name: lillignode-macos-${{ runner.arch == 'ARM64' && 'arm64' || 'x64' }}-untested
+          path: lillignode-macos-*-untested.tar.gz
           if-no-files-found: error
           retention-days: 30
