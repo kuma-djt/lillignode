@@ -14,6 +14,7 @@ use crate::action::Action;
 use crate::agent::{AgentBackend, AgentEvent, Size, StartError};
 use crate::config::{Billing, Config};
 use crate::cost::{self, Cost, Usage, Waiting, WhyNot};
+use crate::engine::Engine;
 use crate::input::Pasted;
 use crate::keys;
 use crate::kind::AgentKind;
@@ -177,7 +178,7 @@ pub enum Confirm {
 }
 
 pub struct App<B: AgentBackend> {
-    pub ws: Workspace<B>,
+    pub engine: Engine<B>,
     pub mode: Mode,
     pub config: Config,
     /// The latest thing the user should know. Stays until replaced, except
@@ -401,7 +402,7 @@ impl<B: AgentBackend> App<B> {
         }
         let notice = (!said.is_empty()).then(|| said.join(" "));
         let mut app = Self {
-            ws,
+            engine: Engine::new(ws),
             mode: Mode::Normal,
             config,
             notice,
@@ -433,7 +434,7 @@ impl<B: AgentBackend> App<B> {
     /// before is left as it was.
     pub fn save(&mut self) -> Result<(), String> {
         let Ok(dir) = &self.state_dir else { return Ok(()) };
-        state::save(dir, &self.ws.to_saved()).map_err(|why| {
+        state::save(dir, &self.engine.ws.to_saved()).map_err(|why| {
             format!(
                 "Could not save your workspace ({why}). The last saved workspace is unchanged; \
                  changes since then will not be restored."
@@ -448,7 +449,7 @@ impl<B: AgentBackend> App<B> {
     }
 
     pub fn on_agent_event(&mut self, event: AgentEvent) {
-        let Some(happened) = self.ws.handle(event) else { return };
+        let Some(happened) = self.engine.ws.handle(event) else { return };
         let still_here =
             "It is still in your workspace. Switch to it, then r to start it again or x to remove it.";
         self.notice = Some(match happened {
@@ -457,7 +458,7 @@ impl<B: AgentBackend> App<B> {
                 // Started as a kind its name does not suggest, it may have
                 // been given options it does not take.
                 let chosen = self
-                    .ws
+                    .engine.ws
                     .entries()
                     .iter()
                     .find(|e| e.label() == label)
@@ -487,11 +488,11 @@ impl<B: AgentBackend> App<B> {
     }
 
     fn focused_running(&self) -> bool {
-        self.ws.focused().is_some_and(|e| e.is_running())
+        self.engine.ws.focused().is_some_and(|e| e.is_running())
     }
 
     fn focused_label(&self) -> String {
-        self.ws.focused().map(|e| e.label()).unwrap_or_default()
+        self.engine.ws.focused().map(|e| e.label()).unwrap_or_default()
     }
 
     pub fn on_key(&mut self, key: KeyEvent) {
@@ -509,13 +510,14 @@ impl<B: AgentBackend> App<B> {
                     self.history_key(key);
                     return;
                 }
-                let app_cursor = self.ws.focused().is_some_and(|e| e.term.screen().application_cursor());
+                let app_cursor =
+                    self.engine.ws.focused().is_some_and(|e| e.term.screen().application_cursor());
                 if let Some(bytes) = keys::encode(key, app_cursor) {
-                    self.ws.send_to_focused(&bytes);
+                    self.engine.ws.send_to_focused(&bytes);
                 }
             }
             // No agents yet: the welcome screen's keys work as they are.
-            Mode::Normal if self.ws.entries().is_empty() => self.command(key),
+            Mode::Normal if self.engine.ws.entries().is_empty() => self.command(key),
             // The agent in front has stopped. Typing meant for it must not
             // turn into commands (x would remove it, q would quit), so
             // commands need the menu key here too, and a typed key says so.
@@ -551,7 +553,7 @@ impl<B: AgentBackend> App<B> {
                     Confirm::View if yes => self.change_view(),
                     Confirm::Parts => {
                         let label = self.focused_label();
-                        let dismissed = match (yes, self.ws.focused_mut()) {
+                        let dismissed = match (yes, self.engine.ws.focused_mut()) {
                             (true, Some(e)) => e.track.dismiss_waiting_parts(),
                             _ => 0,
                         };
@@ -571,7 +573,7 @@ impl<B: AgentBackend> App<B> {
                     Confirm::Paste => {
                         let HeldPaste { text, left_out, tabs } = self.held_paste.take().unwrap_or_default();
                         if yes {
-                            self.ws.send_to_focused(text.replace('\n', "\r").as_bytes());
+                            self.engine.ws.send_to_focused(text.replace('\n', "\r").as_bytes());
                             let tabs = if tabs { TABS_SAID } else { "" };
                             self.notice = Some(format!(
                                 "Pasted into {} line by line.{left_out}{tabs}",
@@ -617,11 +619,11 @@ impl<B: AgentBackend> App<B> {
                 ));
             }
             Mode::Normal if can_take_it => {
-                let whole = self.ws.focused().is_some_and(|e| e.term.takes_pastes_whole());
+                let whole = self.engine.ws.focused().is_some_and(|e| e.term.takes_pastes_whole());
                 let left_out = left_out_sentence(&left_out);
                 if whole {
                     let body = text.replace('\n', "\r");
-                    self.ws.send_to_focused(format!("\x1b[200~{body}\x1b[201~").as_bytes());
+                    self.engine.ws.send_to_focused(format!("\x1b[200~{body}\x1b[201~").as_bytes());
                     if !left_out.is_empty() {
                         self.notice = Some(format!("Pasted into {}.{left_out}", self.focused_label()));
                     }
@@ -630,7 +632,7 @@ impl<B: AgentBackend> App<B> {
                 let tabs = text.contains('\t');
                 let text = text.replace('\t', TAB_AS_SPACES);
                 if !text.contains('\n') {
-                    self.ws.send_to_focused(text.as_bytes());
+                    self.engine.ws.send_to_focused(text.as_bytes());
                     if tabs || !left_out.is_empty() {
                         let tabs = if tabs { TABS_SAID } else { "" };
                         self.notice = Some(format!("Pasted into {}.{left_out}{tabs}", self.focused_label()));
@@ -672,16 +674,16 @@ impl<B: AgentBackend> App<B> {
                 self.history_key(key)
             }
             KeyCode::Char('r') => self.act(Action::StartAgain),
-            KeyCode::Char('x') if self.ws.focused().is_some() => self.act(Action::Close),
+            KeyCode::Char('x') if self.engine.ws.focused().is_some() => self.act(Action::Close),
             KeyCode::Char('s') => {
-                if self.ws.focused().is_some() {
+                if self.engine.ws.focused().is_some() {
                     self.report_top = 0;
                     self.mode = Mode::StatusReport;
                 } else {
                     self.refuse("There is no agent to show a status report for.".to_string());
                 }
             }
-            KeyCode::Char('v') if self.ws.pair().is_some() => self.act(Action::ShowOne),
+            KeyCode::Char('v') if self.engine.ws.pair().is_some() => self.act(Action::ShowOne),
             KeyCode::Char('v') => self.act(Action::ShowTwo),
             KeyCode::Char('q') => self.act(Action::Quit),
             _ => {}
@@ -692,11 +694,11 @@ impl<B: AgentBackend> App<B> {
     /// when to refuse are here; the keys that ask are in `command`.
     fn act(&mut self, action: Action) {
         match action {
-            Action::Next => self.ws.focus_next(),
-            Action::Previous => self.ws.focus_previous(),
+            Action::Next => self.engine.ws.focus_next(),
+            Action::Previous => self.engine.ws.focus_previous(),
             Action::StartAgain => {
-                if let Some(continuing) = self.ws.restart_focused() {
-                    self.notice = self.ws.focused().map(|e| match &e.status {
+                if let Some(continuing) = self.engine.ws.restart_focused() {
+                    self.notice = self.engine.ws.focused().map(|e| match &e.status {
                         Status::NotStarted(why) => {
                             format!("{} still could not be started: {why}. Nothing was changed.", e.label())
                         }
@@ -725,14 +727,14 @@ impl<B: AgentBackend> App<B> {
                 // Two were asked for and the window has no room, so one is
                 // on screen already. Nothing is resized: this only stops two
                 // coming back when the window is widened.
-                self.ws.show_one();
+                self.engine.ws.show_one();
                 self.notice = Some(
                     "One agent on screen. Two side by side will not come back when the window is widened. No agent was resized."
                         .to_string(),
                 );
             }
             Action::ShowOne | Action::ShowTwo => {
-                let would_change = self.ws.pair().is_some() || self.can_show_two().is_ok();
+                let would_change = self.engine.ws.pair().is_some() || self.can_show_two().is_ok();
                 if would_change && self.needs_you_count() > 0 {
                     self.mode = Mode::Confirm(Confirm::View);
                 } else {
@@ -780,7 +782,7 @@ impl<B: AgentBackend> App<B> {
 
     /// How many parts of the agent in front are waiting for the user.
     fn focused_waiting_parts(&self) -> usize {
-        self.ws.focused().map_or(0, |e| e.track.waiting_parts().len())
+        self.engine.ws.focused().map_or(0, |e| e.track.waiting_parts().len())
     }
 
     /// The words in the status report's bar for the key that stops showing
@@ -810,9 +812,9 @@ impl<B: AgentBackend> App<B> {
     /// Scroll the focused agent's history. Any key that is not a scroll key
     /// returns to the present and is not passed on.
     fn history_key(&mut self, key: KeyEvent) {
-        let page = self.ws.size().rows.saturating_sub(1).max(1) as isize;
+        let page = self.engine.ws.size().rows.saturating_sub(1).max(1) as isize;
         let label = self.focused_label();
-        let Some(entry) = self.ws.focused_mut() else {
+        let Some(entry) = self.engine.ws.focused_mut() else {
             self.mode = Mode::Normal;
             return;
         };
@@ -862,13 +864,13 @@ impl<B: AgentBackend> App<B> {
     }
 
     fn close_focused(&mut self) {
-        let two_before = self.ws.pair().is_some();
-        if let Some(label) = self.ws.close_focused() {
+        let two_before = self.engine.ws.pair().is_some();
+        if let Some(label) = self.engine.ws.close_focused() {
             let mut said = format!("Closed {label} and removed it from your workspace.");
-            if two_before && self.ws.pair().is_none() {
+            if two_before && self.engine.ws.pair().is_none() {
                 // Fewer than two agents are left to show side by side.
                 self.apply_size();
-                if let Some(left) = self.ws.focused() {
+                if let Some(left) = self.engine.ws.focused() {
                     said += &format!(" {} has the whole screen again.", left.label());
                 }
             }
@@ -885,13 +887,14 @@ impl<B: AgentBackend> App<B> {
         let menu = self.config.menu_keys.first().map(|k| k.label()).unwrap_or_default();
         self.window = window;
         self.apply_size();
-        let Some(pair) = self.ws.pair() else { return };
+        let Some(pair) = self.engine.ws.pair() else { return };
         if two_before && !self.two_shown() {
             // The user asked for two and still wants them: say why only
             // one is on screen, that the other was left alone, and the way
             // to stay with one.
-            let other = if self.ws.focused_index() == Some(pair.left) { pair.right } else { pair.left };
-            let other = self.ws.entries().get(other).map(Entry::label).unwrap_or_default();
+            let other =
+                if self.engine.ws.focused_index() == Some(pair.left) { pair.right } else { pair.left };
+            let other = self.engine.ws.entries().get(other).map(Entry::label).unwrap_or_default();
             self.notice = Some(format!(
                 "Too narrow for two agents now, so only {} is shown. {other} was not stopped or closed. \
                  Widen to {} columns for both, or {menu} then v to stay with one.",
@@ -908,11 +911,11 @@ impl<B: AgentBackend> App<B> {
     /// True while two agents are side by side on screen: the user asked
     /// for two and the window has room.
     pub fn two_shown(&self) -> bool {
-        self.ws.pair().is_some() && ui::fits_two(self.window)
+        self.engine.ws.pair().is_some() && ui::fits_two(self.window)
     }
 
     fn apply_size(&mut self) {
-        self.ws.resize(ui::agent_size(self.window, self.ws.pair().is_some()));
+        self.engine.ws.resize(ui::agent_size(self.window, self.engine.ws.pair().is_some()));
     }
 
     /// Why two agents cannot be put side by side right now, said in full.
@@ -931,7 +934,7 @@ impl<B: AgentBackend> App<B> {
                 ui::TWO_MIN_COLS
             ));
         }
-        match self.ws.entries().len() {
+        match self.engine.ws.entries().len() {
             0 => Err(format!(
                 "Two agents side by side takes two agents, and none is open. Nothing was changed. {menu} \
                  then n starts one."
@@ -955,8 +958,8 @@ impl<B: AgentBackend> App<B> {
     /// with the reason and nothing changed, when two cannot be shown.
     fn change_view(&mut self) {
         let menu = self.config.menu_keys.first().map(|k| k.label()).unwrap_or_default();
-        if self.ws.pair().is_some() {
-            self.ws.show_one();
+        if self.engine.ws.pair().is_some() {
+            self.engine.ws.show_one();
             self.apply_size();
             self.notice = Some(format!(
                 "One agent on screen: {}. Every agent was told its new size.",
@@ -968,10 +971,10 @@ impl<B: AgentBackend> App<B> {
             self.refuse(why);
             return;
         }
-        match self.ws.show_two() {
+        match self.engine.ws.show_two() {
             Ok(pair) => {
                 self.apply_size();
-                let label = |i: usize| self.ws.entries().get(i).map(Entry::label).unwrap_or_default();
+                let label = |i: usize| self.engine.ws.entries().get(i).map(Entry::label).unwrap_or_default();
                 self.notice = Some(format!(
                     // Not where typing goes: that changes with Tab, and a
                     // notice stays up. The headings and the bar say it.
@@ -990,8 +993,8 @@ impl<B: AgentBackend> App<B> {
 
     /// With two agents side by side: which side typing goes to.
     fn side_in_front(&self) -> &'static str {
-        match self.ws.pair().filter(|_| self.two_shown()) {
-            Some(pair) if self.ws.focused_index() == Some(pair.right) => ", on the right",
+        match self.engine.ws.pair().filter(|_| self.two_shown()) {
+            Some(pair) if self.engine.ws.focused_index() == Some(pair.right) => ", on the right",
             Some(_) => ", on the left",
             None => "",
         }
@@ -1054,18 +1057,21 @@ impl<B: AgentBackend> App<B> {
     /// stands, or None.
     fn check_problem(&self) -> Option<String> {
         let Mode::NewAgent(form) = &self.mode else { return None };
-        self.ws.start_problem(&form.command, &split_options(&form.options).args, form.kind())
+        self.engine.ws.start_problem(&form.command, &split_options(&form.options).args, form.kind())
     }
 
     fn start_from_form(&mut self) {
         let Mode::NewAgent(form) = &mut self.mode else { return };
         let folder = resolve_folder(&self.launch_dir, &form.folder);
         let args = split_options(&form.options).args;
-        match self.ws.start_new(&form.command, args, form.kind(), folder.clone()) {
+        match self.engine.ws.start_new(&form.command, args, form.kind(), folder.clone()) {
             Ok(()) => {
                 self.mode = Mode::Normal;
-                self.notice =
-                    self.ws.focused().map(|e| format!("Started {} in {}.", e.saved.name, folder.display()));
+                self.notice = self
+                    .engine
+                    .ws
+                    .focused()
+                    .map(|e| format!("Started {} in {}.", e.saved.name, folder.display()));
                 self.save_or_say();
             }
             // Refused for what was typed, not the folder: to the last line,
@@ -1136,11 +1142,11 @@ impl<B: AgentBackend> App<B> {
                 self.focused_label(),
                 self.side_in_front()
             ),
-            Mode::Normal if self.ws.entries().is_empty() => {
+            Mode::Normal if self.engine.ws.entries().is_empty() => {
                 format!("{menu}: menu   {} new agent   {} quit", key("n"), key("q"))
             }
             // A key that cannot help is not offered.
-            Mode::Normal if self.ws.focused().is_some_and(Entry::start_again_cannot_help) => format!(
+            Mode::Normal if self.engine.ws.focused().is_some_and(Entry::start_again_cannot_help) => format!(
                 "{menu}: menu, then {} remove   {} next agent   {} quit",
                 key("x"),
                 key("Tab"),
@@ -1155,7 +1161,9 @@ impl<B: AgentBackend> App<B> {
             ),
             // The key for two agents side by side is named only where it
             // would do something: with two on screen, or room for two.
-            Mode::Menu if self.ws.pair().is_some() => format!("{}  {} one agent", menu_line(), key("v")),
+            Mode::Menu if self.engine.ws.pair().is_some() => {
+                format!("{}  {} one agent", menu_line(), key("v"))
+            }
             Mode::Menu if self.can_show_two().is_ok() => {
                 format!("{}  {} two side by side", menu_line(), key("v"))
             }
@@ -1186,7 +1194,7 @@ impl<B: AgentBackend> App<B> {
                 self.focused_label(),
             ),
             Mode::History => {
-                let back = self.ws.focused().map(|e| e.term.scrolled_back()).unwrap_or(0);
+                let back = self.engine.ws.focused().map(|e| e.term.scrolled_back()).unwrap_or(0);
                 let scroll = ["PgUp", "PgDn", "Up", "Down", "Home"].map(key).join(" ");
                 format!(
                     "{} of {}: {} back.  {scroll} scroll   {}: back to now",
@@ -1258,7 +1266,7 @@ impl<B: AgentBackend> App<B> {
             ),
             Mode::Confirm(Confirm::Quit) => self.quit_question(),
             Mode::Confirm(Confirm::Parts) => {
-                let waiting = self.ws.focused().map(|e| e.track.waiting_parts()).unwrap_or_default();
+                let waiting = self.engine.ws.focused().map(|e| e.track.waiting_parts()).unwrap_or_default();
                 let which = match waiting.as_slice() {
                     [one] => format!("{}, {}", one.name(), waiting_since(one.since)),
                     many => format!(
@@ -1274,8 +1282,14 @@ impl<B: AgentBackend> App<B> {
                 )
             }
             Mode::Confirm(Confirm::View) => {
-                let waiting: Vec<String> =
-                    self.ws.entries().iter().filter(|e| e.needs_you().is_some()).map(Entry::label).collect();
+                let waiting: Vec<String> = self
+                    .engine
+                    .ws
+                    .entries()
+                    .iter()
+                    .filter(|e| e.needs_you().is_some())
+                    .map(Entry::label)
+                    .collect();
                 format!(
                     "Resize every agent now? y / n   Waiting for you: {}. Changing the view makes every \
                      agent redraw at a new size.",
@@ -1302,11 +1316,12 @@ impl<B: AgentBackend> App<B> {
     /// first is kept when none needs you). That a
     /// Codex agent starts a new conversation is kept: it is what is lost.
     fn quit_question(&self) -> String {
-        let running = self.ws.running_labels().len();
+        let running = self.engine.ws.running_labels().len();
         // Only Claude Code is asked to continue its conversation. Every
         // other agent begins afresh, so what it was doing is not picked up
         // when it comes back.
         let fresh: Vec<String> = self
+            .engine
             .ws
             .entries()
             .iter()
@@ -1355,11 +1370,11 @@ impl<B: AgentBackend> App<B> {
     /// and returns true if the bell should ring: an agent has just started
     /// needing you, and the bell is not switched off.
     pub fn after_events(&mut self) -> bool {
-        let began = self.ws.take_began_needing_you();
+        let began = self.engine.ws.take_began_needing_you();
         self.withdraw_unknown_notices();
         // Said once for each kind of agent: one kind's reporting failing
         // says nothing about another's.
-        let broken = self.ws.entries().iter().find_map(|e| {
+        let broken = self.engine.ws.entries().iter().find_map(|e| {
             let who = e.kind().reporter()?;
             match e.reported() {
                 Some(AgentStatus::Unknown(why))
@@ -1384,7 +1399,7 @@ impl<B: AgentBackend> App<B> {
         if !self.cost_notice_given {
             // A cost Lillignode tried to read and could not. Pending, and an
             // agent that is not Claude Code, are not failures.
-            let failed = self.ws.entries().iter().find(|e| {
+            let failed = self.engine.ws.entries().iter().find(|e| {
                 matches!(
                     e.cost(),
                     Cost::Unknown(WhyNot::NotUnderstood { .. } | WhyNot::CannotRead(_) | WhyNot::NoFolder)
@@ -1406,9 +1421,9 @@ impl<B: AgentBackend> App<B> {
         }
         // A conversation that has passed the user's cost warning is named
         // once. Only told: no key is held, no agent stopped, no bell rung.
-        for (label, count) in self.ws.take_passed_cost_warning() {
+        for (label, count) in self.engine.ws.take_passed_cost_warning() {
             let menu = self.config.menu_keys.first().map(|k| k.label()).unwrap_or_default();
-            let limit = self.ws.cost_warning().map(cost::short).unwrap_or_default();
+            let limit = self.engine.ws.cost_warning().map(cost::short).unwrap_or_default();
             let text = format!(
                 "Warning only, nothing stopped: {label} is past your cost warning ({} tokens; warning \
                  at {limit} a conversation). {menu} then s shows the detail.",
@@ -1430,7 +1445,7 @@ impl<B: AgentBackend> App<B> {
     /// reports as usual once that is answered. If that kind's reporting
     /// fails again later, the notice is given again.
     fn withdraw_unknown_notices(&mut self) {
-        let entries = self.ws.entries();
+        let entries = self.engine.ws.entries();
         let still = |kind: AgentKind| {
             entries.iter().any(|e| {
                 e.kind() == kind
@@ -1495,16 +1510,17 @@ impl<B: AgentBackend> App<B> {
 
     /// How many agents are waiting for the user, the one in front included.
     pub fn needs_you_count(&self) -> usize {
-        self.ws.entries().iter().filter(|e| e.needs_you().is_some()).count()
+        self.engine.ws.entries().iter().filter(|e| e.needs_you().is_some()).count()
     }
 
     /// The sentence naming agents that need the user and are not in front.
     /// It stays until they stop needing you, and an ordinary notice cannot
     /// replace it.
     pub fn needs_you_notice(&self) -> Option<String> {
-        let focused = self.ws.focused_index()?;
-        let count = self.ws.entries().len();
+        let focused = self.engine.ws.focused_index()?;
+        let count = self.engine.ws.entries().len();
         let waiting: Vec<(usize, &Entry)> = self
+            .engine
             .ws
             .entries()
             .iter()
@@ -1633,7 +1649,7 @@ impl<B: AgentBackend> App<B> {
     /// True when the user has asked for the cost readout. Off, nothing
     /// about cost is drawn and none of Claude Code's records are read.
     pub fn cost_shown(&self) -> bool {
-        self.ws.cost_on()
+        self.engine.ws.cost_on()
     }
 
     /// The few words about an agent's cost on its row of the sidebar.
@@ -1641,7 +1657,7 @@ impl<B: AgentBackend> App<B> {
     /// conversation past the user's warning says PAST WARNING before its figure.
     pub fn cost_short(&self, entry: &Entry) -> String {
         match entry.cost() {
-            Cost::Known(usage) if self.ws.over_cost_warning(entry).is_some() => {
+            Cost::Known(usage) if self.engine.ws.over_cost_warning(entry).is_some() => {
                 format!("PAST WARNING {}", self.figure(&usage))
             }
             Cost::Known(usage) => self.figure(&usage),
@@ -1658,7 +1674,7 @@ impl<B: AgentBackend> App<B> {
         if !self.cost_shown() {
             return Vec::new();
         }
-        let all = self.ws.cost_summary();
+        let all = self.engine.ws.cost_summary();
         let mut foot = match (all.known, all.pending, all.unknown) {
             (0, 0, 0) => return Vec::new(),
             (0, 0, _) => vec![" ALL AGENTS  cost unknown".to_string()],
@@ -1692,7 +1708,7 @@ impl<B: AgentBackend> App<B> {
         }
         let record = "Claude Code's record of this conversation";
         // A warning that cannot be checked is said, not left silently off.
-        let unchecked = match self.ws.cost_warning() {
+        let unchecked = match self.engine.ws.cost_warning() {
             Some(_) => " Your cost warning cannot be checked for this agent until its cost is known.",
             None => "",
         };
@@ -1764,7 +1780,7 @@ impl<B: AgentBackend> App<B> {
                  from.\n"
             ),
         };
-        let everyone = self.ws.cost_summary();
+        let everyone = self.engine.ws.cost_summary();
         let left_out = everyone.pending + everyone.unknown;
         let left_out = match left_out {
             0 => String::new(),
@@ -1777,8 +1793,8 @@ impl<B: AgentBackend> App<B> {
             ),
             None => format!("All agents open now, since Lillignode was started: not known.{left_out}\n"),
         };
-        if let Some(limit) = self.ws.cost_warning() {
-            out += &match self.ws.over_cost_warning(e) {
+        if let Some(limit) = self.engine.ws.cost_warning() {
+            out += &match self.engine.ws.over_cost_warning(e) {
                 Some(_) => format!(
                     "Past your cost warning of {} tokens a conversation, counted the same way. It is only \
                      a warning: nothing was stopped or held.\n",
@@ -1834,7 +1850,7 @@ impl<B: AgentBackend> App<B> {
     fn unfinished_by_need(&self) -> (Vec<String>, Vec<String>) {
         let mut need = Vec::new();
         let mut rest = Vec::new();
-        for e in self.ws.entries().iter().filter(|e| e.is_running() && !e.is_settled()) {
+        for e in self.engine.ws.entries().iter().filter(|e| e.is_running() && !e.is_settled()) {
             let name = match e.reported() {
                 Some(s) => format!("{} ({})", e.label(), s.text()),
                 None => e.label(),
@@ -1852,7 +1868,7 @@ impl<B: AgentBackend> App<B> {
     /// sidebar shows and why, and the last report exactly as it arrived, so
     /// an Unknown can be traced to its cause.
     pub fn status_report_text(&self) -> String {
-        let Some(e) = self.ws.focused() else { return "No agent is open.".to_string() };
+        let Some(e) = self.engine.ws.focused() else { return "No agent is open.".to_string() };
         let t = &e.track;
         let heard = t.trace();
         // Who the agent was started as, if that is a program known to
@@ -2171,7 +2187,7 @@ mod tests {
             Config::default(),
             None,
         );
-        app.ws.start_as_named("cmd", here).unwrap();
+        app.engine.ws.start_as_named("cmd", here).unwrap();
         (app, sent)
     }
 
@@ -2278,7 +2294,7 @@ mod tests {
         let (mut app, sent) = app_with_agent();
         app.on_paste("make\x03 test\x04".into());
         assert_eq!(*sent.borrow(), vec!["make test".to_string()]);
-        let label = app.ws.focused().unwrap().label();
+        let label = app.engine.ws.focused().unwrap().label();
         assert_eq!(
             app.notice,
             Some(format!("Pasted into {label}. 2 control characters were left out (Ctrl+C, Ctrl+D)."))
@@ -2349,7 +2365,8 @@ mod tests {
         // was cut off before "y / n".
         let (mut app, _) = app_with_agent();
         for i in 0..6 {
-            app.ws
+            app.engine
+                .ws
                 .start_as_named("cmd", std::env::temp_dir().join(format!("a-rather-long-folder-name-{i}")))
                 .ok();
         }
@@ -2391,14 +2408,14 @@ mod tests {
         app.on_key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::SHIFT));
         assert!(matches!(app.mode, Mode::History));
         assert!(app.bar().starts_with("HISTORY of cmd"), "{}", app.bar());
-        assert!(app.ws.focused().unwrap().term.scrolled_back() > 0);
+        assert!(app.engine.ws.focused().unwrap().term.scrolled_back() > 0);
 
         app.on_key(press(KeyCode::Home));
-        assert_eq!(app.ws.focused().unwrap().term.screen().rows(0, 40).next().unwrap(), "line 1");
+        assert_eq!(app.engine.ws.focused().unwrap().term.screen().rows(0, 40).next().unwrap(), "line 1");
 
         app.on_key(press(KeyCode::Char('z')));
         assert!(matches!(app.mode, Mode::Normal));
-        assert_eq!(app.ws.focused().unwrap().term.scrolled_back(), 0);
+        assert_eq!(app.engine.ws.focused().unwrap().term.scrolled_back(), 0);
         assert!(sent.borrow().is_empty(), "the key that left history must not be typed into the agent");
     }
 
@@ -2507,7 +2524,7 @@ mod tests {
     #[test]
     fn the_status_report_shows_a_long_report_cut_and_says_how_it_was_read() {
         let (mut app, _) = app_with_agent();
-        app.ws.start_as_named("claude", std::env::temp_dir()).unwrap();
+        app.engine.ws.start_as_named("claude", std::env::temp_dir()).unwrap();
         let report =
             format!("\x1b]7501;?\x07\x1b]7501;state=working:app=claude-code:msg={}\x07", "QUJD".repeat(600));
         app.on_agent_event(AgentEvent::Output(AgentId(2), report.into_bytes()));
@@ -2543,7 +2560,7 @@ Cost",
         app.newer_pty_missing = false;
         for i in 0..n {
             let folder = std::env::temp_dir().join(char::from(b'a' + i).to_string());
-            app.ws.start_as_named("claude", folder).unwrap();
+            app.engine.ws.start_as_named("claude", folder).unwrap();
             report(&mut app, u32::from(i) + 1, "?");
         }
         app
@@ -2578,14 +2595,14 @@ Cost",
         assert!(rows[7].starts_with(">/\\z Claude Code"), "{rows:#?}");
         assert_eq!(rows[8], "  f  Idle");
         // Tab round to a: the list follows it, and says what is below.
-        app.ws.focus_next();
+        app.engine.ws.focus_next();
         let rows = side(&app);
         assert!(rows[1].starts_with(">/\\! Claude Code"), "{rows:#?}");
         assert_eq!(rows[7], " 3 more below");
         assert_eq!(rows[8], "", "nothing below the pointer: nobody hidden needs you");
         // Next, and next: the list does not move while the front is on screen.
-        app.ws.focus_next();
-        app.ws.focus_next();
+        app.engine.ws.focus_next();
+        app.engine.ws.focus_next();
         assert_eq!(side(&app)[1], " /\\! Claude Code", "a is still the first row shown");
         // A window with room for all: no pointer.
         let all = screen(&app, 100, 20);
@@ -2596,8 +2613,8 @@ Cost",
     fn an_agent_behind_that_needs_you_is_named_with_the_keys_to_reach_it() {
         let mut app = app_with_claude_agents(3);
         // The last one started is in front: c. Go round to a.
-        app.ws.focus_next();
-        assert_eq!(app.ws.focused().unwrap().label(), "Claude Code (a)");
+        app.engine.ws.focus_next();
+        assert_eq!(app.engine.ws.focused().unwrap().label(), "Claude Code (a)");
         assert_eq!(app.needs_you_notice(), None);
         report(&mut app, 3, PERMISSION);
         assert_eq!(
@@ -2617,7 +2634,7 @@ Cost",
             Some("2 agents need you: Claude Code (b), Claude Code (c). Ctrl+Q then Tab to go through them.")
         );
         // In front, b has its block; the notice names only the others.
-        app.ws.focus_next();
+        app.engine.ws.focus_next();
         assert_eq!(
             app.needs_you_notice().as_deref(),
             Some("Claude Code (c) needs you: permission. Ctrl+Q then Tab to go to it.")
@@ -2753,7 +2770,7 @@ Cost",
     fn an_unknown_notice_that_stops_being_true_is_taken_back() {
         let mut app = app_with_claude_agents(1);
         app.notice = None;
-        app.ws.tick(Instant::now() + status::STARTING_DEADLINE);
+        app.engine.ws.tick(Instant::now() + status::STARTING_DEADLINE);
         app.after_events();
         let notice = app.notice.clone().unwrap();
         assert!(notice.starts_with("Status shows Unknown: Claude Code is not reporting it."), "{notice}");
@@ -2768,7 +2785,7 @@ Cost",
         // Only its own words go: a notice it was joined to is left.
         let mut app = app_with_claude_agents(1);
         app.notice = Some("Could not save your workspace (disk full).".into());
-        app.ws.tick(Instant::now() + status::STARTING_DEADLINE);
+        app.engine.ws.tick(Instant::now() + status::STARTING_DEADLINE);
         app.after_events();
         report(&mut app, 1, "state=idle:app=claude-code");
         app.after_events();
@@ -2777,7 +2794,7 @@ Cost",
         // A later notice that replaced it is not touched.
         let mut app = app_with_claude_agents(1);
         app.notice = None;
-        app.ws.tick(Instant::now() + status::STARTING_DEADLINE);
+        app.engine.ws.tick(Instant::now() + status::STARTING_DEADLINE);
         app.after_events();
         app.notice = Some("later".into());
         report(&mut app, 1, "state=idle:app=claude-code");
@@ -2864,7 +2881,7 @@ Cost",
         assert!(app.after_events(), "the bell rings for a part as for the program");
         assert_eq!(app.needs_you_count(), 1);
         // P5: its own record says Done, and the agent needs you.
-        assert_eq!(app.ws.entries()[0].own_status(), Some(AgentStatus::Done));
+        assert_eq!(app.engine.ws.entries()[0].own_status(), Some(AgentStatus::Done));
         assert_eq!(
             app.needs_you_notice().as_deref(),
             Some(
@@ -2893,7 +2910,7 @@ Cost",
         app.on_key(press(KeyCode::Char('n')));
 
         // The status report: why, the program's own status, and each part.
-        app.ws.focus_previous();
+        app.engine.ws.focus_previous();
         let text = app.status_report_text();
         assert!(text.contains("Status: Needs you. The sidebar shows it as Needs you.\n"), "{text}");
         assert!(text.contains("Its own status: Done. 2 of its parts are waiting for you"), "{text}");
@@ -2994,7 +3011,10 @@ Cost",
         assert!(text.contains("Let go, to keep no more than 64: 8."), "{text}");
         // P4: a part not understood leaves the program's status alone.
         assert!(text.contains("Status: Needs you."), "{text}");
-        assert_eq!(app.ws.entries()[0].own_status(), Some(AgentStatus::Unknown(status::Why::NothingSent)));
+        assert_eq!(
+            app.engine.ws.entries()[0].own_status(),
+            Some(AgentStatus::Unknown(status::Why::NothingSent))
+        );
     }
 
     /// An agent that needs you is named first, and is never one of the
@@ -3053,14 +3073,14 @@ Cost",
             other: Default::default(),
         };
         let stops = state::SavedAgent { name: "Claude Code".into(), ..refused.clone() };
-        app.ws.restore(state::SavedWorkspace {
+        app.engine.ws.restore(state::SavedWorkspace {
             version: state::VERSION,
             agents: vec![refused, stops],
             focused: Some(0),
             other: Default::default(),
         });
         app.on_agent_event(AgentEvent::Exited(AgentId(1), crate::agent::Exit { code: 0 }));
-        assert!(app.ws.focused().unwrap().start_again_cannot_help());
+        assert!(app.engine.ws.focused().unwrap().start_again_cannot_help());
         let bar = app.bar();
         assert!(bar.starts_with("Ctrl+Q or F12: menu, then x remove"), "{bar}");
         assert!(!bar.contains("start again"), "{bar}");
@@ -3068,7 +3088,7 @@ Cost",
         app.on_key(press(KeyCode::F(12)));
         app.on_key(press(KeyCode::Tab));
         app.on_key(press(KeyCode::Esc));
-        assert!(!app.ws.focused().unwrap().start_again_cannot_help());
+        assert!(!app.engine.ws.focused().unwrap().start_again_cannot_help());
         assert!(app.bar().starts_with("Ctrl+Q or F12: menu, then r start again"), "{}", app.bar());
     }
 
@@ -3082,7 +3102,7 @@ Cost",
         assert!(!text.contains("Cost"), "{text}");
         assert!(!text.contains("Claude Code"), "{text}");
         assert!(text.ends_with(".\n") && !text.ends_with("\n\n"), "{text:?}");
-        app.ws.focus_previous();
+        app.engine.ws.focus_previous();
         let text = app.status_report_text();
         assert!(text.starts_with("Status report for Claude Code (a)"), "{text}");
         assert!(text.contains("Cost: off."), "{text}");
@@ -3113,7 +3133,7 @@ Cost",
         // long notice after it lost its end, which is where it says what to do.
         let room = 2 * usize::from(crate::ui::MIN_COLS);
         let mut app = app_with_claude_agents(3);
-        app.ws.focus_next();
+        app.engine.ws.focus_next();
         report(&mut app, 3, PERMISSION);
         let waiting = app.needs_you_notice().unwrap();
         let unknown = app.unknown_notice(&status::CLAUDE_CODE, status::Why::NoReport);
@@ -3178,7 +3198,7 @@ Cost",
     fn the_notice_rows_of_the_narrowest_window_end_with_what_to_do() {
         use ratatui::backend::TestBackend;
         let mut app = app_with_claude_agents(2);
-        app.ws.focus_next();
+        app.engine.ws.focus_next();
         report(&mut app, 2, PERMISSION);
         app.notice = Some(app.unknown_notice(&status::CLAUDE_CODE, status::Why::NoReport));
         let (cols, rows) = (crate::ui::MIN_COLS, crate::ui::MIN_ROWS);
@@ -3208,7 +3228,7 @@ Cost",
     /// Record one reply in the conversation of the agent at `index`.
     fn record_reply(app: &App<Fake>, folder: &Path, index: usize, model: &str, line: &str) {
         use std::io::Write;
-        let id = app.ws.entries()[index].saved.conversation.clone().unwrap();
+        let id = app.engine.ws.entries()[index].saved.conversation.clone().unwrap();
         let path = folder.join("projects").join("p").join(format!("{id}.jsonl"));
         let mut file = std::fs::OpenOptions::new().create(true).append(true).open(path).unwrap();
         let line = line.replace("MODEL", model);
@@ -3222,32 +3242,33 @@ Cost",
 
     /// Take a fresh look at every agent's cost.
     fn look(app: &mut App<Fake>, nth: u32) {
-        app.ws.tick(Instant::now() + cost::LOOK_EVERY * nth);
+        app.engine.ws.tick(Instant::now() + cost::LOOK_EVERY * nth);
     }
 
     #[test]
     fn cost_is_a_number_pending_or_unknown_and_the_total_says_what_it_leaves_out() {
         let folder = claude_folder("states");
         let mut app = app_with_claude_agents(2);
-        app.ws.start_as_named("cmd", std::env::temp_dir()).unwrap();
+        app.engine.ws.start_as_named("cmd", std::env::temp_dir()).unwrap();
         // Off unless asked for: nothing is said about cost, and nothing read.
         assert!(!app.cost_shown());
         look(&mut app, 0);
         assert!(app.cost_total().is_empty());
         // Said on a Claude Code agent's report; the plain program is in front.
-        app.ws.focus_previous();
+        app.engine.ws.focus_previous();
         assert!(app.status_report_text().contains("Cost: off. To see what each"));
         assert!(app.status_report_text().contains("add \"cost\": true to the settings file"));
         assert!(app.status_report_text().contains("and start Lillignode again."));
-        app.ws.focus_next();
-        app.ws.read_cost_from(Some(folder.clone()));
+        app.engine.ws.focus_next();
+        app.engine.ws.read_cost_from(Some(folder.clone()));
         assert_eq!(
             app.cost_total(),
             vec![" ALL AGENTS  cost pending", EXPERIMENTAL],
             "nothing has been looked at"
         );
         look(&mut app, 1);
-        let shown = |app: &App<Fake>| app.ws.entries().iter().map(|e| app.cost_short(e)).collect::<Vec<_>>();
+        let shown =
+            |app: &App<Fake>| app.engine.ws.entries().iter().map(|e| app.cost_short(e)).collect::<Vec<_>>();
         assert_eq!(shown(&app), ["cost pending", "cost pending", "cost unknown"]);
         assert_eq!(app.cost_total(), vec![" ALL AGENTS  cost pending", EXPERIMENTAL]);
 
@@ -3289,11 +3310,11 @@ Cost",
     fn dollars_are_shown_only_to_a_user_who_pays_by_key_and_only_as_an_estimate() {
         let folder = claude_folder("dollars");
         let mut app = app_with_claude_agents(2);
-        app.ws.read_cost_from(Some(folder.clone()));
+        app.engine.ws.read_cost_from(Some(folder.clone()));
         record_reply(&app, &folder, 0, "claude-opus-5-5", REPLY);
         record_reply(&app, &folder, 1, "claude-opus-5-5", REPLY);
         look(&mut app, 1);
-        let first = |app: &App<Fake>| app.cost_short(&app.ws.entries()[0]);
+        let first = |app: &App<Fake>| app.cost_short(&app.engine.ws.entries()[0]);
         assert_eq!(first(&app), "11.5k tokens");
         app.config.billing = Billing::Subscription;
         assert_eq!(first(&app), "11.5k tokens");
@@ -3305,7 +3326,7 @@ Cost",
         // the total, never dollars that leave it out.
         record_reply(&app, &folder, 1, "claude-new-9", &REPLY.replace("msg_1", "msg_2"));
         look(&mut app, 2);
-        assert_eq!(app.cost_short(&app.ws.entries()[1]), "23.0k tokens");
+        assert_eq!(app.cost_short(&app.engine.ws.entries()[1]), "23.0k tokens");
         assert_eq!(app.cost_total(), vec![" ALL AGENTS  34.5k tokens", EXPERIMENTAL]);
         let _ = std::fs::remove_dir_all(folder);
     }
@@ -3314,7 +3335,7 @@ Cost",
     fn the_status_report_explains_the_cost_in_every_state() {
         let folder = claude_folder("panel");
         let mut app = app_with_claude_agents(1);
-        app.ws.read_cost_from(Some(folder.clone()));
+        app.engine.ws.read_cost_from(Some(folder.clone()));
         look(&mut app, 1);
         let text = app.status_report_text();
         assert!(text.contains("Cost (experimental): pending. Nothing to read yet"), "{text}");
@@ -3398,7 +3419,7 @@ Cost",
 
         // Any other agent: one plain line, and no notice. Nothing failed.
         let (mut app, _) = app_with_agent();
-        app.ws.read_cost_from(Some(folder.clone()));
+        app.engine.ws.read_cost_from(Some(folder.clone()));
         app.notice = None;
         look(&mut app, 1);
         app.after_events();
@@ -3431,7 +3452,7 @@ Cost",
         assert!(!rows.iter().any(|r| r.contains("cost") || r.contains("ALL AGENTS")), "{rows:?}");
 
         // On: a third line under each agent.
-        app.ws.read_cost_from(Some(folder.clone()));
+        app.engine.ws.read_cost_from(Some(folder.clone()));
         record_reply(&app, &folder, 0, "claude-opus-5-5", REPLY);
         look(&mut app, 1);
         let rows = drawn(&app);
@@ -3475,7 +3496,7 @@ Cost",
             conversation: None,
             other: Default::default(),
         };
-        app.ws.restore(crate::state::SavedWorkspace {
+        app.engine.ws.restore(crate::state::SavedWorkspace {
             version: crate::state::VERSION,
             agents: vec![agent("bell\u{7}", "cmd")],
             focused: Some(0),
@@ -3492,7 +3513,7 @@ Cost",
     fn with_no_room_for_the_cost_total_the_sidebar_says_where_it_is() {
         let folder = claude_folder("pointer");
         let mut app = app_with_claude_agents(4);
-        app.ws.read_cost_from(Some(folder.clone()));
+        app.engine.ws.read_cost_from(Some(folder.clone()));
         record_reply(&app, &folder, 0, "claude-opus-5-5", REPLY);
         look(&mut app, 1);
         // 12 rows: 9 for the sidebar below its heading, too few for four
@@ -3510,15 +3531,15 @@ Cost",
     fn passing_the_cost_warning_marks_the_row_and_says_so_once_and_nothing_else() {
         let folder = claude_folder("warning");
         let (mut app, sent) = app_with_agent();
-        app.ws.start_as_named("claude", std::env::temp_dir().join("a")).unwrap();
-        app.ws.read_cost_from(Some(folder.clone()));
-        app.ws.set_cost_warning(Some(20_000));
+        app.engine.ws.start_as_named("claude", std::env::temp_dir().join("a")).unwrap();
+        app.engine.ws.read_cost_from(Some(folder.clone()));
+        app.engine.ws.set_cost_warning(Some(20_000));
         record_reply(&app, &folder, 1, "claude-opus-5-5", REPLY);
         look(&mut app, 1);
         app.notice = None;
         assert!(!app.after_events(), "no bell");
         assert_eq!(app.notice, None, "11,500 is under 20,000");
-        assert_eq!(app.cost_short(&app.ws.entries()[1]), "11.5k tokens");
+        assert_eq!(app.cost_short(&app.engine.ws.entries()[1]), "11.5k tokens");
         assert!(app.status_report_text().contains("Your cost warning is at 20,000 tokens"));
 
         record_reply(&app, &folder, 1, "claude-opus-5-5", &REPLY.replace("msg_1", "msg_2"));
@@ -3532,7 +3553,7 @@ Cost",
                  warning at 20.0k a conversation). Ctrl+Q then s shows the detail.  Earlier."
             )
         );
-        assert_eq!(app.cost_short(&app.ws.entries()[1]), "PAST WARNING 23.0k tokens");
+        assert_eq!(app.cost_short(&app.engine.ws.entries()[1]), "PAST WARNING 23.0k tokens");
         let text = app.status_report_text();
         assert!(text.contains("Past your cost warning of 20,000 tokens a conversation"), "{text}");
         assert!(text.contains("nothing was stopped or held"), "{text}");
@@ -3543,7 +3564,7 @@ Cost",
         // Nothing is interrupted: no question is asked, the agent still
         // runs, and typing still reaches it.
         assert!(matches!(app.mode, Mode::Normal));
-        assert!(app.ws.entries()[1].is_running());
+        assert!(app.engine.ws.entries()[1].is_running());
         app.on_key(press(KeyCode::Char('k')));
         assert_eq!(*sent.borrow(), vec!["k".to_string()]);
         let _ = std::fs::remove_dir_all(folder);
@@ -3625,7 +3646,7 @@ Cost",
     #[test]
     fn each_status_draws_its_own_sign_and_word_under_a_hat() {
         let mut app = app_with_claude_agents(6);
-        app.ws.start_as_named("cmd", std::env::temp_dir().join("g")).unwrap();
+        app.engine.ws.start_as_named("cmd", std::env::temp_dir().join("g")).unwrap();
         report(&mut app, 1, "state=working:app=claude-code");
         report(&mut app, 2, PERMISSION);
         report(&mut app, 3, "state=done:app=claude-code");
@@ -3659,7 +3680,7 @@ Cost",
     #[test]
     fn a_long_folder_keeps_the_short_status_whole_and_marks_what_it_cut() {
         let mut app = app_with_claude_agents(0);
-        app.ws.start_as_named("cmd", std::env::temp_dir().join("a-long-folder-name")).unwrap();
+        app.engine.ws.start_as_named("cmd", std::env::temp_dir().join("a-long-folder-name")).unwrap();
         let rows = screen(&app, 100, 20);
         assert_eq!(part(&rows[2], 0, 27), "  a-long-folder-n…  Unknown");
     }
@@ -3789,11 +3810,11 @@ Cost",
         );
         // Another notice after it, and someone needing you before it, in the
         // narrowest window: the fix is still whole.
-        app.ws.start_as_named("claude", std::env::temp_dir()).unwrap();
-        app.ws.start_as_named("claude", std::env::temp_dir()).unwrap();
+        app.engine.ws.start_as_named("claude", std::env::temp_dir()).unwrap();
+        app.engine.ws.start_as_named("claude", std::env::temp_dir()).unwrap();
         report(&mut app, 1, "?");
         report(&mut app, 2, "?");
-        let behind = 1 - app.ws.focused_index().unwrap() as u32;
+        let behind = 1 - app.engine.ws.focused_index().unwrap() as u32;
         report(&mut app, behind + 1, PERMISSION);
         app.notice = Some(
             "Claude Code (b) stopped with an error (exit code 3). It is still in your workspace. Switch to \
@@ -3803,7 +3824,7 @@ Cost",
         let rows = screen(&app, crate::ui::MIN_COLS, crate::ui::MIN_ROWS);
         let text = rows.iter().map(|r| r.trim().to_string()).collect::<Vec<_>>().join(" ");
         assert!(text.contains(fix), "{text}");
-        let waiting = app.ws.entries()[behind as usize].label();
+        let waiting = app.engine.ws.entries()[behind as usize].label();
         let (who, at_fix) = (text.find(waiting.as_str()), text.find(fix));
         assert!(who.is_some() && who < at_fix, "who needs you is still first: {text}");
         assert!(text.contains("Ctrl+Q then Tab to go to it."), "{text}");
@@ -3832,7 +3853,7 @@ Cost",
         app.on_key(press(KeyCode::F(12)));
         app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
         assert!(matches!(app.mode, Mode::Normal));
-        assert_eq!(app.ws.entries().len(), 2);
+        assert_eq!(app.engine.ws.entries().len(), 2);
     }
 
     /// Menu, n, then each answer typed and Enter pressed after it.
@@ -3852,8 +3873,8 @@ Cost",
         let mut app = app_with_claude_agents(0);
         answer_form(&mut app, &["", "", ""]);
         assert!(matches!(app.mode, Mode::Normal));
-        assert_eq!(app.ws.entries().len(), 1);
-        assert_eq!(app.ws.entries()[0].kind(), AgentKind::ClaudeCode);
+        assert_eq!(app.engine.ws.entries().len(), 1);
+        assert_eq!(app.engine.ws.entries()[0].kind(), AgentKind::ClaudeCode);
         assert!(app.notice.clone().unwrap().starts_with("Started Claude Code in "));
     }
 
@@ -3883,11 +3904,11 @@ Cost",
             "{bar}"
         );
         assert_eq!(app.bar_cursor(), None);
-        assert!(app.ws.entries().is_empty(), "nothing starts before y");
+        assert!(app.engine.ws.entries().is_empty(), "nothing starts before y");
         app.on_key(press(KeyCode::Char('y')));
         assert!(matches!(app.mode, Mode::Normal));
-        assert_eq!(app.ws.entries()[0].saved.args, ["-a", "on-request", "-c", "x y"]);
-        assert_eq!(app.ws.entries()[0].kind(), AgentKind::Codex);
+        assert_eq!(app.engine.ws.entries()[0].saved.args, ["-a", "on-request", "-c", "x y"]);
+        assert_eq!(app.engine.ws.entries()[0].kind(), AgentKind::Codex);
     }
 
     #[test]
@@ -3924,7 +3945,7 @@ Cost",
         app.on_key(press(KeyCode::Enter));
         app.on_key(press(KeyCode::Enter));
         app.on_key(press(KeyCode::Char('y')));
-        let e = &app.ws.entries()[0];
+        let e = &app.engine.ws.entries()[0];
         assert_eq!(e.kind(), AgentKind::Program);
         assert_eq!(e.saved.conversation, None, "not given a conversation");
     }
@@ -3958,14 +3979,14 @@ Cost",
              Lillignode gives Claude Code its conversation itself. Or start it as a plain program."
         );
         app.on_key(press(KeyCode::Char('y')));
-        assert!(app.ws.entries().is_empty(), "y does nothing while it cannot start");
+        assert!(app.engine.ws.entries().is_empty(), "y does nothing while it cannot start");
         // As a plain program it can.
         app.on_key(press(KeyCode::Char('k')));
         app.on_key(press(KeyCode::Char('k')));
         assert!(app.bar().starts_with("Start it as a plain program? y / n / k"), "{}", app.bar());
         app.on_key(press(KeyCode::Esc));
         assert_eq!(app.notice.as_deref(), Some("Cancelled. Nothing was started."));
-        assert!(app.ws.entries().is_empty());
+        assert!(app.engine.ws.entries().is_empty());
     }
 
     #[test]
@@ -3983,7 +4004,7 @@ Cost",
     fn a_start_refused_for_another_reason_than_the_folder_does_not_send_you_to_the_folder() {
         let mut app = app_with_claude_agents(0);
         for i in 0..crate::state::MOST_AGENTS {
-            app.ws.start_as_named("cmd", std::env::temp_dir().join(format!("f{i}"))).unwrap();
+            app.engine.ws.start_as_named("cmd", std::env::temp_dir().join(format!("f{i}"))).unwrap();
         }
         answer_form(&mut app, &["cmd", "", ""]);
         let notice = app.notice.clone().unwrap();
@@ -3995,7 +4016,7 @@ Cost",
     #[test]
     fn an_agent_started_as_a_kind_its_name_does_not_suggest_says_so_when_it_fails() {
         let mut app = app_with_claude_agents(0);
-        app.ws.start_new("wrapper", vec![], AgentKind::ClaudeCode, std::env::temp_dir()).unwrap();
+        app.engine.ws.start_new("wrapper", vec![], AgentKind::ClaudeCode, std::env::temp_dir()).unwrap();
         app.on_agent_event(AgentEvent::Exited(AgentId(1), crate::agent::Exit { code: 2 }));
         let notice = app.notice.clone().unwrap();
         assert!(
@@ -4006,7 +4027,7 @@ Cost",
             "{notice}"
         );
         // Started as what its name says, nothing more is said.
-        app.ws.start_as_named("claude", std::env::temp_dir()).unwrap();
+        app.engine.ws.start_as_named("claude", std::env::temp_dir()).unwrap();
         app.on_agent_event(AgentEvent::Exited(AgentId(2), crate::agent::Exit { code: 2 }));
         assert!(app.notice.clone().unwrap().ends_with("x to remove it."), "{:?}", app.notice);
     }
@@ -4015,7 +4036,7 @@ Cost",
     fn typing_at_a_stopped_agent_goes_nowhere_and_never_removes_or_quits() {
         let mut app = app_with_claude_agents(2);
         report(&mut app, 2, "state=idle:app=claude-code");
-        let front = app.ws.focused_index().unwrap() as u32 + 1;
+        let front = app.engine.ws.focused_index().unwrap() as u32 + 1;
         app.on_agent_event(AgentEvent::Exited(AgentId(front), crate::agent::Exit { code: 0 }));
         app.notice = None;
         // Shell habits: "exit", "quit", Enter.
@@ -4023,7 +4044,7 @@ Cost",
             app.on_key(press(KeyCode::Char(c)));
         }
         app.on_key(press(KeyCode::Enter));
-        assert_eq!(app.ws.entries().len(), 2, "nothing was removed");
+        assert_eq!(app.engine.ws.entries().len(), 2, "nothing was removed");
         assert!(!app.quit, "nothing quit");
         assert!(matches!(app.mode, Mode::Normal), "no question was opened");
         let notice = app.notice.clone().unwrap();
@@ -4036,11 +4057,11 @@ Cost",
         assert!(app.bar().starts_with("Remove "), "{}", app.bar());
         assert!(app.bar().contains("? y / n"), "{}", app.bar());
         app.on_key(press(KeyCode::Char('n')));
-        assert_eq!(app.ws.entries().len(), 2);
+        assert_eq!(app.engine.ws.entries().len(), 2);
         app.on_key(press(KeyCode::F(12)));
         app.on_key(press(KeyCode::Char('x')));
         app.on_key(press(KeyCode::Char('y')));
-        assert_eq!(app.ws.entries().len(), 1);
+        assert_eq!(app.engine.ws.entries().len(), 1);
     }
 
     #[test]
@@ -4081,7 +4102,7 @@ Cost",
         app.on_key(press(KeyCode::F(12)));
         app.on_key(press(KeyCode::Char('v')));
         assert!(app.notice.clone().unwrap().starts_with("This window is too narrow"));
-        let behind = 1 - app.ws.focused_index().unwrap() as u32;
+        let behind = 1 - app.engine.ws.focused_index().unwrap() as u32;
         report(&mut app, behind + 1, PERMISSION);
         assert!(app.notice_text().unwrap().contains("This window is too narrow"), "still up until a key");
 
@@ -4107,7 +4128,7 @@ Cost",
         // One agent.
         let (mut app, _) = app_with_agent();
         app.set_window(WIDE);
-        let size = app.ws.size();
+        let size = app.engine.ws.size();
         app.on_key(press(KeyCode::F(12)));
         assert!(!app.bar().contains("v "), "the key is not offered where it would be refused: {}", app.bar());
         app.on_key(press(KeyCode::Char('v')));
@@ -4115,12 +4136,12 @@ Cost",
         assert!(notice.starts_with("Two agents side by side takes two agents, and one is open."), "{notice}");
         assert!(notice.contains("Nothing was changed."), "{notice}");
         assert!(notice.ends_with("Ctrl+Q then n starts another."), "{notice}");
-        assert_eq!((app.ws.pair(), app.ws.size()), (None, size));
+        assert_eq!((app.engine.ws.pair(), app.engine.ws.size()), (None, size));
 
         // Two agents, a window too narrow.
         let mut app = app_with_claude_agents(2);
         app.set_window(Rect::new(0, 0, 108, 30));
-        let size = app.ws.size();
+        let size = app.engine.ws.size();
         app.on_key(press(KeyCode::F(12)));
         app.on_key(press(KeyCode::Char('v')));
         let notice = app.notice.clone().unwrap();
@@ -4132,7 +4153,7 @@ Cost",
             "{notice}"
         );
         assert!(notice.ends_with("Widen the window, then Ctrl+Q then v."), "{notice}");
-        assert_eq!((app.ws.pair(), app.ws.size()), (None, size));
+        assert_eq!((app.engine.ws.pair(), app.engine.ws.size()), (None, size));
         assert!(matches!(app.mode, Mode::Normal));
 
         // A window too small to show agents at all.
@@ -4140,23 +4161,23 @@ Cost",
         app.on_key(press(KeyCode::F(12)));
         app.on_key(press(KeyCode::Char('v')));
         assert!(app.notice.clone().unwrap().starts_with("This window is too small to show agents at all"));
-        assert_eq!(app.ws.pair(), None);
+        assert_eq!(app.engine.ws.pair(), None);
     }
 
     #[test]
     fn v_puts_two_side_by_side_each_sized_to_its_half_and_v_again_goes_back() {
         let mut app = app_with_claude_agents(3);
         app.set_window(WIDE);
-        let whole = app.ws.size();
+        let whole = app.engine.ws.size();
         assert_eq!(whole, Size { rows: 27, cols: 102 });
         app.on_key(press(KeyCode::F(12)));
         assert!(app.bar().ends_with("v two side by side"), "{}", app.bar());
         app.on_key(press(KeyCode::Char('v')));
         // The agent in front (c) on the left, the next (a) beside it.
-        assert_eq!(app.ws.pair(), Some(crate::workspace::Pair { left: 2, right: 0 }));
+        assert_eq!(app.engine.ws.pair(), Some(crate::workspace::Pair { left: 2, right: 0 }));
         // Half the width less the rule between them, and a row for the heading.
-        assert_eq!(app.ws.size(), Size { rows: 26, cols: 50 });
-        for entry in app.ws.entries() {
+        assert_eq!(app.engine.ws.size(), Size { rows: 26, cols: 50 });
+        for entry in app.engine.ws.entries() {
             let (rows, cols) = entry.term.screen().size();
             assert_eq!((rows.get(), cols.get()), (26, 50), "every agent's terminal is the new size");
         }
@@ -4174,12 +4195,12 @@ Cost",
         app.on_key(press(KeyCode::Tab));
         app.on_key(press(KeyCode::Esc));
         assert!(app.bar().ends_with("Typing goes to Claude Code (a), on the right."), "{}", app.bar());
-        assert_eq!(app.ws.size(), Size { rows: 26, cols: 50 });
+        assert_eq!(app.engine.ws.size(), Size { rows: 26, cols: 50 });
 
         app.on_key(press(KeyCode::F(12)));
         assert!(app.bar().ends_with("v one agent"), "{}", app.bar());
         app.on_key(press(KeyCode::Char('v')));
-        assert_eq!((app.ws.pair(), app.ws.size()), (None, whole));
+        assert_eq!((app.engine.ws.pair(), app.engine.ws.size()), (None, whole));
         assert_eq!(
             app.notice.as_deref(),
             Some("One agent on screen: Claude Code (a). Every agent was told its new size.")
@@ -4197,8 +4218,8 @@ Cost",
         app.set_window(Rect::new(0, 0, 100, 30));
         assert!(!app.two_shown());
         // The user's choice is kept; the agents have the whole area for now.
-        assert!(app.ws.pair().is_some());
-        assert_eq!(app.ws.size(), Size { rows: 27, cols: 72 });
+        assert!(app.engine.ws.pair().is_some());
+        assert_eq!(app.engine.ws.size(), Size { rows: 27, cols: 72 });
         assert_eq!(
             app.notice.as_deref(),
             Some(
@@ -4213,12 +4234,12 @@ Cost",
         assert_eq!(app.notice, None);
         app.set_window(WIDE);
         assert!(app.two_shown());
-        assert_eq!(app.ws.size(), Size { rows: 26, cols: 50 });
+        assert_eq!(app.engine.ws.size(), Size { rows: 26, cols: 50 });
         assert_eq!(app.notice.as_deref(), Some("There is room again: two agents are side by side."));
         // Narrow again, and this time choose to stay with one: nothing is
         // resized, no question is asked, and widening brings nothing back.
         app.set_window(Rect::new(0, 0, 100, 30));
-        let size = app.ws.size();
+        let size = app.engine.ws.size();
         app.on_key(press(KeyCode::F(12)));
         app.on_key(press(KeyCode::Char('v')));
         assert!(matches!(app.mode, Mode::Normal));
@@ -4229,7 +4250,7 @@ Cost",
                  No agent was resized."
             )
         );
-        assert_eq!((app.ws.pair(), app.ws.size()), (None, size));
+        assert_eq!((app.engine.ws.pair(), app.engine.ws.size()), (None, size));
         app.set_window(WIDE);
         assert!(!app.two_shown());
     }
@@ -4238,7 +4259,7 @@ Cost",
     fn changing_the_view_while_an_agent_needs_you_asks_first() {
         let mut app = app_with_claude_agents(2);
         app.set_window(WIDE);
-        let whole = app.ws.size();
+        let whole = app.engine.ws.size();
         report(&mut app, 1, PERMISSION);
         app.on_key(press(KeyCode::F(12)));
         app.on_key(press(KeyCode::Char('v')));
@@ -4248,9 +4269,13 @@ Cost",
             narrow.starts_with("Resize every agent now? y / n   Waiting for you: Claude Code (a)."),
             "{narrow}"
         );
-        assert_eq!((app.ws.pair(), app.ws.size()), (None, whole), "nothing happens before the answer");
+        assert_eq!(
+            (app.engine.ws.pair(), app.engine.ws.size()),
+            (None, whole),
+            "nothing happens before the answer"
+        );
         app.on_key(press(KeyCode::Char('n')));
-        assert_eq!((app.ws.pair(), app.ws.size()), (None, whole));
+        assert_eq!((app.engine.ws.pair(), app.engine.ws.size()), (None, whole));
         assert_eq!(app.notice.as_deref(), Some("The view was left as it was. No agent was resized."));
 
         app.on_key(press(KeyCode::F(12)));
@@ -4262,7 +4287,7 @@ Cost",
         app.on_key(press(KeyCode::Char('v')));
         assert!(matches!(app.mode, Mode::Confirm(Confirm::View)));
         app.on_key(press(KeyCode::Char('y')));
-        assert_eq!((app.ws.pair(), app.ws.size()), (None, whole));
+        assert_eq!((app.engine.ws.pair(), app.engine.ws.size()), (None, whole));
 
         // A change that would be refused anyway is refused without a question.
         app.set_window(Rect::new(0, 0, 100, 30));
@@ -4276,7 +4301,7 @@ Cost",
     fn two_side_by_side_are_drawn_with_a_heading_saying_where_typing_goes() {
         use ratatui::style::Color;
         let mut app = app_with_claude_agents(2);
-        let sent = app.ws.entries().len();
+        let sent = app.engine.ws.entries().len();
         assert_eq!(sent, 2);
         app.set_window(WIDE);
         app.on_key(press(KeyCode::F(12)));
@@ -4355,10 +4380,10 @@ Cost",
     fn closing_one_of_two_gives_the_other_the_whole_screen_and_says_so() {
         let mut app = app_with_claude_agents(2);
         app.set_window(WIDE);
-        let whole = app.ws.size();
+        let whole = app.engine.ws.size();
         app.on_key(press(KeyCode::F(12)));
         app.on_key(press(KeyCode::Char('v')));
-        assert_ne!(app.ws.size(), whole);
+        assert_ne!(app.engine.ws.size(), whole);
         app.on_key(press(KeyCode::F(12)));
         app.on_key(press(KeyCode::Char('x')));
         app.on_key(press(KeyCode::Char('y')));
@@ -4369,7 +4394,7 @@ Cost",
                  screen again."
             )
         );
-        assert_eq!((app.ws.pair(), app.ws.size()), (None, whole));
+        assert_eq!((app.engine.ws.pair(), app.engine.ws.size()), (None, whole));
     }
 
     #[test]
@@ -4390,15 +4415,15 @@ Cost",
         check(screen(&app, 100, 20), "welcome");
         check(screen(&app, 40, 8), "too small");
         app = app_with_claude_agents(6);
-        app.ws.start_as_named("cmd", std::env::temp_dir().join("a-folder-with-a-long-name")).unwrap();
-        app.ws.start_as_named("nosuch", std::env::temp_dir()).unwrap();
+        app.engine.ws.start_as_named("cmd", std::env::temp_dir().join("a-folder-with-a-long-name")).unwrap();
+        app.engine.ws.start_as_named("nosuch", std::env::temp_dir()).unwrap();
         report(&mut app, 1, "state=working:app=claude-code");
         report(&mut app, 2, PERMISSION);
         report(&mut app, 3, "state=done:app=claude-code");
         report(&mut app, 4, "state=idle:app=claude-code");
         report(&mut app, 5, "state=error:app=claude-code:msg=Ym9vbQ==");
         app.on_agent_event(AgentEvent::Exited(AgentId(6), crate::agent::Exit { code: 3 }));
-        app.ws.read_cost_from(None);
+        app.engine.ws.read_cost_from(None);
         app.notice = Some(format!("{}. Then press r.", "word ".repeat(80).trim_end()));
         for clock in 0..2 {
             app.clock = clock;
@@ -4498,7 +4523,7 @@ Cost",
     /// (id 2), which is in front.
     fn app_with_claude_and_codex() -> App<Fake> {
         let mut app = app_with_claude_agents(1);
-        app.ws.start_as_named("codex", std::env::temp_dir().join("web")).unwrap();
+        app.engine.ws.start_as_named("codex", std::env::temp_dir().join("web")).unwrap();
         app.notice = None;
         app
     }
@@ -4511,7 +4536,7 @@ Cost",
     fn the_quit_question_names_every_agent_that_does_not_keep_its_conversation() {
         let mut app = app_with_claude_and_codex();
         report(&mut app, 1, "state=working:app=claude-code");
-        app.ws.start_as_named("aider", std::env::temp_dir().join("tools")).unwrap();
+        app.engine.ws.start_as_named("aider", std::env::temp_dir().join("tools")).unwrap();
         app.on_key(press(KeyCode::F(12)));
         app.on_key(press(KeyCode::Char('q')));
         let bar = app.bar();
@@ -4534,7 +4559,7 @@ Cost",
 
         // Two Codex agents: both named, in one sentence.
         app.on_key(press(KeyCode::Char('n')));
-        app.ws.start_as_named("codex", std::env::temp_dir().join("api")).unwrap();
+        app.engine.ws.start_as_named("codex", std::env::temp_dir().join("api")).unwrap();
         app.on_key(press(KeyCode::F(12)));
         app.on_key(press(KeyCode::Char('q')));
         assert!(
@@ -4553,7 +4578,7 @@ Cost",
     #[test]
     fn a_codex_agent_that_needs_you_is_counted_named_and_rings_like_any_other() {
         let mut app = app_with_claude_and_codex();
-        assert_eq!(app.ws.focused().unwrap().label(), "Codex (web)");
+        assert_eq!(app.engine.ws.focused().unwrap().label(), "Codex (web)");
         report(&mut app, 1, "state=idle:app=claude-code");
         codex_reports(&mut app, 2, "state=working:app=codex");
         assert!(!app.after_events());
@@ -4564,7 +4589,7 @@ Cost",
         assert!(!app.after_events(), "once");
         assert_eq!(app.needs_you_count(), 1);
         // From behind another agent, the notice names it.
-        app.ws.focus_next();
+        app.engine.ws.focus_next();
         let notice = app.needs_you_notice().unwrap();
         assert!(notice.contains("Codex (web)"), "{notice}");
 
@@ -4601,7 +4626,7 @@ Cost",
         assert!(!text.contains("Checked with Claude Code"), "{text}");
 
         // The Claude Code agent's report is as it was.
-        app.ws.focus_next();
+        app.engine.ws.focus_next();
         let text = app.status_report_text();
         assert!(text.starts_with("Status report for Claude Code (a)"), "{text}");
         assert!(text.contains("CLAUDE_CODE_DISABLE_TERMINAL_TITLE is set"), "{text}");
@@ -4618,7 +4643,7 @@ Cost",
         app.newer_pty_missing = true;
         app.status_off_switch = Some("1".into());
         report(&mut app, 1, "state=idle:app=claude-code");
-        app.ws.tick(Instant::now() + status::STARTING_DEADLINE);
+        app.engine.ws.tick(Instant::now() + status::STARTING_DEADLINE);
         app.after_events();
         let notice = app.notice.clone().unwrap();
         assert_eq!(
@@ -4635,8 +4660,8 @@ Cost",
 
         // Once for Codex: a second silent Codex agent says nothing more.
         app.notice = None;
-        app.ws.start_as_named("codex", std::env::temp_dir().join("docs")).unwrap();
-        app.ws.tick(Instant::now() + status::STARTING_DEADLINE + status::STARTING_DEADLINE);
+        app.engine.ws.start_as_named("codex", std::env::temp_dir().join("docs")).unwrap();
+        app.engine.ws.tick(Instant::now() + status::STARTING_DEADLINE + status::STARTING_DEADLINE);
         app.after_events();
         assert_eq!(app.notice, None);
 
@@ -4653,10 +4678,10 @@ Cost",
     #[test]
     fn a_plain_program_and_codex_never_have_a_cost_and_say_so() {
         let mut app = app_with_claude_and_codex();
-        app.ws.read_cost_from(None);
+        app.engine.ws.read_cost_from(None);
         app.config.cost = true;
         let text = app.status_report_text();
         assert!(text.contains("Lillignode reads cost only for Claude Code."), "{text}");
-        assert_eq!(app.ws.focused().unwrap().cost(), Cost::Unknown(WhyNot::NotClaudeCode));
+        assert_eq!(app.engine.ws.focused().unwrap().cost(), Cost::Unknown(WhyNot::NotClaudeCode));
     }
 }

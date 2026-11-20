@@ -155,8 +155,8 @@ fn main() -> ExitCode {
     // has asked for it. Where the records are is found here, in the real
     // program only.
     if app.config.cost {
-        app.ws.read_cost_from(lillignode::cost::claude_folder_from_env());
-        app.ws.set_cost_warning(app.config.cost_warning_tokens);
+        app.engine.ws.read_cost_from(lillignode::cost::claude_folder_from_env());
+        app.engine.ws.set_cost_warning(app.config.cost_warning_tokens);
     }
     app.colors = lillignode::look::depth(app.config.colors, |name| std::env::var(name).ok(), cfg!(windows));
     let started = Instant::now();
@@ -195,7 +195,7 @@ fn main() -> ExitCode {
             Err(RecvTimeoutError::Timeout) => None,
             Err(RecvTimeoutError::Disconnected) => break,
         };
-        app.ws.tick(Instant::now());
+        app.engine.ws.tick(Instant::now());
         for msg in first.into_iter().chain(rx.try_iter()) {
             match msg {
                 Msg::Agent(event) => {
@@ -223,17 +223,17 @@ fn main() -> ExitCode {
         }
     }
 
-    let stopped = app.ws.running_labels();
-    let ended = app.ws.ended_labels();
+    let stopped = app.engine.ws.running_labels();
+    let ended = app.engine.ws.ended_labels();
     let saved = app.save();
-    app.ws.stop_all();
+    app.engine.ws.stop_all();
     restore_terminal();
 
     if let Some(e) = draw_error {
         eprintln!("Lillignode could not draw to this terminal ({e}) and closed.");
     }
     println!("{}", lillignode::workspace::closing_line(&stopped, &ended));
-    let remembered = app.ws.entries().len();
+    let remembered = app.engine.ws.entries().len();
     match saved {
         Ok(()) if remembered > 0 => {
             println!("Your workspace was saved. Its agents reopen next time you run lillignode.")

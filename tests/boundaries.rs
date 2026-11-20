@@ -10,8 +10,19 @@ use std::fs;
 use std::path::Path;
 
 /// Runs agents, tracks them, saves them. No screen, no keyboard.
-const ENGINE: &[&str] =
-    &["action", "agent", "config", "cost", "kind", "local", "state", "status", "terminal", "workspace"];
+const ENGINE: &[&str] = &[
+    "action",
+    "agent",
+    "config",
+    "cost",
+    "engine",
+    "kind",
+    "local",
+    "state",
+    "status",
+    "terminal",
+    "workspace",
+];
 
 /// Draws, reads keys, and words what the engine decided.
 const FACE: &[&str] = &["app", "input", "keys", "look", "main", "ui", "view"];

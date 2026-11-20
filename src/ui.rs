@@ -256,11 +256,11 @@ fn draw_sidebar<B: AgentBackend>(frame: &mut Frame, area: Rect, app: &App<B>, p:
         heading.push(Span::styled(format!("{waiting} NEEDS YOU"), p.needs_you_text()));
     }
     let mut lines = vec![Line::from(heading)];
-    if app.ws.entries().is_empty() {
+    if app.engine.ws.entries().is_empty() {
         lines.push(Line::from(Span::styled(" No agents yet. Press n.", p.dim())));
     }
     // Which agents fit. The total of cost at the foot gives way first.
-    let entries = app.ws.entries();
+    let entries = app.engine.ws.entries();
     let per = if app.cost_shown() { 3 } else { 2 };
     let total = app.cost_total();
     let room = (area.height as usize).saturating_sub(1);
@@ -269,15 +269,15 @@ fn draw_sidebar<B: AgentBackend>(frame: &mut Frame, area: Rect, app: &App<B>, p:
     let pointer = !total.is_empty() && !total_fits;
     let agent_room = if pointer { room.saturating_sub(1) } else { room };
     let needs: Vec<bool> = entries.iter().map(|e| e.needs_you().is_some()).collect();
-    let front = app.ws.focused_index().unwrap_or(0);
-    let beside = app.ws.pair().map(|pair| if pair.left == front { pair.right } else { pair.left });
+    let front = app.engine.ws.focused_index().unwrap_or(0);
+    let beside = app.engine.ws.pair().map(|pair| if pair.left == front { pair.right } else { pair.left });
     let (first, last) = shown_agents(&needs, per, agent_room, front, beside, app.sidebar_top.get());
     app.sidebar_top.set(first);
     if first > 0 {
         lines.extend(more_rows(&entries[..first], "above", row, p));
     }
     for (i, entry) in entries.iter().enumerate().take(last + 1).skip(first) {
-        let focused = app.ws.focused_index() == Some(i);
+        let focused = app.engine.ws.focused_index() == Some(i);
         lines.extend(agent_rows(entry, focused, row, app.clock, p));
         if app.cost_shown() {
             // A third line, only when the user has switched cost on.
@@ -285,7 +285,7 @@ fn draw_sidebar<B: AgentBackend>(frame: &mut Frame, area: Rect, app: &App<B>, p:
             let known = matches!(entry.cost(), Cost::Known(_));
             // Past the user's warning: PAST WARNING leads the figure, and
             // it is bold. Not yellow, which means only Needs you.
-            let style = match (known, app.ws.over_cost_warning(entry)) {
+            let style = match (known, app.engine.ws.over_cost_warning(entry)) {
                 (_, Some(_)) => Style::default().add_modifier(Modifier::BOLD),
                 (true, None) => Style::default(),
                 (false, None) => p.dim(),
@@ -484,7 +484,7 @@ fn pane_head(entry: &Entry, front: bool, keys_go_to_agents: bool, width: usize, 
 /// The two agents side by side, if the user asked for two and the window
 /// has room for them.
 fn pair_shown<B: AgentBackend>(app: &App<B>, window: Rect) -> Option<crate::workspace::Pair> {
-    app.ws.pair().filter(|_| fits_two(window))
+    app.engine.ws.pair().filter(|_| fits_two(window))
 }
 
 fn draw_agent<B: AgentBackend>(frame: &mut Frame, area: Rect, app: &App<B>, p: Palette) {
@@ -492,7 +492,7 @@ fn draw_agent<B: AgentBackend>(frame: &mut Frame, area: Rect, app: &App<B>, p: P
         draw_report(frame, area, app, p);
         return;
     }
-    let Some(front) = app.ws.focused() else {
+    let Some(front) = app.engine.ws.focused() else {
         draw_welcome(frame, area, app, p);
         return;
     };
@@ -503,8 +503,8 @@ fn draw_agent<B: AgentBackend>(frame: &mut Frame, area: Rect, app: &App<B>, p: P
     let panes = panes(area);
     let sides = [(pair.left, panes.left_head, panes.left), (pair.right, panes.right_head, panes.right)];
     for (index, head, body) in sides {
-        let Some(entry) = app.ws.entries().get(index) else { continue };
-        let in_front = app.ws.focused_index() == Some(index);
+        let Some(entry) = app.engine.ws.entries().get(index) else { continue };
+        let in_front = app.engine.ws.focused_index() == Some(index);
         let keys_go_to_agents = matches!(app.mode, Mode::Normal);
         let line = pane_head(entry, in_front, keys_go_to_agents, head.width as usize, p);
         frame.render_widget(Paragraph::new(line), head);
@@ -645,7 +645,7 @@ pub fn draw<B: AgentBackend>(frame: &mut Frame, app: &App<B>) {
     let window = frame.area();
     let p = Palette(app.colors);
     let Some(a) = areas(window) else {
-        let running = app.ws.running_labels().len();
+        let running = app.engine.ws.running_labels().len();
         // The bar text is included so the way to the menu, and any question
         // Lillignode is asking, stay visible even here.
         let text = format!(
@@ -684,14 +684,14 @@ pub fn draw<B: AgentBackend>(frame: &mut Frame, app: &App<B>) {
     if let Some(cursor) = cursor {
         frame.set_cursor_position(Position::new(a.bar.x + (cursor - skip) as u16, a.bar.y));
     } else if matches!(app.mode, Mode::Normal) {
-        if let Some(entry) = app.ws.focused().filter(|e| e.is_running()) {
+        if let Some(entry) = app.engine.ws.focused().filter(|e| e.is_running()) {
             let screen = entry.term.screen();
             // While reading history the cursor's row is not on screen.
             if !screen.hide_cursor() && entry.term.scrolled_back() == 0 {
                 // With two agents side by side, the cursor is in the one
                 // that typing goes to.
                 let at = match pair_shown(app, window) {
-                    Some(pair) if app.ws.focused_index() == Some(pair.right) => panes(a.agent).right,
+                    Some(pair) if app.engine.ws.focused_index() == Some(pair.right) => panes(a.agent).right,
                     Some(_) => panes(a.agent).left,
                     None => a.agent,
                 };
