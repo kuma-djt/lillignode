@@ -786,13 +786,13 @@ fn any_program(sb: &Sandbox, standin: &Path) {
 /// agent Needs you, is named, can be dismissed, and comes back.
 fn waiting_parts(sb: &Sandbox, standin: &Path) {
     println!("S. A part of a program that is waiting (stand-in that sends parts)");
-    let dir = sb.root.join("parts");
-    std::fs::create_dir_all(&dir).unwrap();
-    launcher(&dir, standin, "helper", "parts");
-    launcher(&dir, standin, "other", "parts");
+    // On PATH, so the agents have short names and a notice naming one is
+    // not cut wherever the throwaway folder is.
+    launcher(&sb.launchers, standin, "helper", "parts");
+    launcher(&sb.launchers, standin, "other", "parts");
     let state = sb.root.join("state-parts");
     let mut s = Session::start_in(sb, &state);
-    s.new_agent(&dir.join("helper").display().to_string());
+    s.new_agent("helper");
     s.expect("it starts", "STANDIN READY parts");
     s.keys(b"o");
     s.expect("its own record: done", "work  Done ");
@@ -822,10 +822,10 @@ fn waiting_parts(sb: &Sandbox, standin: &Path) {
     check("with no second bell", bells(&s) == bells_before + 1, &format!("{}", bells(&s) - bells_before));
 
     // Not in front: the notice names the agent and says a part is why.
-    s.new_agent(&dir.join("other").display().to_string());
+    s.new_agent("other");
     s.expect(
         "with another agent in front, the notice says a part is waiting",
-        "needs you: one of its parts is waiting, a part with",
+        "helper (work) needs you: one of its parts is waiting, a part with no name, waiting since",
     );
     s.raw(CTRL_Q);
     s.keys(b"\t");
