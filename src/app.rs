@@ -335,9 +335,18 @@ pub fn restore_text(report: &RestoreReport) -> Option<String> {
     let failures: Vec<String> =
         report.not_restored.iter().map(|(label, why)| format!("{label}: {why}")).collect();
     let restored = if came_back.is_empty() { String::new() } else { format!(" ({})", came_back.join(", ")) };
+    // r is offered only where starting again can help.
+    let cannot_help =
+        report.not_restored.iter().filter(|(_, why)| crate::workspace::start_again_cannot_help(why)).count();
+    let way_out = if cannot_help == 0 {
+        "Switch to one, fix the cause, then r to try again or x to remove it."
+    } else if cannot_help == report.not_restored.len() {
+        "Switch to one, then x to remove it; r will not help."
+    } else {
+        "Switch to one, then x to remove it, or fix the cause and r to try again where r can help."
+    };
     Some(format!(
-        "Restored {} of {}{restored}. Not restored: {}. Each is still in your workspace. Switch to \
-         one, fix the cause, then r to try again or x to remove it.",
+        "Restored {} of {}{restored}. Not restored: {}. Each is still in your workspace. {way_out}",
         report.restored.len(),
         plural(total, "agent", "agents"),
         failures.join("; ")
@@ -1179,7 +1188,7 @@ impl<B: AgentBackend> App<B> {
                 self.focused_label()
             ),
             Mode::Confirm(Confirm::Close) => format!(
-                "Remove {}? y / n   It has stopped: removing it takes it and its conversation out of your 
+                "Remove {}? y / n   It has stopped: removing it takes it and its conversation out of your \
                  workspace.",
                 self.focused_label()
             ),
@@ -2060,6 +2069,63 @@ mod tests {
         };
         let text = restore_text(&some).unwrap();
         assert!(text.starts_with("Restored 1 of 2 agents (Claude Code (api) (continuing its conversation)). Not restored: codex (web): \"codex\" is not installed"), "{text}");
+        assert!(
+            text.ends_with("Switch to one, fix the cause, then r to try again or x to remove it."),
+            "{text}"
+        );
+    }
+
+    /// Found in a check by hand: with an agent refused for its saved entry,
+    /// the screen and the bar no longer offered r, but the restore notice did.
+    #[test]
+    fn the_restore_notice_offers_r_only_where_starting_again_can_help() {
+        let refused = format!("its name holds a control character. {}", crate::agent::FIX_IN_THE_FILE);
+        let missing = "\"codex\" is not installed or not on PATH".to_string();
+        let only_refused = RestoreReport {
+            restored: vec![Restored { label: "Claude Code (api)".into(), continuing: true }],
+            not_restored: vec![("bell (web)".into(), refused.clone())],
+        };
+        let text = restore_text(&only_refused).unwrap();
+        assert!(
+            text.ends_with(
+                "Each is still in your workspace. Switch to one, then x to remove it; r will not help."
+            ),
+            "{text}"
+        );
+        assert!(!text.contains("r to try again"), "{text}");
+
+        let both = RestoreReport {
+            restored: vec![],
+            not_restored: vec![("bell (web)".into(), refused), ("codex (web)".into(), missing)],
+        };
+        let text = restore_text(&both).unwrap();
+        assert!(
+            text.ends_with(
+                "Switch to one, then x to remove it, or fix the cause and r to try again where r can help."
+            ),
+            "{text}"
+        );
+
+        // From a saved workspace, as at launch, the same.
+        let mut app = app_with_claude_agents(0);
+        let bell = crate::state::SavedAgent {
+            name: "bell\u{7}".into(),
+            command: "cmd".into(),
+            kind: Some("program".into()),
+            args: vec![],
+            folder: std::env::temp_dir(),
+            conversation: None,
+            other: Default::default(),
+        };
+        let report = app.ws.restore(crate::state::SavedWorkspace {
+            version: crate::state::VERSION,
+            agents: vec![bell],
+            focused: Some(0),
+            other: Default::default(),
+        });
+        let text = restore_text(&report).unwrap();
+        assert!(!text.contains("r to try again"), "{text}");
+        assert!(text.ends_with("r will not help."), "{text}");
     }
 
     #[test]
@@ -3733,6 +3799,13 @@ Cost",
         app.on_key(press(KeyCode::F(12)));
         app.on_key(press(KeyCode::Char('x')));
         assert!(app.bar().starts_with("Remove "), "{}", app.bar());
+        // The sentence is one line, with no run of spaces
+        // inside it but the gap after the keys.
+        let bar = app.bar();
+        assert!(!bar.contains('\n'), "{bar:?}");
+        let (keys, rest) = bar.split_once("? y / n   ").expect("keys first");
+        assert!(!keys.contains("  ") && !rest.contains("  "), "{bar:?}");
+        assert!(rest.ends_with("out of your workspace."), "{bar:?}");
         assert!(app.bar().contains("? y / n"), "{}", app.bar());
         app.on_key(press(KeyCode::Char('n')));
         assert_eq!(app.ws.entries().len(), 2);
