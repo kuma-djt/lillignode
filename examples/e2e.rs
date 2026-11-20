@@ -138,6 +138,13 @@ impl Session {
         }
     }
 
+    /// Takes output until none has come for 100 ms (at most 10 s), so a
+    /// screen is read whole and not halfway through being drawn.
+    fn settle(&mut self) {
+        let end = Instant::now() + Duration::from_secs(10);
+        while self.pump(Duration::from_millis(100)) && Instant::now() < end {}
+    }
+
     fn rows(&self) -> Vec<String> {
         let cols = self.term.screen().size().1.get();
         self.term.screen().rows(0, cols).collect()
@@ -234,6 +241,7 @@ impl Session {
         self.raw(CTRL_Q);
         self.keys(b"n");
         self.keys(command.as_bytes());
+        self.keys(b"\r");
         self.keys(b"\r");
         self.keys(b"\r");
     }
@@ -340,6 +348,7 @@ fn cost(sb: &Sandbox) {
     s.keys(b"n");
     s.keys(b"\r");
     s.keys(b"\r");
+    s.keys(b"\r");
     s.expect("a new Claude Code agent", "STANDIN CLAUDE new ");
     s.keys(b"early");
     s.keys(b"\r");
@@ -360,6 +369,7 @@ fn cost(sb: &Sandbox) {
     std::fs::write(state.join("config.json"), r#"{ "cost": true, "cost_warning_tokens": 30000 }"#).unwrap();
     let mut s = Session::start_in(sb, &state);
     s.keys(b"n");
+    s.keys(b"\r");
     s.keys(b"\r");
     s.keys(b"\r");
     s.expect("a new Claude Code agent, with cost switched on", "STANDIN CLAUDE new ");
@@ -568,6 +578,304 @@ fn side_by_side(sb: &Sandbox, standin: &Path) {
     drop(s.quit("quit", true));
 }
 
+/// A second kind of agent. The stand-in is named codex, so it is taken for
+/// Codex: its status is read from reports it sends without asking, which
+/// need no answer, so this passes with either pseudo-terminal.
+fn codex(sb: &Sandbox, standin: &Path) {
+    println!("P. Status reported by a second kind of agent (stand-in for Codex)");
+    let reports = sb.root.join("codex-reports");
+    let silent = sb.root.join("codex-silent");
+    for (dir, mode) in [(&reports, "codex"), (&silent, "status-silent")] {
+        std::fs::create_dir_all(dir).unwrap();
+        launcher(dir, standin, "codex", mode);
+    }
+    let state = sb.root.join("state-codex");
+    let mut s = Session::start_in(sb, &state);
+    s.new_agent(&reports.join("codex").display().to_string());
+    s.expect("it starts", "STANDIN READY codex");
+    s.expect("its first report shows, with nothing asked and nothing answered", "work  Idle ");
+    s.expect("it is named Codex, with the sign for Idle", ">/\\z Codex");
+    let bells_before = bells(&s);
+    s.keys(b"w");
+    s.expect("reported: working", "work  Working ");
+    s.keys(b"p");
+    s.expect("reported: needs permission, the yellow block", "work  NEEDS YOU   ");
+    s.expect("the heading counts it", " Lillignode  1 NEEDS YOU");
+    s.expect("and its mark carries the sign for Needs you", ">/\\! Codex");
+    s.raw(CTRL_Q);
+    s.keys(b"s");
+    s.expect("the status report is about Codex", "Status report for Codex (work)");
+    s.expect("what it needs is there", "Status: Needs you: permission.");
+    s.expect("it says nothing was asked", "Status question: not asked. A program may report without asking.");
+    s.expect("and who sent it", "Sent by: Codex.");
+    s.expect("with the report as it arrived", "ESC ]7501;state=blocked:app=codex:kind=permission");
+    s.expect("and which Codex it was checked with", "Checked with Codex 0.169.0.");
+    s.never("and nothing about Claude Code's own switch", "CLAUDE_CODE_DISABLE_TERMINAL_TITLE");
+    s.keys(b"z");
+    s.keys(b"q");
+    s.expect("reported: has a question", "SENT q");
+    s.keys(b"a");
+    s.expect("reported: needs signing in", "SENT a");
+    s.expect("still needing you", "work  NEEDS YOU   ");
+    s.keys(b"d");
+    s.expect("reported: done", "work  Done ");
+    s.expect_gone("the heading count goes", "NEEDS YOU");
+    // The agent's own bell characters, one at the end of every title, are
+    // not Lillignode's and are never passed on.
+    check(
+        "the bell rang once for one stretch of needing you",
+        bells(&s) == bells_before + 1,
+        &format!("{} bells", bells(&s) - bells_before),
+    );
+    s.keys(b"e");
+    s.expect("reported: failed", "work  Error   ");
+    s.keys(b"c");
+    s.expect("a withdrawn status is Unknown", "work  Unknown   ");
+    s.never("which is about this agent, not about Codex's reporting", "Status shows Unknown");
+    s.keys(b"i");
+    s.expect("the next report replaces it", "work  Idle ");
+    s.keys(b"x");
+    s.expect(
+        "a report under another program's name is read: the report says who it is",
+        "work  NEEDS YOU   ",
+    );
+    s.raw(CTRL_Q);
+    s.keys(b"s");
+    s.expect(
+        "and the status report says whose name it carried, and that it differs",
+        "Sent by: Claude Code. This agent was started as Codex",
+    );
+    s.keys(b"z");
+    s.keys(b"u");
+    s.expect("a state Lillignode does not know", "SENT u");
+    s.expect("is Unknown, never the nearest match", "work  Unknown   ");
+    s.expect(
+        "a notice says so, naming Codex",
+        "Status shows Unknown: Codex sent a status Lillignode does not understand",
+    );
+    s.keys(b"d");
+    s.expect("done again", "work  Done ");
+    // Everything is finished, so quit does not ask.
+    s.raw(CTRL_Q);
+    s.keys(b"q");
+    drop(s.quit_already_asked("quit with Codex Done does not ask"));
+    let saved = std::fs::read_to_string(state.join("workspace.json")).unwrap();
+    check("it is saved as Codex", saved.contains("\"kind\": \"codex\""), &saved);
+    check("with no conversation to continue", !saved.contains("conversation"), &saved);
+
+    let mut s = Session::start_in(sb, &state);
+    s.expect(
+        "it comes back, and is not said to continue a conversation",
+        "Restored 1 agent: Codex (work) (new conversation).",
+    );
+    s.expect("and is read again from its first report", "work  Idle ");
+    drop(s.quit("quit", false));
+
+    println!("P2. A Codex that reports nothing, as when it is signed out");
+    let mut s = Session::start_in(sb, &sb.root.join("state-codex-silent"));
+    s.new_agent(&silent.join("codex").display().to_string());
+    s.expect("it starts", "STANDIN READY status-silent");
+    s.expect("shows Starting at first", "work  Starting ");
+    s.pump_for(status_deadline());
+    s.expect("and Unknown once the deadline passes", "work  Unknown   ");
+    s.expect(
+        "the notice is Codex's own, and leads with the likeliest cause",
+        "Status shows Unknown: Codex is not reporting it. If it is signed out it reports nothing:",
+    );
+    s.expect(
+        "with what to do and that nothing was changed",
+        "sign in and it will. Agents work as before; nothing was changed.",
+    );
+    s.never("not the notice about the two files, which Codex does not need", "conpty.dll");
+    s.raw(CTRL_Q);
+    s.keys(b"s");
+    s.expect("the status report says why", "Codex sent no status report within 15 seconds of starting.");
+    s.keys(b"z");
+    s.raw(CTRL_Q);
+    s.keys(b"q");
+    s.expect("quit asks, because its status is not known", "Quit and stop 1 running agent? y / n");
+    s.expect("and names it", "Not finished or not known: Codex (work) (Unknown: no report).");
+    s.keys(b"n");
+    drop(s.quit("quit", true));
+}
+
+/// Any program that reports its status has it shown. The stand-in is
+/// named deploy, which Lillignode knows nothing about, and reports without
+/// asking, so this passes with either pseudo-terminal.
+fn any_program(sb: &Sandbox, standin: &Path) {
+    println!("Q. Status reported by a program Lillignode knows nothing about");
+    let dir = sb.root.join("any-program");
+    std::fs::create_dir_all(&dir).unwrap();
+    launcher(&dir, standin, "deploy", "reports");
+    let state = sb.root.join("state-any-program");
+    let mut s = Session::start_in(sb, &state);
+    s.new_agent(&dir.join("deploy").display().to_string());
+    s.expect("it starts", "STANDIN READY reports");
+    s.expect("with nothing said, it is Unknown from the start, not Starting", "work  Unknown   ");
+    s.never("and that is not worth a notice: nothing was expected of it", "Status shows Unknown");
+    s.raw(CTRL_Q);
+    s.keys(b"s");
+    s.expect(
+        "the status report says why",
+        "Status: Unknown: no report. This program has sent no status report.",
+    );
+    s.expect("and that none has come", "No report has been received.");
+    s.keys(b"z");
+    let bells_before = bells(&s);
+    s.keys(b"w");
+    s.expect("its first report shows", "work  Working ");
+    s.keys(b"p");
+    s.expect("needing you shows the yellow block", "work  NEEDS YOU   ");
+    s.expect("the heading counts it", " Lillignode  1 NEEDS YOU");
+    check("and the bell rings", bells(&s) == bells_before + 1, &format!("{}", bells(&s) - bells_before));
+    s.raw(CTRL_Q);
+    s.keys(b"s");
+    s.expect("what it needs is there", "Status: Needs you: permission.");
+    s.expect("the report names its sender, in its own word", "Sent by: \"deploy\".");
+    s.expect("and Lillignode says it has not checked this program", "Not checked with this program.");
+    s.keys(b"z");
+    s.keys(b"d");
+    s.expect("reported: done", "work  Done ");
+    s.keys(b"i");
+    s.expect("a report with no name is still the program's", "work  Idle ");
+    s.keys(b"k");
+    s.expect("a kind Lillignode does not know still needs you", "work  NEEDS YOU   ");
+    s.keys(b"n");
+    s.expect("unknown and repeated parts are passed over; the last state stands", "work  Working ");
+    s.keys(b"u");
+    s.expect("a state Lillignode does not know is Unknown, never the status before it", "work  Unknown   ");
+    s.never("with no notice: this program was never known to work", "Status shows Unknown");
+    s.keys(b"m");
+    s.expect("a message that tries to draw is read for its status", "work  Error   ");
+    s.expect("the sidebar is whole", " Lillignode ");
+    s.raw(CTRL_Q);
+    s.keys(b"s");
+    s.expect(
+        "its words are shown as words, with nothing that draws or reorders",
+        "Status: Error: [2J [H ]0;owned first",
+    );
+    s.expect("and the report as it arrived is spelt out", "ESC ]7501;state=error:app=deploy:msg=");
+    s.keys(b"z");
+    check("the window title was not changed by it", !contains(&s.raw, b"]0;owned"), "owned");
+
+    let bells_before = bells(&s);
+    s.keys(b"f");
+    s.expect("a flood of reports arrives", "SENT f");
+    s.expect("the row shows the last of them", "work  NEEDS YOU   ");
+    for _ in 0..6 {
+        s.keys(b"b");
+        s.pump_for(Duration::from_millis(300));
+    }
+    let rung = bells(&s) - bells_before;
+    check("a flood rings a few bells, not thousands", (1..=3).contains(&rung), &format!("{rung} bells"));
+    s.raw(CTRL_Q);
+    s.keys(b"s");
+    s.expect("the status report says bells were held back", "Bells not rung: ");
+    s.keys(b"z");
+    s.keys(b"$");
+    s.expect("a shell prompt after needing you ends it", "work  Unknown   ");
+    s.raw(CTRL_Q);
+    s.keys(b"s");
+    s.expect("and the status report says why", "Status: Unknown: at a prompt.");
+    s.keys(b"z");
+    s.keys(b"d");
+    s.expect("done", "work  Done ");
+    s.keys(b"$");
+    s.never("a shell prompt leaves Done alone", "work  Unknown   ");
+    s.raw(CTRL_Q);
+    s.keys(b"q");
+    drop(s.quit_already_asked("quit with it Done does not ask"));
+    let saved = std::fs::read_to_string(state.join("workspace.json")).unwrap();
+    check("it is saved as a plain program", saved.contains("\"kind\": \"program\""), &saved);
+}
+
+/// Options typed when starting an agent, and a kind stated for it.
+fn start_options(sb: &Sandbox, standin: &Path) {
+    println!("R. Starting an agent with options and a stated kind");
+    let dir = sb.root.join("start-options");
+    std::fs::create_dir_all(&dir).unwrap();
+    launcher(&dir, standin, "teller", "args");
+    let teller = dir.join("teller").display().to_string();
+    let state = sb.root.join("state-start-options");
+    let mut s = Session::start_in(sb, &state);
+    s.keys(b"n");
+    s.keys(format!("{teller}\r").as_bytes());
+    s.expect("options are asked for after the program", "as a plain program:");
+    s.keys(b"one \"two three\"\r\r");
+    s.expect("what will start is shown first", "Start it as a plain program? y / n / k");
+    s.expect("with the options as they were split", "Options [one][two three]. n: change it");
+    s.never("nothing has started yet", "STANDIN ARGS");
+    s.keys(b"y");
+    s.expect("the program gets them as split, a space kept inside one", "STANDIN ARGS [one][two three]");
+
+    // A stated kind: a program not named claude, started as Claude Code,
+    // is given a conversation.
+    s.raw(CTRL_Q);
+    s.keys(b"n");
+    s.keys(format!("{teller}\r").as_bytes());
+    s.keys(b"\t");
+    s.expect("Tab changes the kind on the same line", "as Claude Code:");
+    s.keys(b"\r\r");
+    s.expect("a kind the name does not suggest is asked about", "Start it as Claude Code? y / n / k");
+    s.expect("and what that means is said", "As Claude Code: it continues its conversation next time.");
+    s.keys(b"y");
+    s.expect("it is given a conversation, after nothing typed", "STANDIN ARGS [--session-id][");
+
+    // Options Claude Code would take as a second conversation.
+    s.raw(CTRL_Q);
+    s.keys(b"n");
+    s.keys(b"\r--resume x\r\r");
+    s.expect("are refused before anything starts", "Cannot start it as typed. n: change it, k: another kind");
+    s.expect("with what to do first", "Esc: cancel   Take out --resume: Lillignode gives Claude Code");
+    s.keys(b"y");
+    s.keys(ESC);
+    s.expect("Esc leaves it", "Cancelled. Nothing was started.");
+
+    if cfg!(windows) {
+        // teller is a .cmd launcher here: the command interpreter would act
+        // on an & in its options.
+        s.raw(CTRL_Q);
+        s.keys(b"n");
+        s.keys(format!("{teller}\ra&b\r\r").as_bytes());
+        s.expect(
+            "options a launcher would act on are refused at the form",
+            "Esc: cancel   Take out the \"&\": this program is a launcher",
+        );
+        s.keys(ESC);
+
+        // A launcher in a folder with a space, given an option with a
+        // space: its path reaches the interpreter in quotes, and both hold.
+        let spaced = sb.root.join("two words");
+        std::fs::create_dir_all(&spaced).unwrap();
+        launcher(&spaced, standin, "teller", "args");
+        s.raw(CTRL_Q);
+        s.keys(b"n");
+        s.keys(format!("{}\r\"a b\" c\r\ry", spaced.join("teller").display()).as_bytes());
+        s.expect("a launcher in a folder with a space starts, its options whole", "STANDIN ARGS [a b][c]");
+
+        // In a folder whose path holds an &, npm's launchers would cut
+        // their own folder at it: refused before anything starts.
+        let rd = sb.root.join("R&D");
+        std::fs::create_dir_all(&rd).unwrap();
+        launcher(&rd, standin, "teller", "args");
+        s.raw(CTRL_Q);
+        s.keys(b"n");
+        s.keys(format!("{}\rone\r\r", rd.join("teller").display()).as_bytes());
+        s.expect("a launcher in a folder named R&D is refused, and why", "the launcher's path holds \"&\"");
+        s.keys(ESC);
+    }
+    drop(s.quit("quit", true));
+    let saved = std::fs::read_to_string(state.join("workspace.json")).unwrap();
+    check("the options are saved as split", saved.contains("\"two three\""), &saved);
+    check("and the stated kind", saved.contains("\"kind\": \"claude-code\""), &saved);
+    let started = if cfg!(windows) { 3 } else { 2 };
+    check("only the agents asked for were started", saved.matches("\"command\"").count() == started, &saved);
+}
+
+fn contains(hay: &[u8], needle: &[u8]) -> bool {
+    hay.windows(needle.len()).any(|w| w == needle)
+}
+
 fn conversation_id(file: &Path) -> String {
     let saved = std::fs::read_to_string(file).unwrap();
     let at = saved.find("\"conversation\"").expect("a conversation id is saved");
@@ -584,6 +892,8 @@ fn main() {
     assert!(standin.is_file(), "build the stand-in first: {}", standin.display());
     let shell = if cfg!(windows) { "cmd" } else { "sh" };
 
+    // The system's own temporary folder, long as it is on macOS: a notice
+    // naming a file in it must still keep its reason.
     let root: PathBuf = std::env::temp_dir().join(format!("lillignode-e2e-{}", std::process::id()));
     let sb = Sandbox {
         exe,
@@ -610,6 +920,8 @@ fn main() {
     s.keys(b"n");
     s.expect("n asks which agent", "Agent to start:");
     s.keys(b"nosuchagent\r");
+    s.expect("then asks for its options", "Options for nosuchagent as a plain program:");
+    s.keys(b"\r");
     s.expect("then asks which folder", "Folder to work in:");
     s.keys(b"\r");
     s.expect("unknown program: says so", "\"nosuchagent\" is not installed or not on PATH");
@@ -619,7 +931,7 @@ fn main() {
     s.expect("failed start added nothing", "No agents yet. Press n.");
 
     s.keys(b"n");
-    s.keys(format!("{shell}\r").as_bytes());
+    s.keys(format!("{shell}\r\r").as_bytes());
     s.keys(b"no-such-folder\r");
     s.expect("missing folder: says so", "does not exist");
     s.keys(&[0x7f; 14]);
@@ -632,7 +944,7 @@ fn main() {
     s.raw(CTRL_Q);
     s.expect("Ctrl+Q opens the menu", "MENU");
     s.keys(b"n");
-    s.keys(format!("{shell}\r").as_bytes());
+    s.keys(format!("{shell}\r\r").as_bytes());
     s.keys(b"\r");
     s.expect("second agent in the same folder starts with a numbered name", &format!("Started {shell} 2 in"));
 
@@ -711,7 +1023,7 @@ fn main() {
         "its own screen gives the reason",
         "nosuchagent (work) was not started: \"nosuchagent\" is not installed or not on PATH.",
     );
-    s.expect("and what to do", "then r to try again. Or the menu key, then x to remove it.");
+    s.expect("and what to do", "then r starts it again. Or the menu key, then x removes it.");
     s.keys(b"\t");
     s.expect("missing folder gets its own reason", "does not exist");
     std::fs::create_dir_all(&gone).unwrap();
@@ -727,6 +1039,48 @@ fn main() {
     drop(s.quit("quit", true));
     let saved = std::fs::read_to_string(&file).unwrap();
     check("removed agent is gone from the saved file", !saved.contains("nosuchagent"), &saved);
+
+    // What Lillignode would never have written is not started, and says why.
+    // The launchers here are .cmd files on Windows only.
+    let launcher_args = if cfg!(windows) { r#"["--x", "a&b"]"# } else { "[]" };
+    let refused_state = sb.root.join("state-refused");
+    std::fs::create_dir_all(&refused_state).unwrap();
+    let refused_file = refused_state.join("workspace.json");
+    std::fs::write(
+        &refused_file,
+        format!(
+            r#"{{"version": 1, "focused": 0, "from_a_newer_one": true, "agents": [
+  {{"name": "echoer", "command": "echoer", "args": {launcher_args}, "folder": "{w}"}},
+  {{"name": "bell\u0007", "command": "echoer", "args": [], "folder": "{w}", "colour": "red"}}
+]}}"#,
+            w = json_path(&sb.work)
+        ),
+    )
+    .unwrap();
+    let mut s = Session::start_in(&sb, &refused_state);
+    s.expect("Lillignode is up", "Ctrl+Q or F12:");
+    if cfg!(windows) {
+        s.expect(
+            "an argument a .cmd launcher would act on: not started, and why",
+            "echoer (work) was not started: its arguments hold \"&\", which Lillignode will not pass to a .cmd or .bat launcher.",
+        );
+    }
+    s.raw(CTRL_Q);
+    s.keys(b"\t");
+    s.expect(
+        "a control character in a saved name: not started, and why",
+        "bell  (work) was not started: its saved name holds a control character, which Lillignode never writes.",
+    );
+    s.never("it gives no second way out that r would not take", "then r starts it again");
+    s.keys(ESC);
+    drop(s.quit("quit", cfg!(not(windows))));
+    let saved = std::fs::read_to_string(&refused_file).unwrap();
+    check("the refused entries are saved back as they were", saved.contains("bell\\u0007"), &saved);
+    check(
+        "lines this Lillignode does not know are saved back",
+        saved.contains("\"from_a_newer_one\": true") && saved.contains("\"colour\": \"red\""),
+        &saved,
+    );
 
     println!("F. Damaged saved workspace");
     std::fs::write(&file, "{ \"version\": 1, \"agents\": [ tru").unwrap();
@@ -773,6 +1127,7 @@ fn main() {
 
     println!("H. Getting to the menu");
     let mut s = Session::start(&sb);
+    s.expect("Lillignode is up", "Ctrl+Q or F12:");
     s.new_agent("echoer");
     s.expect("stand-in agent is running", "STANDIN READY echo");
     s.expect("bar names both menu keys while an agent has the keyboard", "Ctrl+Q or F12: Lillignode menu");
@@ -842,6 +1197,16 @@ fn main() {
     s.expect("still no Enter presses", "STATUS enters=0 pastes=2");
     s.keys(b"\r");
     s.expect("a typed Enter is still an Enter", "STATUS enters=1 pastes=2");
+    // Not on Windows: its pseudo-terminal splits what is written to it at a
+    // control character, so the text before it arrives as typing and the
+    // control key on its own. Lillignode cannot tell that from typing there.
+    if !cfg!(windows) {
+        s.raw(b"\x1b[200~ab\x04cd\rx\x1b[201~");
+        s.expect("a Ctrl+D inside a paste does not reach the agent", "PASTE 2 lines: abcd\\rx");
+        s.expect("and the user is told it was left out", "1 control character was left out (Ctrl+D).");
+        s.raw(b"\x1b[200~ef\x04gh\x1b[201~");
+        s.expect("on one line too", "PASTE 1 lines: efgh");
+    }
 
     s.new_agent("plain");
     s.expect("an agent that does not take pastes whole", "STANDIN READY echo-plain");
@@ -861,6 +1226,8 @@ fn main() {
 
     println!("J. A long streamed output, and reading it back");
     let mut s = Session::start(&sb);
+    // Until Lillignode has the terminal, Linux takes Ctrl+Q as flow control.
+    s.expect("Lillignode is up", "Ctrl+Q or F12:");
     let started = Instant::now();
     s.new_agent("streamer");
     s.expect("3000 lines stream to the end", "STREAM DONE 3000");
@@ -871,21 +1238,41 @@ fn main() {
     s.expect("PgUp in the menu shows history", "HISTORY of streamer (work)");
     s.raw(HOME);
     s.expect("Home reaches the first line", "stream line 00001 of 03000");
+    // Each page is read only once it has been drawn in full: after PgDn,
+    // wait for the first line shown to change and the output to go quiet.
+    // A fixed pause read a page early on a busy machine and lost lines that
+    // were never missing.
+    let stream_lines = |s: &Session| -> Vec<u32> {
+        s.rows()
+            .iter()
+            .filter_map(|row| {
+                let at = row.find("stream line ")?;
+                row[at + 12..].chars().take(5).collect::<String>().parse().ok()
+            })
+            .collect()
+    };
+    s.settle();
     let mut seen: BTreeSet<u32> = BTreeSet::new();
     for _ in 0..400 {
-        for row in s.rows() {
-            if let Some(at) = row.find("stream line ") {
-                if let Ok(n) = row[at + 12..].chars().take(5).collect::<String>().parse() {
-                    seen.insert(n);
-                }
-            }
-        }
+        let shown = stream_lines(&s);
+        seen.extend(&shown);
         if !s.flat().contains("HISTORY of") {
             break;
         }
         s.writer.write_all(PAGE_DOWN).unwrap();
         s.writer.flush().unwrap();
-        s.pump_for(Duration::from_millis(70));
+        let end = Instant::now() + Duration::from_secs(10);
+        while s.flat().contains("HISTORY of") && stream_lines(&s).first() == shown.first() {
+            if Instant::now() > end {
+                check(
+                    "PgDn moves through history",
+                    false,
+                    &format!("no change in 10 s from {:?}", shown.first()),
+                );
+            }
+            s.pump(Duration::from_millis(20));
+        }
+        s.settle();
     }
     let missing: Vec<u32> = (1..=3000).filter(|n| !seen.contains(n)).collect();
     check(
@@ -918,6 +1305,7 @@ fn main() {
     s.keys(b"n");
     s.keys(b"\r");
     s.keys(b"\r");
+    s.keys(b"\r");
     s.expect("a new Claude Code agent starts a new conversation", "STANDIN CLAUDE new ");
     s.expect("sidebar uses its name, under a hat, and marks it as in front", ">/\\. Claude Code");
     s.keys(b"remember-this");
@@ -938,6 +1326,7 @@ fn main() {
     let file = state.join("workspace.json");
     let mut s = Session::start_in(&sb, &state);
     s.keys(b"n");
+    s.keys(b"\r");
     s.keys(b"\r");
     s.keys(b"\r");
     s.expect("a second agent, in which nothing is said", "STANDIN CLAUDE new ");
@@ -1076,15 +1465,21 @@ fn main() {
     s.keys(b"i");
     s.expect("the next good report replaces it", "work  Idle ");
     s.keys(b"n");
-    s.expect("a report with a part Lillignode does not know is Unknown too", "work  Unknown   ");
+    s.expect("a part Lillignode does not know is passed over, and the rest read", "work  Working ");
+    s.keys(b"u");
+    s.expect("the unknown state again", "work  Unknown   ");
     s.raw(CTRL_Q);
     s.keys(b"s");
     s.expect("menu then s shows the status report", "Status report for Claude Code (work)");
     s.expect("with the question and the answer", "Status question: asked");
-    s.expect("with the raw report", "ESC ]7501;state=working:app=claude-code:mood=fine");
-    s.expect("and why it was not understood", "has a part Lillignode does not know: \"mood\"");
+    s.expect("with the raw report", "ESC ]7501;state=pondering:app=claude-code");
+    s.expect("and why it was not understood", "state \"pondering\" is one Lillignode does not know");
+    s.expect("who sent the last report it could read", "Sent by: Claude Code.");
     s.expect("and counts background-task reports", "(1 about its background tasks");
-    s.expect("the bar says how to leave", "STATUS REPORT of Claude Code (work).  Any key: back to the agent");
+    s.expect(
+        "the bar says how to leave",
+        "STATUS REPORT  Any key: back to the agent.  Of Claude Code (work).",
+    );
     s.keys(b"z");
     s.expect("any key goes back to the agent", "Typing goes to Claude Code (work)");
     s.keys(b"c");
@@ -1176,6 +1571,9 @@ fn main() {
     paste_after_status(&sb, &standin);
     cost(&sb);
     side_by_side(&sb, &standin);
+    codex(&sb, &standin);
+    any_program(&sb, &standin);
+    start_options(&sb, &standin);
 
     let _ = std::fs::remove_dir_all(&sb.root);
     println!("\nAll checks passed.");

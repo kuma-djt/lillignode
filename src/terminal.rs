@@ -21,7 +21,15 @@ pub enum StatusMessage {
     Asked,
     /// A report. Everything after `7501;`, as received.
     Report(Vec<u8>),
+    /// The agent's shell marked the start of a new prompt (`OSC 133 ; A`).
+    /// A program that was reporting inside that shell has gone.
+    Prompt,
 }
+
+/// The message number shells use to mark their prompts, and the mark for
+/// the start of one.
+const SHELL_MARK: &[u8] = b"133";
+const PROMPT_START: &[u8] = b"A";
 
 #[derive(Default)]
 struct Replies {
@@ -55,12 +63,17 @@ impl vt100::Callbacks for Replies {
 
     fn unhandled_osc(&mut self, _: &mut vt100::Screen, params: &[&[u8]]) {
         let Some((&code, rest)) = params.split_first() else { return };
+        if code == SHELL_MARK && rest.first() == Some(&PROMPT_START) {
+            self.status.push(StatusMessage::Prompt);
+            return;
+        }
         if code != status::CODE {
             return;
         }
         if rest == [b"?"] {
-            // Answered here, in line with any other question, because Claude
-            // Code takes "no" if a later question is answered first.
+            // Answered for every program: any of them may send reports.
+            // Answered here, in line with any other question, because
+            // Claude Code takes "no" if a later question is answered first.
             self.pending.extend_from_slice(status::ANSWER);
             self.status.push(StatusMessage::Asked);
         } else {
@@ -82,10 +95,11 @@ fn nz(n: u16) -> NonZeroU16 {
 }
 
 impl Terminal {
+    /// A terminal for any program. It answers the status question and
+    /// hands over status reports, whoever is running in it.
     pub fn new(rows: u16, cols: u16) -> Self {
-        Self {
-            parser: vt100::Parser::new_with_callbacks(nz(rows), nz(cols), HISTORY_ROWS, Replies::default()),
-        }
+        let replies = Replies::default();
+        Self { parser: vt100::Parser::new_with_callbacks(nz(rows), nz(cols), HISTORY_ROWS, replies) }
     }
 
     /// Take in output from the agent. Returns anything that must be sent
@@ -249,6 +263,51 @@ mod tests {
         let body = format!("state=working:app=claude-code:msg={}", "QUJD".repeat(700));
         let _ = t.feed(format!("\x1b]7501;{body}\x07").as_bytes());
         assert_eq!(t.take_status(), vec![StatusMessage::Report(body.into_bytes())]);
+    }
+
+    #[test]
+    fn a_program_that_reports_without_asking_has_its_reports_handed_over() {
+        let mut t = Terminal::new(24, 80);
+        // Either ending. Codex ends its reports the second way.
+        assert!(t.feed(b"\x1b]7501;state=idle:app=codex\x1b\\").is_empty());
+        assert!(t.feed(b"\x1b]7501;state=blocked:app=terraform:kind=permission\x07x").is_empty());
+        assert_eq!(
+            t.take_status(),
+            vec![
+                StatusMessage::Report(b"state=idle:app=codex".to_vec()),
+                StatusMessage::Report(b"state=blocked:app=terraform:kind=permission".to_vec()),
+            ]
+        );
+        assert_eq!(t.screen().rows(0, 80).next().unwrap(), "x");
+    }
+
+    #[test]
+    fn the_answer_to_the_status_question_carries_nothing_the_program_sent() {
+        let mut t = Terminal::new(24, 80);
+        let _ = t.feed(b"\x1b]7501;state=working:app=evil:msg=QUJD\x07");
+        // A question with more after it is a report, not the question.
+        assert!(t.feed(b"\x1b]7501;?;x\x07").is_empty());
+        assert_eq!(t.feed(b"\x1b]7501;?\x07"), b"\x1b]7501;?\x07");
+    }
+
+    #[test]
+    fn a_shell_marking_a_new_prompt_is_handed_over_in_its_place() {
+        let mut t = Terminal::new(24, 80);
+        let _ = t.feed(b"\x1b]7501;state=working\x07\x1b]133;A\x07\x1b]7501;state=done\x1b\\");
+        // Either ending, with or without more after the mark.
+        let _ = t.feed(b"\x1b]133;A;cl=m\x1b\\");
+        assert_eq!(
+            t.take_status(),
+            vec![
+                StatusMessage::Report(b"state=working".to_vec()),
+                StatusMessage::Prompt,
+                StatusMessage::Report(b"state=done".to_vec()),
+                StatusMessage::Prompt,
+            ]
+        );
+        // The shell's other marks are not the start of a prompt.
+        let _ = t.feed(b"\x1b]133;B\x07\x1b]133;C\x07\x1b]133;D;0\x07\x1b]133\x07\x1b]1337;A\x07");
+        assert!(t.take_status().is_empty());
     }
 
     #[test]

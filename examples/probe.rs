@@ -158,6 +158,7 @@ fn main() {
 
     let mut p = Probe {
         rx,
+        // Answers the status question too, as Lillignode does.
         term: lillignode::terminal::Terminal::new(rows, cols),
         writer,
         raw: Vec::new(),

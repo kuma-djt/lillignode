@@ -39,6 +39,8 @@ pub enum StartError {
     CommandNotFound(String),
     /// Found, but the operating system refused to start it.
     Failed(String),
+    /// Lillignode would not start it as given, and why.
+    Refused(String),
 }
 
 impl fmt::Display for StartError {
@@ -51,9 +53,20 @@ impl fmt::Display for StartError {
                 write!(f, "\"{c}\" is not installed or not on PATH")
             }
             StartError::Failed(why) => write!(f, "it would not start ({why})"),
+            StartError::Refused(why) => write!(f, "{why}"),
         }
     }
 }
+
+/// Said in every refusal that goes on to say what to do itself, so the
+/// place that shows it adds no generic way out of its own.
+pub const NOTHING_RUN: &str = "Nothing was run.";
+
+/// What to do about a saved entry Lillignode refuses to start. Starting it
+/// again cannot help: the entry is the cause, and a running Lillignode would
+/// save its own copy over a fix made to the file meanwhile.
+pub const FIX_IN_THE_FILE: &str = "Nothing was run. r will not help: x removes it, or quit Lillignode, \
+    correct workspace.json (lillignode --where says where it is) and start Lillignode again";
 
 /// How an agent process ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -79,6 +92,12 @@ pub enum AgentEvent {
 pub trait AgentBackend {
     /// Start an agent. On success its events begin to arrive.
     fn start(&mut self, spec: &AgentSpec, size: Size) -> Result<AgentId, StartError>;
+
+    /// Why `start` would refuse this program with these arguments, worded
+    /// for someone who has just typed them, or None. Nothing is started.
+    fn would_refuse(&self, _command: &str, _args: &[String]) -> Option<String> {
+        None
+    }
 
     /// Send keystrokes to an agent. Errors mean the agent is gone.
     fn send(&mut self, id: AgentId, bytes: &[u8]) -> std::io::Result<()>;

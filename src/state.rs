@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 
 /// Bumped only when an older Lillignode could misread the file.
 pub const VERSION: u32 = 1;
@@ -30,6 +31,12 @@ pub struct SavedAgent {
     /// What the user sees in the sidebar, for example "Claude Code".
     pub name: String,
     pub command: String,
+    /// What kind of agent this is, for example "claude-code". Absent in a
+    /// workspace saved before kinds were recorded: the kind is then worked
+    /// out from the command and saved from then on. A word this Lillignode
+    /// does not know is kept as it was written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
     #[serde(default)]
     pub args: Vec<String>,
     pub folder: PathBuf,
@@ -38,6 +45,10 @@ pub struct SavedAgent {
     /// not a key and grants nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversation: Option<String>,
+    /// Lines this Lillignode does not know, which a newer one may have
+    /// written. Kept as they were and saved back, so they are not lost.
+    #[serde(flatten)]
+    pub other: Map<String, Value>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -47,11 +58,14 @@ pub struct SavedWorkspace {
     /// Index into `agents` of the one in front. Absent when there are none.
     #[serde(default)]
     pub focused: Option<usize>,
+    /// Lines this Lillignode does not know, kept and saved back.
+    #[serde(flatten)]
+    pub other: Map<String, Value>,
 }
 
 impl Default for SavedWorkspace {
     fn default() -> Self {
-        Self { version: VERSION, agents: Vec::new(), focused: None }
+        Self { version: VERSION, agents: Vec::new(), focused: None, other: Map::new() }
     }
 }
 
@@ -123,9 +137,28 @@ pub fn file_in(dir: &Path) -> PathBuf {
     dir.join(FILE)
 }
 
+/// The largest saved workspace Lillignode reads. One it wrote itself is a
+/// few hundred bytes an agent.
+pub const LARGEST_FILE: u64 = 1_000_000;
+/// The most agents a saved workspace may list. Each would be started at once.
+pub const MOST_AGENTS: usize = 64;
+
 fn read(path: &Path) -> Result<SavedWorkspace, String> {
+    let size = fs::metadata(path).map_err(|e| e.to_string())?.len();
+    if size > LARGEST_FILE {
+        return Err(format!(
+            "it is {size} bytes, larger than the {LARGEST_FILE} Lillignode reads, so none of it was started"
+        ));
+    }
     let text = fs::read_to_string(path).map_err(|e| e.to_string())?;
     let ws: SavedWorkspace = serde_json::from_str(&text).map_err(|e| format!("it is not valid ({e})"))?;
+    if ws.agents.len() > MOST_AGENTS {
+        return Err(format!(
+            "it lists {} agents, more than the {MOST_AGENTS} Lillignode starts at once, so none of them was \
+             started",
+            ws.agents.len()
+        ));
+    }
     if ws.version > VERSION {
         return Err(format!(
             "it was saved by a newer Lillignode (format {}, this one reads up to {VERSION})",
@@ -220,12 +253,55 @@ mod tests {
             agents: vec![SavedAgent {
                 name: name.into(),
                 command: "claude".into(),
+                kind: Some("claude-code".into()),
                 args: vec![],
                 folder: PathBuf::from("C:/work"),
                 conversation: Some("0b0e7f0a-0000-4000-8000-000000000001".into()),
+                other: Default::default(),
             }],
             focused: Some(0),
+            other: Default::default(),
         }
+    }
+
+    #[test]
+    fn a_workspace_saved_before_kinds_were_recorded_still_loads() {
+        let dir = temp_dir("no-kind");
+        let text = r#"{"version":1,"agents":[{"name":"Claude Code","command":"claude","args":[],
+            "folder":"C:/work","conversation":"0b0e7f0a-0000-4000-8000-000000000001"}],"focused":0}"#;
+        fs::write(file_in(&dir), text).unwrap();
+        let loaded = load(&dir);
+        assert_eq!(loaded.outcome, LoadOutcome::Loaded);
+        assert_eq!(loaded.workspace.agents[0].kind, None);
+        // And an agent with no kind is written without one, as before.
+        save(&dir, &loaded.workspace).unwrap();
+        assert!(!fs::read_to_string(file_in(&dir)).unwrap().contains("kind"));
+    }
+
+    #[test]
+    fn a_kind_is_saved_and_read_back_as_written_even_one_not_known_here() {
+        let dir = temp_dir("kind-kept");
+        let mut ws = one("Claude Code");
+        ws.agents[0].kind = Some("from-a-newer-lillignode".into());
+        save(&dir, &ws).unwrap();
+        assert_eq!(load(&dir).workspace, ws);
+    }
+
+    #[test]
+    fn lines_this_lillignode_does_not_know_are_kept_and_saved_back() {
+        let dir = temp_dir("unknown-lines");
+        let text = r#"{"version":1,"team":{"name":"web"},"agents":[{"name":"Claude Code","command":"claude",
+            "kind":"claude-code","args":[],"folder":"C:/work","colour":"red","limits":[1,2]}],"focused":0}"#;
+        fs::write(file_in(&dir), text).unwrap();
+        let loaded = load(&dir);
+        assert_eq!(loaded.outcome, LoadOutcome::Loaded);
+        assert_eq!(loaded.workspace.other["team"], serde_json::json!({"name": "web"}));
+        assert_eq!(loaded.workspace.agents[0].other["colour"], "red");
+        save(&dir, &loaded.workspace).unwrap();
+        let again = load(&dir).workspace;
+        assert_eq!(again, loaded.workspace, "nothing lost on the way round");
+        let written = fs::read_to_string(file_in(&dir)).unwrap();
+        assert!(written.contains("\"limits\"") && written.contains("\"team\""), "{written}");
     }
 
     #[test]
@@ -299,6 +375,34 @@ mod tests {
         let l = load(&dir);
         assert_eq!(l.outcome, LoadOutcome::Loaded);
         assert_eq!(l.workspace, one("a"));
+    }
+
+    #[test]
+    fn a_file_too_large_or_listing_too_many_agents_is_set_aside_and_nothing_is_started() {
+        let dir = temp_dir("too-many");
+        save(&dir, &one("good")).unwrap();
+        save(&dir, &one("good")).unwrap();
+        let mut many = one("a");
+        many.agents = vec![one("a").agents[0].clone(); MOST_AGENTS + 1];
+        fs::write(file_in(&dir), serde_json::to_string(&many).unwrap()).unwrap();
+        let l = load(&dir);
+        let LoadOutcome::UsedPrevious { why, .. } = l.outcome else { panic!("{:?}", l.outcome) };
+        assert!(why.starts_with("it lists 65 agents, more than the 64"), "{why}");
+        assert_eq!(l.workspace, one("good"), "the previous copy is used");
+        // Exactly the most is read.
+        many.agents.truncate(MOST_AGENTS);
+        fs::write(file_in(&dir), serde_json::to_string(&many).unwrap()).unwrap();
+        assert_eq!(load(&dir).outcome, LoadOutcome::Loaded);
+
+        let dir = temp_dir("too-large");
+        let mut text = serde_json::to_string(&one("a")).unwrap();
+        text.push_str(&" ".repeat(LARGEST_FILE as usize));
+        fs::write(file_in(&dir), &text).unwrap();
+        let l = load(&dir);
+        let LoadOutcome::Lost { why, unreadable_kept_as } = l.outcome else { panic!("{:?}", l.outcome) };
+        assert!(why.contains("larger than the 1000000 Lillignode reads"), "{why}");
+        assert!(l.workspace.agents.is_empty());
+        assert_eq!(fs::metadata(unreadable_kept_as).unwrap().len(), text.len() as u64, "kept whole");
     }
 
     #[test]
