@@ -154,7 +154,7 @@ fn short_name(command: &str) -> String {
         Some((stem, _)) if !stem.is_empty() => stem,
         _ => file,
     };
-    if stem.trim().is_empty() {
+    if stem.trim().is_empty() || stem.chars().all(|c| c == '.') {
         command.to_string()
     } else {
         stem.to_string()
@@ -177,6 +177,11 @@ mod tests {
         assert_eq!(name("C:/mixed\\slashes/run.ps1"), "run");
         // Nothing left: shown as typed rather than as nothing.
         assert_eq!(name("/"), "/");
+        assert_eq!(name(".."), "..");
+        assert_eq!(name("tools/.."), "tools/..");
+        assert_eq!(name("tools/run/"), "run");
+        assert_eq!(name("run."), "run");
+        assert_eq!(name(""), "");
         // Claude Code and Codex keep their own names, from any path.
         assert_eq!(AgentKind::ClaudeCode.name(r"C:\npm\claude.cmd"), "Claude Code");
         assert_eq!(AgentKind::Codex.name("/bin/codex"), "Codex");
