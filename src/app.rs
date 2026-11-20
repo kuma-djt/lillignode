@@ -162,6 +162,20 @@ fn named(u: &Unfinished) -> String {
     }
 }
 
+/// The line for options that cannot be started, longest first. What is said
+/// after the reason's first sentence goes first (another way out, which
+/// `k` offers too), then what the keys do, then the opening words. What to
+/// take out and why are kept to the last.
+fn refusal_tries(why: &str) -> [String; 4] {
+    let first = why.split_once(". ").map_or(why, |(first, _)| first);
+    [
+        format!("Cannot start it as typed. n: change it, k: another kind, Esc: cancel   {why}."),
+        format!("Cannot start it as typed. n: change it, k: another kind, Esc: cancel   {first}."),
+        format!("Cannot start it as typed. n / k / Esc   {first}."),
+        format!("n / k / Esc   {first}."),
+    ]
+}
+
 /// What starting an agent as this kind means, said before it starts.
 fn kind_means(kind: AgentKind) -> &'static str {
     match kind {
@@ -1297,9 +1311,7 @@ impl<B: AgentBackend> App<B> {
             // the options as split; the program and folder, which may be
             // long paths, last.
             Mode::NewAgent(form @ NewAgent { step: Step::Check, .. }) => match self.check_problem() {
-                Some(why) => {
-                    format!("Cannot start it as typed. n: change it, k: another kind, Esc: cancel   {why}.")
-                }
+                Some(why) => self.fitted(&refusal_tries(&why)),
                 None => {
                     let kind = kind_words(form.kind());
                     let options = split_options(&form.options);
@@ -1432,13 +1444,18 @@ impl<B: AgentBackend> App<B> {
             format!("{head}{all}.{fresh}"),
             format!("{head}{first}.{fresh}"),
         ];
+        self.fitted(&tries)
+    }
+
+    /// The first of these, longest first, that fits the window's width, or
+    /// the last if none does.
+    fn fitted(&self, tries: &[String]) -> String {
         // No window yet: nothing to fit to.
         let room = match self.window.width {
             0 => usize::MAX,
             width => width as usize,
         };
-        let [.., shortest] = &tries;
-        tries.iter().find(|t| t.chars().count() <= room).unwrap_or(shortest).clone()
+        tries.iter().find(|t| t.chars().count() <= room).or(tries.last()).cloned().unwrap_or_default()
     }
 
     /// Call after each batch of events and ticks. Gives the Unknown notice
@@ -4102,6 +4119,33 @@ Cost",
         app.on_key(press(KeyCode::Esc));
         assert_eq!(app.notice.as_deref(), Some("Cancelled. Nothing was started."));
         assert!(app.engine.ws.entries().is_empty());
+    }
+
+    #[test]
+    fn a_refusal_keeps_what_to_take_out_and_why_in_a_narrow_window() {
+        let reason = "Take out --resume: Lillignode gives Claude Code its conversation itself";
+        for width in [60, 95, 120, 150, 200] {
+            let mut app = app_with_claude_agents(0);
+            app.set_window(Rect::new(0, 0, width, 30));
+            answer_form(&mut app, &["claude", "--resume abc", ""]);
+            let bar = app.bar();
+            assert!(bar.contains(reason), "{width}: {bar}");
+            // The keys come first at every width.
+            assert!(
+                bar.starts_with("Cannot start it as typed. n") || bar.starts_with("n / k / Esc"),
+                "{bar}"
+            );
+            if width >= 95 {
+                assert!(bar.chars().count() <= width as usize, "{width}: {bar}");
+            }
+            // What the keys do goes only after the other way out has.
+            if width >= 150 {
+                assert!(bar.contains("n: change it, k: another kind, Esc: cancel"), "{bar}");
+            }
+            if width >= 200 {
+                assert!(bar.ends_with("Or start it as a plain program."), "{bar}");
+            }
+        }
     }
 
     #[test]

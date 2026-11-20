@@ -946,8 +946,8 @@ fn start_options(sb: &Sandbox, standin: &Path) {
         s.keys(b"n");
         s.keys(format!("{teller}\ra&b\r\r").as_bytes());
         s.expect(
-            "options a launcher would act on are refused at the form",
-            "Esc: cancel   Take out the \"&\": this program is a launcher",
+            "options a launcher would act on are refused at the form, the keys shortened to keep the reason",
+            "n / k / Esc   Take out the \"&\": this program is a launcher, and the command interpreter would act on it.",
         );
         s.keys(ESC);
 
