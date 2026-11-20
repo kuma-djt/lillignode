@@ -1330,6 +1330,16 @@ fn main() {
     s.raw(b"\x1b[200~one\rtwo\x1b[201~");
     s.keys(b"y");
     s.expect("y sends it line by line, as warned", "STATUS enters=1 pastes=0 typed=two");
+    // Text with a tab, read in one go and with no markers, as Windows
+    // Terminal hands over a paste: a paste, its tab sent as four spaces.
+    s.keys(b"\r");
+    s.raw(b"ab\tcd");
+    s.expect("a pasted tab reaches the agent as four spaces", "typed=ab    cd");
+    s.expect("and the user is told", "Its tabs were sent as spaces, so none was taken as a press of Tab.");
+    // A Tab pressed on its own is still the key.
+    s.keys(b"\r");
+    s.raw(b"\t");
+    s.expect("a Tab pressed alone is still a Tab", "typed=\\t");
     drop(s.quit("quit", true));
 
     println!("J. A long streamed output, and reading it back");
