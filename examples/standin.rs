@@ -393,6 +393,8 @@ fn parts_mode() {
                 b'2' => send("state=blocked:app=helper:id=sub/2"),
                 // The first helper goes on.
                 b'a' => send("state=working:app=helper:id=sub/1"),
+                // The second helper goes on.
+                b'b' => send("state=working:app=helper:id=sub/2"),
                 // Everything beneath "sub" is withdrawn; then everything.
                 b'c' => send("state=clear:id=sub"),
                 b'x' => send("state=clear"),

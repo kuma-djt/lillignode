@@ -559,7 +559,8 @@ impl<B: AgentBackend> App<B> {
                             0 => format!("Left as it was: the waiting parts of {label} are still shown."),
                             n => format!(
                                 "Stopped showing {} of {label}. Nothing was sent to it. A part that \
-                                 reports again is shown again.",
+                                 repeats itself stays hidden; one that says something new and waits \
+                                 is shown again.",
                                 plural(n, "waiting part", "waiting parts")
                             ),
                         });
@@ -1267,7 +1268,7 @@ impl<B: AgentBackend> App<B> {
                 };
                 format!(
                     "Stop showing {} of {}? y / n   {which}. Nothing is sent to the agent. A part that \
-                     reports again is shown again.",
+                     repeats itself stays hidden; one that says something new and waits is shown again.",
                     plural(waiting.len(), "waiting part", "waiting parts"),
                     self.focused_label()
                 )
@@ -1937,7 +1938,8 @@ impl<B: AgentBackend> App<B> {
             if !t.waiting_parts().is_empty() {
                 out += "A waiting part makes the agent Needs you until the part says otherwise, is \
                         withdrawn, or the program ends: it is not ended by a clock. d stops showing the \
-                        parts that are waiting now, after asking. One that reports again is shown again.\n";
+                        parts that are waiting now, after asking. One that repeats itself stays hidden; \
+                        one that says something new and waits is shown again.\n";
             }
         }
         if t.bells_held() > 0 {
@@ -2938,7 +2940,10 @@ Cost",
         assert_eq!(app.needs_you_count(), 0);
         let notice = app.notice.clone().unwrap();
         assert!(notice.starts_with("Stopped showing 1 waiting part of cmd ("), "{notice}");
-        assert!(notice.ends_with("A part that reports again is shown again."), "{notice}");
+        assert!(
+            notice.ends_with("A part that repeats itself stays hidden; one that says something new and waits is shown again."),
+            "{notice}"
+        );
         let text = app.status_report_text();
         assert!(text.contains("Status: Done."), "{text}");
         assert!(text.contains("(id a): waiting for you, waiting since"), "{text}");
@@ -2949,7 +2954,13 @@ Cost",
         assert!(app.bar().starts_with("STATUS REPORT  Any key: back to the agent."), "{}", app.bar());
         app.on_key(press(KeyCode::Char('d')));
         assert!(matches!(app.mode, Mode::Normal));
-        // It reports again: shown again, with its own bell.
+        // It repeats itself: still hidden, and no bell.
+        report(&mut app, 1, "state=blocked:id=a");
+        assert!(!app.after_events());
+        assert_eq!(app.needs_you_count(), 0);
+        // It says something else, then waits again: shown again, with its
+        // own bell.
+        report(&mut app, 1, "state=working:id=a");
         report(&mut app, 1, "state=blocked:id=a");
         assert!(app.after_events());
         assert_eq!(app.needs_you_count(), 1);

@@ -839,18 +839,34 @@ fn waiting_parts(sb: &Sandbox, standin: &Path) {
     s.keys(ESC);
     s.expect("back to it", "helper (work).");
 
-    // Dismissed by hand from the status report; it comes back if it reports.
+    // Dismissed by hand from the status report. A repeat of the same
+    // report keeps it hidden; it comes back once it says something else
+    // and waits again.
     s.raw(CTRL_Q);
     s.keys(b"s");
     s.keys(b"d");
     s.expect("d asks first", "Stop showing 1 waiting part of ");
     s.expect("with its keys before the reason", "helper (work)? y / n");
     s.keys(b"y");
-    s.expect("and says what it did", "A part that reports again is shown again.");
+    s.expect("and says what it did", "A part that repeats itself stays hidden;");
     s.expect_gone("the agent no longer needs you", "NEEDS YOU");
     s.never("and the key was not typed into the agent", "SENT d");
+    // The same report again. "SENT 2" is on the screen once already, from
+    // earlier, so wait for a second.
+    let sent_2 = |s: &Session| s.screen().matches("SENT 2").count();
+    let before = sent_2(&s);
     s.keys(b"2");
-    s.expect("the part reports again and is shown again", "work  NEEDS YOU   ");
+    let end = Instant::now() + Duration::from_secs(20);
+    while sent_2(&s) == before && Instant::now() < end {
+        s.pump(Duration::from_millis(50));
+    }
+    check("the part repeats the same report", sent_2(&s) > before, "no new SENT 2");
+    s.never("and stays hidden", "NEEDS YOU");
+    check("with no bell", bells(&s) == bells_before + 1, &format!("{}", bells(&s) - bells_before));
+    s.keys(b"b");
+    s.expect("the part says something else", "SENT b");
+    s.keys(b"2");
+    s.expect("then waits again and is shown again", "work  NEEDS YOU   ");
     check("with a bell of its own", bells(&s) == bells_before + 2, &format!("{}", bells(&s) - bells_before));
 
     // Withdrawn: everything beneath an id, then everything.

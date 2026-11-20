@@ -327,8 +327,9 @@ pub struct Part {
     /// When it began to say what it says now. A waiting part that repeats
     /// that it is waiting has waited since the first time, not the last.
     pub since: SystemTime,
-    /// The user asked not to be shown this waiting part. It is shown again
-    /// as soon as the part reports again.
+    /// The user asked not to be shown this waiting part. It stays so while
+    /// the part repeats exactly what it said (state, kind and title); any
+    /// other report ends it, so the part is shown again when it next waits.
     pub dismissed: bool,
 }
 
@@ -601,10 +602,15 @@ impl Trace {
             }
             PartChange::Set(state, title) => {
                 let waiting = |s: &PartState| matches!(s, PartState::Waiting(_));
-                let since = match self.parts.iter().find(|p| p.id == id) {
+                let old = self.parts.iter().find(|p| p.id == id);
+                let since = match old {
                     Some(old) if waiting(&old.state) && waiting(&state) => old.since,
                     _ => now,
                 };
+                // A dismissed part that only repeats what it said stays
+                // dismissed. Anything else it says ends that.
+                let dismissed =
+                    old.is_some_and(|old| old.dismissed && old.state == state && old.title == title);
                 self.parts.retain(|p| p.id != id);
                 // Room is made before the new one goes in: the oldest that
                 // is not waiting, or if every one is waiting, the oldest.
@@ -613,7 +619,7 @@ impl Trace {
                     self.parts.remove(oldest_idle.unwrap_or(0));
                     self.parts_let_go = self.parts_let_go.saturating_add(1);
                 }
-                self.parts.push(Part { id, title, state, at: now, since, dismissed: false });
+                self.parts.push(Part { id, title, state, at: now, since, dismissed });
             }
         }
     }
@@ -809,7 +815,8 @@ impl Track {
     }
 
     /// Stop showing the parts that are waiting now, at the user's word.
-    /// One that reports again is shown again. Returns how many.
+    /// One that repeats itself stays hidden; one that says something else
+    /// is shown again when it next waits. Returns how many.
     pub fn dismiss_waiting_parts(&mut self) -> usize {
         let dismissed = self.source.dismiss_waiting_parts();
         if !self.needs_you() {
@@ -1328,7 +1335,7 @@ mod tests {
     }
 
     #[test]
-    fn a_dismissed_part_is_not_shown_until_it_reports_again() {
+    fn a_dismissed_part_stays_hidden_while_it_repeats_itself() {
         let now = SystemTime::now();
         let mut t = claude(Instant::now());
         part(&mut t, "state=done", now);
@@ -1342,10 +1349,40 @@ mod tests {
         // Another part does not bring a dismissed one back.
         part(&mut t, "state=working:id=c", now);
         assert_eq!(t.status(), AgentStatus::Done);
-        // It reports again: it is back, and that is a new change into Needs you.
+        // An exact repeat of what was dismissed keeps it dismissed, with no bell.
+        part(&mut t, "state=blocked:id=a", now);
+        assert_eq!(t.status(), AgentStatus::Done);
+        assert!(!t.take_began_needing_you());
+        assert!(t.trace().parts.iter().find(|p| p.id == "a").unwrap().dismissed);
+        // It says something else, then waits again: it is back, and that is
+        // a new change into Needs you.
+        part(&mut t, "state=working:id=a", now);
+        assert_eq!(t.status(), AgentStatus::Done);
         part(&mut t, "state=blocked:id=a", now);
         assert_eq!(t.status(), AgentStatus::NeedsYou(None));
         assert_eq!(t.waiting_parts().len(), 1);
+        assert!(t.take_began_needing_you());
+    }
+
+    #[test]
+    fn a_dismissed_part_that_waits_for_something_else_is_shown_at_once() {
+        let now = SystemTime::now();
+        let mut t = claude(Instant::now());
+        part(&mut t, "state=done", now);
+        part(&mut t, "state=blocked:kind=permission:id=a:title=dGVzdHM=", now);
+        assert!(t.take_began_needing_you());
+        assert_eq!(t.dismiss_waiting_parts(), 1);
+        // The same kind and title again: still hidden.
+        part(&mut t, "state=blocked:kind=permission:id=a:title=dGVzdHM=", now);
+        assert_eq!(t.status(), AgentStatus::Done);
+        // Another title: something new, shown.
+        part(&mut t, "state=blocked:kind=permission:id=a:title=YnVpbGQ=", now);
+        assert_eq!(t.status(), AgentStatus::NeedsYou(Some(Kind::Permission)));
+        assert!(t.take_began_needing_you());
+        // Dismissed again, then another kind: shown.
+        assert_eq!(t.dismiss_waiting_parts(), 1);
+        part(&mut t, "state=blocked:kind=question:id=a:title=YnVpbGQ=", now);
+        assert_eq!(t.status(), AgentStatus::NeedsYou(Some(Kind::Question)));
         assert!(t.take_began_needing_you());
     }
 
