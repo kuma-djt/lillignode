@@ -15,8 +15,8 @@ use crate::agent::{AgentBackend, AgentEvent, Size, StartError};
 use crate::config::{Billing, Config};
 use crate::cost::{self, Cost, Usage, Waiting, WhyNot};
 use crate::engine::{
-    About, Answered, Engine, Outcome, PasteOutcome, QuestionId, Refused, Room, RoomChange, Sent, SentAs,
-    Unfinished, ViewOutcome, Viewed,
+    About, Answered, Engine, Event, Outcome, PasteOutcome, QuestionId, Refused, Room, RoomChange, Sent,
+    SentAs, Unfinished, ViewOutcome, Viewed,
 };
 use crate::input::Pasted;
 use crate::keys;
@@ -26,7 +26,7 @@ use crate::state::{self, LoadOutcome};
 use crate::status::{self, AgentStatus, Reading};
 use crate::terminal::HISTORY_ROWS;
 use crate::ui;
-use crate::workspace::{split_options, Entry, Happened, RestoreReport, Status, Workspace};
+use crate::workspace::{split_options, Entry, RestoreReport, Status, Workspace};
 
 pub const DEFAULT_COMMAND: &str = "claude";
 const AGENT_PROMPT: &str = "Agent to start: ";
@@ -242,8 +242,6 @@ pub struct App<B: AgentBackend> {
     /// The window, as last told by `set_window`. Decides whether two
     /// agents fit side by side, and what size agents are given.
     window: Rect,
-    /// Where the workspace is saved, or why it cannot be.
-    state_dir: Result<PathBuf, String>,
     /// The folder Lillignode was started in: the default for a new agent.
     launch_dir: PathBuf,
     /// The value of Claude Code's status off switch where Lillignode was
@@ -260,6 +258,14 @@ pub struct App<B: AgentBackend> {
     /// Windows only: Microsoft's newer pseudo-terminal is not beside
     /// `lillignode.exe`, so Claude Code's status cannot get through.
     pub newer_pty_missing: bool,
+}
+
+/// Said when the workspace could not be saved, with the reason.
+fn save_failed(why: &str) -> String {
+    format!(
+        "Could not save your workspace ({why}). The last saved workspace is unchanged; changes since then \
+         will not be restored."
+    )
 }
 
 /// Said when the view cannot change because no agent can be shown at all.
@@ -421,7 +427,7 @@ impl<B: AgentBackend> App<B> {
         config: Config,
         config_problem: Option<String>,
     ) -> Self {
-        let mut ws = Workspace::new(backend, size);
+        let mut engine = Engine::new(Workspace::new(backend, size));
         let mut start_problems: Vec<String> = config_problem.iter().cloned().collect();
         let mut said = Vec::new();
         match &state_dir {
@@ -431,7 +437,10 @@ impl<B: AgentBackend> App<B> {
                     said.push(problem.clone());
                     start_problems.push(problem);
                 }
-                said.extend(restore_text(&ws.restore(loaded.workspace)));
+                engine.save_in(dir.clone());
+                // The engine saves at once: restoring may have given agents
+                // new conversation ids.
+                said.extend(restore_text(&engine.restore(loaded.workspace)));
             }
             Err(why) => said.push(format!(
                 "Lillignode has nowhere to save your workspace ({why}). It works, but nothing will \
@@ -440,7 +449,7 @@ impl<B: AgentBackend> App<B> {
         }
         let notice = (!said.is_empty()).then(|| said.join(" "));
         let mut app = Self {
-            engine: Engine::new(ws),
+            engine,
             mode: Mode::Normal,
             config,
             notice,
@@ -453,7 +462,6 @@ impl<B: AgentBackend> App<B> {
             report_top: 0,
             sidebar_top: std::cell::Cell::new(0),
             window: Rect::default(),
-            state_dir,
             launch_dir,
             status_off_switch: std::env::var(status::OFF_SWITCH).ok(),
             unknown_notice_given: Vec::new(),
@@ -461,36 +469,37 @@ impl<B: AgentBackend> App<B> {
             cost_notice_given: false,
             newer_pty_missing: newer_pty_missing(),
         };
-        // Restoring may have given agents new conversation ids; keep them.
-        app.save_or_say();
+        app.say_events();
         app
     }
 
     /// Save the workspace. On failure the user is told, and what was saved
     /// before is left as it was.
     pub fn save(&mut self) -> Result<(), String> {
-        let Ok(dir) = &self.state_dir else { return Ok(()) };
-        state::save(dir, &self.engine.ws.to_saved()).map_err(|why| {
-            format!(
-                "Could not save your workspace ({why}). The last saved workspace is unchanged; \
-                 changes since then will not be restored."
-            )
-        })
-    }
-
-    fn save_or_say(&mut self) {
-        if let Err(problem) = self.save() {
-            self.notice = Some(problem);
-        }
+        self.engine.save().map_err(|why| save_failed(&why))
     }
 
     pub fn on_agent_event(&mut self, event: AgentEvent) {
-        let Some(happened) = self.engine.ws.handle(event) else { return };
+        self.engine.handle(event);
+        self.say_events();
+    }
+
+    /// Say what the engine reports has happened, oldest first. The engine
+    /// saves the workspace after a change; a save that failed is one of the
+    /// things said.
+    fn say_events(&mut self) {
+        for event in self.engine.take_events() {
+            self.notice = Some(self.event_text(event));
+        }
+    }
+
+    fn event_text(&self, event: Event) -> String {
         let still_here =
             "It is still in your workspace. Switch to it, then r to start it again or x to remove it.";
-        self.notice = Some(match happened {
-            Happened::Exited { label, exit } if exit.clean() => format!("{label} exited. {still_here}"),
-            Happened::Exited { label, exit } => {
+        match event {
+            Event::SaveFailed { why } => save_failed(&why),
+            Event::Exited { label, exit } if exit.clean() => format!("{label} exited. {still_here}"),
+            Event::Exited { label, exit } => {
                 // Started as a kind its name does not suggest, it may have
                 // been given options it does not take.
                 let chosen = self
@@ -509,18 +518,17 @@ impl<B: AgentBackend> App<B> {
                     .unwrap_or_default();
                 format!("{label} stopped with an error (exit code {}). {still_here}{chosen}", exit.code)
             }
-            Happened::StartedNewConversation { label } => {
-                self.save_or_say();
+            Event::StartedNewConversation { label } => {
                 format!(
                     "{label} could not continue its earlier conversation (there may have been nothing \
                      in it yet), so it started a new conversation. If there was an earlier one, the \
                      agent's own resume command may still find it."
                 )
             }
-            Happened::CouldNotContinue { label, why } => format!(
+            Event::CouldNotContinue { label, why } => format!(
                 "{label} could not continue its earlier conversation, and starting a new one failed: {why}. {still_here}"
             ),
-        });
+        }
     }
 
     fn focused_running(&self) -> bool {
@@ -758,7 +766,7 @@ impl<B: AgentBackend> App<B> {
                             }
                             _ => format!("Started {} again.", e.label()),
                         });
-                        self.save_or_say();
+                        self.say_events();
                     }
                     // Said, so the key is never pressed into silence.
                     Err(why) => self.refuse(self.refusal(why, &label)),
@@ -921,7 +929,7 @@ impl<B: AgentBackend> App<B> {
             }
         }
         self.notice = Some(said);
-        self.save_or_say();
+        self.say_events();
     }
 
     /// The agent the engine's question about closing is about. While the
@@ -1157,7 +1165,7 @@ impl<B: AgentBackend> App<B> {
         let Mode::NewAgent(form) = &mut self.mode else { return };
         let folder = resolve_folder(&self.launch_dir, &form.folder);
         let args = split_options(&form.options).args;
-        match self.engine.ws.start_new(&form.command, args, form.kind(), folder.clone()) {
+        match self.engine.start_new(&form.command, args, form.kind(), folder.clone()) {
             Ok(()) => {
                 self.mode = Mode::Normal;
                 self.notice = self
@@ -1165,7 +1173,7 @@ impl<B: AgentBackend> App<B> {
                     .ws
                     .focused()
                     .map(|e| format!("Started {} in {}.", e.saved.name, folder.display()));
-                self.save_or_say();
+                self.say_events();
             }
             // Refused for what was typed, not the folder: to the last line,
             // whose n goes back to change it.
@@ -4024,6 +4032,46 @@ Cost",
         assert_eq!(app.engine.ws.entries().len(), 1);
         assert_eq!(app.engine.ws.entries()[0].kind(), AgentKind::ClaudeCode);
         assert!(app.notice.clone().unwrap().starts_with("Started Claude Code in "));
+    }
+
+    #[test]
+    fn a_workspace_that_cannot_be_saved_is_said_after_each_change_and_the_change_stands() {
+        // A file where the folder should be: nothing can be saved in it.
+        let not_a_folder =
+            std::env::temp_dir().join(format!("lillignode-app-no-save-{}", std::process::id()));
+        std::fs::write(&not_a_folder, "x").unwrap();
+        let mut app = App::launch(
+            Fake::default(),
+            Size { rows: 30, cols: 120 },
+            Ok(not_a_folder.clone()),
+            std::env::temp_dir(),
+            Config::default(),
+            None,
+        );
+        let failed = |app: &App<Fake>| {
+            let said = app.notice.clone().unwrap_or_default();
+            assert!(said.starts_with("Could not save your workspace (could not create the folder"), "{said}");
+            assert!(
+                said.ends_with(
+                    "The last saved workspace is unchanged; changes since then will not be restored."
+                ),
+                "{said}"
+            );
+        };
+        failed(&app);
+        app.notice = None;
+        answer_form(&mut app, &["", "", ""]);
+        assert_eq!(app.engine.ws.entries().len(), 1, "the agent started all the same");
+        failed(&app);
+        app.notice = None;
+        app.on_key(press(KeyCode::F(12)));
+        app.on_key(press(KeyCode::Char('x')));
+        app.on_key(press(KeyCode::Char('y')));
+        assert!(app.engine.ws.entries().is_empty());
+        failed(&app);
+        // The same words on the way out, for the terminal.
+        assert_eq!(app.save().err(), app.notice);
+        let _ = std::fs::remove_file(&not_a_folder);
     }
 
     #[test]

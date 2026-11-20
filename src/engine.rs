@@ -4,13 +4,35 @@
 //!
 //! The rules are moving here from the terminal face (`app.rs`) one at a
 //! time; until each has moved, the face still holds it. Quitting, closing
-//! an agent, starting one again, the paste rule and the rules of the view
-//! (one agent on screen or two, and what size each is given) have moved.
+//! an agent, starting one again, the paste rule, the rules of the view
+//! (one agent on screen or two, and what size each is given) and saving the
+//! workspace after a change have moved.
 
-use crate::agent::AgentBackend;
-use crate::agent::Size;
+use std::path::PathBuf;
+
+use crate::agent::{AgentBackend, AgentEvent, Exit, Size, StartError};
+use crate::kind::AgentKind;
+use crate::state::{self, SavedWorkspace};
 use crate::status::AgentStatus;
-use crate::workspace::{AgentKey, Entry, NoPair, Pair, Workspace};
+use crate::workspace::{AgentKey, Entry, Happened, NoPair, Pair, RestoreReport, Workspace};
+
+/// Something that happened, for a face to say in its own words. A face
+/// takes them in the order they happened (`Engine::take_events`). They are
+/// hints: whatever can be read from the engine at any time (a status, who
+/// needs you, a cost) is not an event.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Event {
+    /// An agent's program ended.
+    Exited { label: String, exit: Exit },
+    /// An agent could not continue its earlier conversation and was started
+    /// again with a new one.
+    StartedNewConversation { label: String },
+    /// As above, but the fresh start failed too.
+    CouldNotContinue { label: String, why: String },
+    /// The workspace could not be saved after a change. What was saved
+    /// before is left as it was; nothing in memory is lost.
+    SaveFailed { why: String },
+}
 
 /// Names one question the engine asked. An answer carries it, so a "yes"
 /// is never applied to a question the asker did not see.
@@ -213,6 +235,11 @@ pub struct Engine<B: AgentBackend> {
     held: Option<HeldPaste>,
     /// The room agents have, as last told by the face.
     room: Room,
+    /// The folder the workspace is saved in. None: there is nowhere to
+    /// save, and nothing is.
+    save_in: Option<PathBuf>,
+    /// What has happened since a face last took them.
+    events: Vec<Event>,
 }
 
 impl<B: AgentBackend> Engine<B> {
@@ -220,7 +247,82 @@ impl<B: AgentBackend> Engine<B> {
     /// the engine the room (`set_room`).
     pub fn new(ws: Workspace<B>) -> Self {
         let room = Room { one: ws.size(), two: None };
-        Self { ws, question: None, asked: 0, closing: false, held: None, room }
+        Self {
+            ws,
+            question: None,
+            asked: 0,
+            closing: false,
+            held: None,
+            room,
+            save_in: None,
+            events: Vec::new(),
+        }
+    }
+
+    /// Where the workspace is saved from now on. Until this is called
+    /// nothing is saved, so nothing built for a test writes anywhere.
+    pub fn save_in(&mut self, folder: PathBuf) {
+        self.save_in = Some(folder);
+    }
+
+    /// Save the workspace now. With nowhere to save, nothing is done. On
+    /// failure what was saved before is left as it was, and the reason is
+    /// returned.
+    pub fn save(&self) -> Result<(), String> {
+        match &self.save_in {
+            Some(folder) => state::save(folder, &self.ws.to_saved()),
+            None => Ok(()),
+        }
+    }
+
+    /// Save after a change to what is saved. A failure is an event, each
+    /// time; the engine carries on.
+    fn changed(&mut self) {
+        if let Err(why) = self.save() {
+            self.events.push(Event::SaveFailed { why });
+        }
+    }
+
+    /// What has happened since the last call, oldest first.
+    pub fn take_events(&mut self) -> Vec<Event> {
+        std::mem::take(&mut self.events)
+    }
+
+    /// Reopen the agents of a saved workspace. Saved at once: restoring may
+    /// have given agents new conversation ids, and those are kept.
+    pub fn restore(&mut self, saved: SavedWorkspace) -> RestoreReport {
+        let report = self.ws.restore(saved);
+        self.changed();
+        report
+    }
+
+    /// Start a new agent and put it in front. On failure nothing is added.
+    pub fn start_new(
+        &mut self,
+        command: &str,
+        args: Vec<String>,
+        kind: AgentKind,
+        folder: PathBuf,
+    ) -> Result<(), StartError> {
+        self.ws.start_new(command, args, kind, folder)?;
+        self.changed();
+        Ok(())
+    }
+
+    /// Something came from a running agent: output, or its end. What the
+    /// user should be told of it becomes an event.
+    pub fn handle(&mut self, event: AgentEvent) {
+        let Some(happened) = self.ws.handle(event) else { return };
+        let event = match happened {
+            Happened::Exited { label, exit } => Event::Exited { label, exit },
+            Happened::StartedNewConversation { label } => {
+                // The new conversation's id is kept.
+                self.changed();
+                Event::StartedNewConversation { label }
+            }
+            Happened::CouldNotContinue { label, why } => Event::CouldNotContinue { label, why },
+        };
+        self.events.push(event);
     }
 
     /// The face's measure of the room agents have. Agents are given the
@@ -404,7 +506,9 @@ impl<B: AgentBackend> Engine<B> {
         if self.question.is_some() {
             return Err(Refused::QuestionOpen);
         }
-        self.ws.restart(agent).ok_or(Refused::NoSuchAgent)
+        let continuing = self.ws.restart(agent).ok_or(Refused::NoSuchAgent)?;
+        self.changed();
+        Ok(continuing)
     }
 
     /// The answer to the open question. Whatever the answer, the question
@@ -424,7 +528,10 @@ impl<B: AgentBackend> Engine<B> {
                 Answered::Closing
             }
             About::Close(agent) => match self.ws.close(agent) {
-                Some(label) => Answered::Closed { label },
+                Some(label) => {
+                    self.changed();
+                    Answered::Closed { label }
+                }
                 None => Answered::AlreadyGone,
             },
             About::Paste(agent) => {
@@ -862,6 +969,106 @@ mod tests {
         e.answer(q.id, true).unwrap();
         assert_eq!(e.paste(a, "x".into(), vec![]), Err(Refused::NoSuchAgent));
         assert!(got(&sent).is_empty());
+    }
+
+    /// An empty folder of this test's own.
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("lillignode-engine-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn saved_names(dir: &std::path::Path) -> Vec<String> {
+        state::load(dir).workspace.agents.into_iter().map(|a| a.name).collect()
+    }
+
+    #[test]
+    fn the_workspace_is_saved_after_each_change_to_what_is_saved() {
+        let dir = scratch("saves");
+        let mut e = engine(&[]);
+        e.save_in(dir.clone());
+        let work = std::env::temp_dir();
+        e.start_new("a", Vec::new(), AgentKind::Program, work.clone()).unwrap();
+        assert_eq!(saved_names(&dir), ["a"], "after a start");
+        e.start_new("b", Vec::new(), AgentKind::Program, work).unwrap();
+        assert_eq!(saved_names(&dir), ["a", "b"]);
+
+        let Ok(Outcome::Asked(q)) = e.close(key(&e, 0)) else { panic!("asked") };
+        assert_eq!(saved_names(&dir), ["a", "b"], "a question changes nothing");
+        e.answer(q.id, false).unwrap();
+        assert_eq!(saved_names(&dir), ["a", "b"], "nor does a no");
+        let Ok(Outcome::Asked(q)) = e.close(key(&e, 0)) else { panic!("asked") };
+        e.answer(q.id, true).unwrap();
+        assert_eq!(saved_names(&dir), ["b"], "after a close");
+        assert!(e.take_events().is_empty(), "every save worked: nothing to say");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_restored_workspace_is_saved_at_once_with_its_new_conversation_ids() {
+        use crate::state::SavedAgent;
+        let dir = scratch("restore");
+        let mut e = engine(&[]);
+        e.save_in(dir.clone());
+        let claude = SavedAgent {
+            name: "Claude Code".into(),
+            command: "claude".into(),
+            kind: Some("claude-code".into()),
+            args: vec![],
+            folder: std::env::temp_dir(),
+            conversation: None,
+            other: Default::default(),
+        };
+        e.restore(SavedWorkspace { agents: vec![claude], ..Default::default() });
+        let saved = state::load(&dir).workspace.agents;
+        assert_eq!(saved.len(), 1);
+        assert!(saved[0].conversation.is_some(), "the id it was given is kept");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_save_that_fails_is_said_each_time_and_nothing_else_changes() {
+        // A file where the folder should be: nothing can be saved in it.
+        let dir = scratch("fails");
+        let not_a_folder = dir.join("file");
+        std::fs::write(&not_a_folder, "x").unwrap();
+        let mut e = engine(&["state=idle"]);
+        e.save_in(not_a_folder);
+        assert!(e.save().is_err());
+        assert!(e.take_events().is_empty(), "asking for a save returns the reason; it is no event");
+
+        e.start_new("b", Vec::new(), AgentKind::Program, std::env::temp_dir()).unwrap();
+        assert_eq!(e.ws.entries().len(), 2, "the agent started all the same");
+        assert!(matches!(e.take_events().as_slice(), [Event::SaveFailed { .. }]));
+        assert!(e.take_events().is_empty(), "taken once");
+
+        // Its program ends: said, and not a change to what is saved.
+        e.handle(AgentEvent::Exited(AgentId(2), crate::agent::Exit { code: 0 }));
+        assert!(matches!(e.take_events().as_slice(), [Event::Exited { exit, .. }] if exit.clean()));
+        // Started again: saved again, and it fails again.
+        assert_eq!(e.start_again(key(&e, 1)), Ok(false));
+        assert!(matches!(e.take_events().as_slice(), [Event::SaveFailed { .. }]));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn with_nowhere_to_save_nothing_is_saved_and_nothing_is_said() {
+        let mut e = engine(&[]);
+        e.start_new("a", Vec::new(), AgentKind::Program, std::env::temp_dir()).unwrap();
+        assert_eq!(e.save(), Ok(()));
+        assert!(e.take_events().is_empty());
+    }
+
+    #[test]
+    fn output_is_no_event_and_an_agent_already_closed_says_nothing_when_it_ends() {
+        let mut e = engine(&["state=idle"]);
+        e.handle(AgentEvent::Output(AgentId(1), b"words".to_vec()));
+        assert!(e.take_events().is_empty());
+        let Ok(Outcome::Asked(q)) = e.close(key(&e, 0)) else { panic!("asked") };
+        e.answer(q.id, true).unwrap();
+        e.handle(AgentEvent::Exited(AgentId(1), crate::agent::Exit { code: 1 }));
+        assert!(e.take_events().is_empty());
     }
 
     const ONE: Size = Size { rows: 30, cols: 120 };
