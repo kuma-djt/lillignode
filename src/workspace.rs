@@ -694,7 +694,16 @@ impl<B: AgentBackend> Workspace<B> {
     /// Returns whether it was asked to continue its conversation, or None if
     /// there was nothing to restart.
     pub fn restart_focused(&mut self) -> Option<bool> {
-        let entry = self.entries.get(self.focused)?;
+        let key = self.focused()?.key;
+        self.restart(key)
+    }
+
+    /// Start an agent again after it exited or failed to start. Returns
+    /// whether it was asked to continue its conversation, or None if there
+    /// is no such agent or it is running.
+    pub fn restart(&mut self, key: AgentKey) -> Option<bool> {
+        let at = self.index_of(key)?;
+        let entry = &self.entries[at];
         if entry.is_running() {
             return None;
         }
@@ -705,23 +714,31 @@ impl<B: AgentBackend> Workspace<B> {
             // The same conversation, so the same record: what it had used
             // when Lillignode started, and whether its warning was given,
             // are still true.
-            let old = &mut self.entries[self.focused];
+            let old = &mut self.entries[at];
             entry.usage = old.usage.take();
             entry.cost_warned = old.cost_warned;
         }
-        self.entries[self.focused] = entry;
+        self.entries[at] = entry;
         Some(continuing)
     }
 
     /// Stop the focused agent if it is running and remove it from the workspace.
     pub fn close_focused(&mut self) -> Option<String> {
-        if self.focused >= self.entries.len() {
-            return None;
-        }
-        let removed = self.focused;
+        let key = self.focused()?.key;
+        self.close(key)
+    }
+
+    /// Stop an agent if it is running and remove it from the workspace.
+    /// Returns its label, or None if there is no such agent. The agent in
+    /// front stays in front unless it is the one closed.
+    pub fn close(&mut self, key: AgentKey) -> Option<String> {
+        let removed = self.index_of(key)?;
         let entry = self.entries.remove(removed);
         if let Some(id) = entry.id {
             self.backend.close(id);
+        }
+        if removed < self.focused {
+            self.focused -= 1;
         }
         self.focused = self.focused.min(self.entries.len().saturating_sub(1));
         self.mend_pair(removed);
@@ -1441,6 +1458,59 @@ mod tests {
         assert_eq!(ws.focused().unwrap().label(), "Claude Code (a)");
         assert_eq!(ws.handle(AgentEvent::Exited(AgentId(2), Exit { code: 1 })), None);
         assert_eq!(ws.entries().len(), 1);
+    }
+
+    #[test]
+    fn closing_an_agent_by_its_key_leaves_the_agent_in_front_in_front() {
+        let mut ws = Workspace::new(Fake::default(), SIZE);
+        for folder in ["a", "b", "c"] {
+            ws.start_as_named("claude", root(folder)).unwrap();
+        }
+        ws.focus_previous();
+        assert_eq!(ws.focused().unwrap().label(), "Claude Code (b)");
+        // One before it.
+        let a = ws.entries()[0].key();
+        assert_eq!(ws.close(a), Some("Claude Code (a)".to_string()));
+        assert_eq!(ws.focused().unwrap().label(), "Claude Code (b)");
+        // One after it.
+        let c = ws.entries()[1].key();
+        assert_eq!(ws.close(c), Some("Claude Code (c)".to_string()));
+        assert_eq!(ws.focused().unwrap().label(), "Claude Code (b)");
+        // Gone: nothing.
+        assert_eq!(ws.close(a), None);
+        assert_eq!(ws.restart(a), None);
+        assert_eq!(ws.entries().len(), 1);
+    }
+
+    /// Two side by side, with three agents, and one of the shown pair
+    /// closed by its key: the agent in front stays in front and on screen,
+    /// the pair names two different agents that still exist, and the one
+    /// not shown fills the empty side.
+    #[test]
+    fn closing_either_side_of_a_pair_by_key_keeps_the_agent_in_front_shown() {
+        for close_front in [true, false] {
+            let mut ws = Workspace::new(Fake::default(), SIZE);
+            for folder in ["a", "b", "c"] {
+                ws.start_as_named("claude", root(folder)).unwrap();
+            }
+            // c in front, on the left, beside a.
+            assert_eq!(ws.show_two(), Ok(Pair { left: 2, right: 0 }));
+            let (_, _, front) = shown(&ws);
+            assert_eq!(front, "c");
+            let target = if close_front { 2 } else { 0 };
+            let key = ws.entries()[target].key();
+            ws.close(key).unwrap();
+            assert_eq!(ws.entries().len(), 2);
+            let (left, right, front) = shown(&ws);
+            assert_ne!(left, right, "{close_front}: never the same agent on both sides");
+            assert!(front == left || front == right, "{close_front}: the agent in front is shown");
+            if close_front {
+                assert_ne!(front, "c");
+            } else {
+                assert_eq!(front, "c", "closing the other side leaves the front alone");
+                assert!([left.as_str(), right.as_str()].contains(&"b"), "b fills the empty side");
+            }
+        }
     }
 
     #[test]

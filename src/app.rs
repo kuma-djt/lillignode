@@ -14,7 +14,7 @@ use crate::action::Action;
 use crate::agent::{AgentBackend, AgentEvent, Size, StartError};
 use crate::config::{Billing, Config};
 use crate::cost::{self, Cost, Usage, Waiting, WhyNot};
-use crate::engine::{Engine, Outcome, QuestionId, Refused, Unfinished};
+use crate::engine::{About, Answered, Engine, Outcome, QuestionId, Refused, Unfinished};
 use crate::input::Pasted;
 use crate::keys;
 use crate::kind::AgentKind;
@@ -173,7 +173,8 @@ fn kind_means(kind: AgentKind) -> &'static str {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Confirm {
-    Close,
+    /// The engine's question about closing an agent, by its id.
+    Close(QuestionId),
     /// The engine's question about quitting, by its id.
     Quit(QuestionId),
     /// A paste of several lines into an agent that would take each line as
@@ -556,15 +557,25 @@ impl<B: AgentBackend> App<B> {
                 self.mode = Mode::Normal;
                 let yes = key.code == KeyCode::Char('y');
                 match what {
-                    Confirm::Close if yes => self.close_focused(),
+                    Confirm::Close(id) => {
+                        let two_before = self.engine.ws.pair().is_some();
+                        match self.engine.answer(id, yes) {
+                            Ok(Answered::Closed { label }) => self.closed(&label, two_before),
+                            Ok(Answered::AlreadyGone) => {
+                                self.notice = Some(
+                                    "That agent was already gone, so nothing was closed. Nothing else was changed."
+                                        .to_string(),
+                                )
+                            }
+                            Ok(Answered::Nothing) => {}
+                            // An answer about closing never quits.
+                            Ok(Answered::Closing) => unreachable!("an answer about closing quit"),
+                            Err(why) => self.refuse(self.refusal(why, "")),
+                        }
+                    }
                     Confirm::Quit(id) => {
                         if let Err(why) = self.engine.answer(id, yes) {
-                            self.notice = Some(match why {
-                                Refused::NoSuchQuestion => format!(
-                                    "That question was no longer open, so nothing was done. To quit: {}, then q.",
-                                    self.config.menu_keys.first().map(|k| k.label()).unwrap_or_default()
-                                ),
-                            });
+                            self.refuse(self.refusal(why, ""));
                         }
                     }
                     Confirm::View if yes => self.change_view(),
@@ -600,7 +611,6 @@ impl<B: AgentBackend> App<B> {
                             self.notice = Some("Paste discarded. Nothing was sent.".to_string());
                         }
                     }
-                    _ => {}
                 }
             }
         }
@@ -714,28 +724,38 @@ impl<B: AgentBackend> App<B> {
             Action::Next => self.engine.ws.focus_next(),
             Action::Previous => self.engine.ws.focus_previous(),
             Action::StartAgain => {
-                if let Some(continuing) = self.engine.ws.restart_focused() {
-                    self.notice = self.engine.ws.focused().map(|e| match &e.status {
-                        Status::NotStarted(why) => {
-                            format!("{} still could not be started: {why}. Nothing was changed.", e.label())
-                        }
-                        _ if continuing => {
-                            format!("Started {} again, continuing its conversation.", e.label())
-                        }
-                        _ => format!("Started {} again.", e.label()),
-                    });
-                    self.save_or_say();
-                } else if self.focused_running() {
+                let Some((key, label)) = self.engine.ws.focused().map(|e| (e.key(), e.label())) else {
+                    return;
+                };
+                match self.engine.start_again(key) {
+                    Ok(continuing) => {
+                        self.notice = self.engine.ws.by_key(key).map(|e| match &e.status {
+                            Status::NotStarted(why) => {
+                                format!(
+                                    "{} still could not be started: {why}. Nothing was changed.",
+                                    e.label()
+                                )
+                            }
+                            _ if continuing => {
+                                format!("Started {} again, continuing its conversation.", e.label())
+                            }
+                            _ => format!("Started {} again.", e.label()),
+                        });
+                        self.save_or_say();
+                    }
                     // Said, so the key is never pressed into silence.
-                    self.refuse(format!(
-                        "{} is already running, so it was not started again. Nothing was changed.",
-                        self.focused_label()
-                    ));
+                    Err(why) => self.refuse(self.refusal(why, &label)),
                 }
             }
-            // Always asked: closing takes the agent and its conversation out
-            // of the workspace, and it does not come back.
-            Action::Close => self.mode = Mode::Confirm(Confirm::Close),
+            // The engine always asks first; the face shows its question.
+            Action::Close => {
+                let Some(key) = self.engine.ws.focused().map(Entry::key) else { return };
+                match self.engine.close(key) {
+                    Ok(Outcome::Asked(q)) => self.mode = Mode::Confirm(Confirm::Close(q.id)),
+                    Ok(Outcome::Done) => {}
+                    Err(why) => self.refuse(self.refusal(why, "")),
+                }
+            }
             // Changing the view tells every agent a new size, and each
             // redraws. While one is waiting for an answer, that is asked
             // about first. A change that would be refused anyway is refused
@@ -759,11 +779,11 @@ impl<B: AgentBackend> App<B> {
                 }
             }
             // The engine decides whether to ask; the face shows its question.
-            Action::Quit => {
-                if let Outcome::Asked(q) = self.engine.quit() {
-                    self.mode = Mode::Confirm(Confirm::Quit(q.id));
-                }
-            }
+            Action::Quit => match self.engine.quit() {
+                Ok(Outcome::Asked(q)) => self.mode = Mode::Confirm(Confirm::Quit(q.id)),
+                Ok(Outcome::Done) => {}
+                Err(why) => self.refuse(self.refusal(why, "")),
+            },
         }
     }
 
@@ -877,19 +897,54 @@ impl<B: AgentBackend> App<B> {
         }
     }
 
-    fn close_focused(&mut self) {
-        let two_before = self.engine.ws.pair().is_some();
-        if let Some(label) = self.engine.ws.close_focused() {
-            let mut said = format!("Closed {label} and removed it from your workspace.");
-            if two_before && self.engine.ws.pair().is_none() {
-                // Fewer than two agents are left to show side by side.
-                self.apply_size();
-                if let Some(left) = self.engine.ws.focused() {
-                    said += &format!(" {} has the whole screen again.", left.label());
-                }
+    /// Say that an agent was closed, and give the screen to the one left
+    /// when two were side by side.
+    fn closed(&mut self, label: &str, two_before: bool) {
+        let mut said = format!("Closed {label} and removed it from your workspace.");
+        if two_before && self.engine.ws.pair().is_none() {
+            // Fewer than two agents are left to show side by side.
+            self.apply_size();
+            if let Some(left) = self.engine.ws.focused() {
+                said += &format!(" {} has the whole screen again.", left.label());
             }
-            self.notice = Some(said);
-            self.save_or_say();
+        }
+        self.notice = Some(said);
+        self.save_or_say();
+    }
+
+    /// The agent the engine's question about closing is about. While the
+    /// question is open it is always there: nothing else can remove it.
+    fn close_subject(&self, id: QuestionId) -> Option<&Entry> {
+        let subject = self.engine.question().filter(|q| q.id == id).and_then(|q| match q.about {
+            About::Close(agent) => self.engine.ws.by_key(agent),
+            About::Quit => None,
+        });
+        debug_assert!(subject.is_some(), "the face shows the engine's question, never one of its own");
+        subject
+    }
+
+    fn close_subject_label(&self, id: QuestionId) -> String {
+        self.close_subject(id).map(Entry::label).unwrap_or_else(|| self.focused_label())
+    }
+
+    /// Why the engine did not do what was asked. `label` names the agent
+    /// it was asked about, where the sentence names one. Each says nothing
+    /// was changed.
+    fn refusal(&self, why: Refused, label: &str) -> String {
+        let menu = self.config.menu_keys.first().map(|k| k.label()).unwrap_or_default();
+        match why {
+            Refused::NoSuchQuestion => {
+                format!("That question was no longer open, so nothing was done. To ask again: {menu}, then the key.")
+            }
+            Refused::QuestionOpen => {
+                "Answer the question on the bottom line first. Nothing was changed.".to_string()
+            }
+            Refused::NoSuchAgent => {
+                "That agent is no longer in your workspace. Nothing was changed.".to_string()
+            }
+            Refused::AlreadyRunning => {
+                format!("{label} is already running, so it was not started again. Nothing was changed.")
+            }
         }
     }
 
@@ -1269,14 +1324,16 @@ impl<B: AgentBackend> App<B> {
             // Every question puts the question and its keys first. The bar
             // is one line, and a question cut off before "y / n" cannot be
             // answered.
-            Mode::Confirm(Confirm::Close) if self.focused_running() => format!(
-                "Close {}? y / n   It is running: closing stops it and removes it from your workspace.",
-                self.focused_label()
-            ),
-            Mode::Confirm(Confirm::Close) => format!(
+            Mode::Confirm(Confirm::Close(id)) if self.close_subject(*id).is_some_and(Entry::is_running) => {
+                format!(
+                    "Close {}? y / n   It is running: closing stops it and removes it from your workspace.",
+                    self.close_subject_label(*id)
+                )
+            }
+            Mode::Confirm(Confirm::Close(id)) => format!(
                 "Remove {}? y / n   It has stopped: removing it takes it and its conversation out of your 
                  workspace.",
-                self.focused_label()
+                self.close_subject_label(*id)
             ),
             Mode::Confirm(Confirm::Quit(id)) => {
                 // The face shows the engine's question, never one of its own.
