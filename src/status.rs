@@ -293,31 +293,119 @@ fn app_name(app: &str) -> bool {
     (1..=32).contains(&app.len()) && app.bytes().all(|b| b.is_ascii_alphanumeric() || b"_.+-".contains(&b))
 }
 
-fn read_parts(body: &[u8]) -> Result<Reading, String> {
-    let text = std::str::from_utf8(body).map_err(|_| "it is not text".to_string())?;
-    let mut parts = Parts::default();
-    for part in text.split(':') {
-        // As the format says: a part that is not `key=value` in the allowed
-        // characters is passed over, a part with a key not known here is
-        // passed over, and the last of a repeated part stands.
-        let Some((key, value)) = part.split_once('=') else { continue };
-        let (key, value) = (key.trim(), value.trim());
-        let key_fits = (1..=16).contains(&key.len()) && key.bytes().all(|b| b.is_ascii_lowercase());
-        if !key_fits || !value.bytes().all(value_byte) {
-            continue;
-        }
-        match key {
-            "state" => parts.state = Some(value),
-            "app" => parts.app = Some(value),
-            "id" => parts.id = Some(value),
-            "kind" => parts.kind = Some(value),
-            "title" => parts.title = Some(value),
-            "msg" => parts.msg = Some(value),
-            _ => {}
+/// How many parts of one program are kept. One more lets an old one go.
+pub const PARTS_KEPT: usize = 64;
+
+/// How many characters of a part's title are shown.
+const TITLE_CHARS: usize = 40;
+
+/// What one part of a program last said.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PartState {
+    /// It is waiting for the user.
+    Waiting(Option<Kind>),
+    /// Working, Done, Idle or Error.
+    Said(AgentStatus),
+    /// Its report was not understood. One part cannot speak for the
+    /// program, so this never makes the agent Unknown.
+    NotUnderstood,
+}
+
+/// One part of a program (a session, a helper agent, a tab): the latest
+/// record the program sent with this id. In memory only.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Part {
+    /// As sent, when it is one the format allows. Empty for every id it
+    /// does not allow: those are kept together as one part.
+    pub id: String,
+    /// The program's own name for the part, made safe to show and cut
+    /// short. None when it gave none, or one that cannot be read.
+    pub title: Option<String>,
+    pub state: PartState,
+    /// When it last reported.
+    pub at: SystemTime,
+    /// When it began to say what it says now. A waiting part that repeats
+    /// that it is waiting has waited since the first time, not the last.
+    pub since: SystemTime,
+    /// The user asked not to be shown this waiting part. It is shown again
+    /// as soon as the part reports again.
+    pub dismissed: bool,
+}
+
+impl Part {
+    /// Waiting for the user, and not dismissed by them.
+    pub fn is_waiting(&self) -> bool {
+        matches!(self.state, PartState::Waiting(_)) && !self.dismissed
+    }
+
+    /// How the part is named to the user: its title in quotes, or that it
+    /// has none.
+    pub fn name(&self) -> String {
+        match &self.title {
+            Some(title) => format!("\"{title}\""),
+            None => "a part with no name".to_string(),
         }
     }
+}
+
+/// What a report with an id asks for.
+#[derive(Debug, PartialEq, Eq)]
+enum PartChange {
+    /// Withdraw this part and every part beneath it.
+    Clear,
+    Set(PartState, Option<String>),
+}
+
+/// An id as the format allows it: up to 8 names joined by `/`, each of 1
+/// to 32 letters, digits and `_ . + -`, 128 bytes in all.
+fn part_id(id: &str) -> bool {
+    let segment = |s: &str| {
+        (1..=32).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_alphanumeric() || b"_.+-".contains(&b))
+    };
+    id.len() <= 128 && id.split('/').count() <= 8 && id.split('/').all(segment)
+}
+
+/// Read a report that has an id: which part it is about, and what it asks.
+/// None for a report with no id. A title that cannot be read is left out
+/// and the rest stands, so a bad title cannot hide that a part is waiting.
+fn read_part(body: &[u8]) -> Option<(String, PartChange)> {
+    let parts = parse(std::str::from_utf8(body).ok()?);
+    let id = parts.id?;
+    let id = if part_id(id) { id.to_string() } else { String::new() };
+    let title = parts
+        .title
+        .filter(|t| t.len() <= LONGEST_TITLE)
+        .and_then(decode_text)
+        .map(|t| cut(&t, TITLE_CHARS))
+        .filter(|t| !t.is_empty());
+    let state = match parts.state {
+        Some("clear") => return Some((id, PartChange::Clear)),
+        Some("blocked") => PartState::Waiting(kind_of(parts.kind)),
+        Some("working") => PartState::Said(AgentStatus::Working),
+        Some("done") => PartState::Said(AgentStatus::Done),
+        Some("idle") => PartState::Said(AgentStatus::Idle),
+        Some("error") => PartState::Said(AgentStatus::Error(None)),
+        _ => PartState::NotUnderstood,
+    };
+    Some((id, PartChange::Set(state, title)))
+}
+
+/// What a waiting program says it is waiting for. A kind not known here is
+/// passed over, as the format says: the program is still waiting.
+fn kind_of(kind: Option<&str>) -> Option<Kind> {
+    match kind {
+        Some("permission") => Some(Kind::Permission),
+        Some("question") => Some(Kind::Question),
+        Some("auth") => Some(Kind::SignIn),
+        _ => None,
+    }
+}
+
+fn read_parts(body: &[u8]) -> Result<Reading, String> {
+    let text = std::str::from_utf8(body).map_err(|_| "it is not text".to_string())?;
+    let parts = parse(text);
     // A report with an id is about one part of the program. Whatever it
-    // says, the program's own status stands.
+    // says, the program's own status stands (`read_part` reads the part).
     if parts.id.is_some() {
         return Ok(Reading::Task);
     }
@@ -338,14 +426,7 @@ fn read_parts(body: &[u8]) -> Result<Reading, String> {
     };
     let status = match state {
         "working" => AgentStatus::Working,
-        // A kind not known here is passed over, as the format says: the
-        // program is still waiting for the user.
-        "blocked" => AgentStatus::NeedsYou(match parts.kind {
-            Some("permission") => Some(Kind::Permission),
-            Some("question") => Some(Kind::Question),
-            Some("auth") => Some(Kind::SignIn),
-            _ => None,
-        }),
+        "blocked" => AgentStatus::NeedsYou(kind_of(parts.kind)),
         "done" => AgentStatus::Done,
         "idle" => AgentStatus::Idle,
         "error" => AgentStatus::Error(message.take()),
@@ -353,6 +434,42 @@ fn read_parts(body: &[u8]) -> Result<Reading, String> {
     };
     let app = parts.app.filter(|app| app_name(app)).map(str::to_string);
     Ok(Reading::Status { status, message, app })
+}
+
+/// The parts of a report Lillignode knows, by key.
+fn parse(text: &str) -> Parts<'_> {
+    let mut parts = Parts::default();
+    for part in text.split(':') {
+        // As the format says: a part that is not `key=value` in the allowed
+        // characters is passed over, a part with a key not known here is
+        // passed over, and the last of a repeated part stands.
+        let Some((key, value)) = part.split_once('=') else { continue };
+        let (key, value) = (key.trim(), value.trim());
+        let key_fits = (1..=16).contains(&key.len()) && key.bytes().all(|b| b.is_ascii_lowercase());
+        if !key_fits {
+            continue;
+        }
+        // An id that holds a character the format does not allow is still
+        // an id: the report is about a part, and must never be taken for
+        // the program's own record.
+        if key == "id" && !value.bytes().all(value_byte) {
+            parts.id = Some("");
+            continue;
+        }
+        if !value.bytes().all(value_byte) {
+            continue;
+        }
+        match key {
+            "state" => parts.state = Some(value),
+            "app" => parts.app = Some(value),
+            "id" => parts.id = Some(value),
+            "kind" => parts.kind = Some(value),
+            "title" => parts.title = Some(value),
+            "msg" => parts.msg = Some(value),
+            _ => {}
+        }
+    }
+    parts
 }
 
 /// Characters that draw nothing, or change the direction or joining of the
@@ -464,6 +581,42 @@ pub struct Trace {
     pub last: Option<LastReport>,
     /// The name the program gave itself in its latest report about itself.
     pub app: Option<String>,
+    /// The latest record of each part of the program, the one that
+    /// reported longest ago first. Never more than `PARTS_KEPT`.
+    pub parts: Vec<Part>,
+    /// Parts let go to keep to `PARTS_KEPT`.
+    pub parts_let_go: u32,
+}
+
+impl Trace {
+    /// A report about one part arrived.
+    fn part_reported(&mut self, id: String, change: PartChange, now: SystemTime) {
+        match change {
+            // As the format says: the part and every part beneath it. The
+            // one part that stands for ids the format does not allow has
+            // nothing beneath it.
+            PartChange::Clear => {
+                let beneath = format!("{id}/");
+                self.parts.retain(|p| p.id != id && (id.is_empty() || !p.id.starts_with(&beneath)));
+            }
+            PartChange::Set(state, title) => {
+                let waiting = |s: &PartState| matches!(s, PartState::Waiting(_));
+                let since = match self.parts.iter().find(|p| p.id == id) {
+                    Some(old) if waiting(&old.state) && waiting(&state) => old.since,
+                    _ => now,
+                };
+                self.parts.retain(|p| p.id != id);
+                // Room is made before the new one goes in: the oldest that
+                // is not waiting, or if every one is waiting, the oldest.
+                if self.parts.len() >= PARTS_KEPT {
+                    let oldest_idle = self.parts.iter().position(|p| !p.is_waiting());
+                    self.parts.remove(oldest_idle.unwrap_or(0));
+                    self.parts_let_go = self.parts_let_go.saturating_add(1);
+                }
+                self.parts.push(Part { id, title, state, at: now, since, dismissed: false });
+            }
+        }
+    }
 }
 
 /// Where an agent's status comes from. A source repeats what the agent said,
@@ -488,6 +641,13 @@ pub trait StatusSource {
     /// by name is not a shell, and nothing but its own word changes its
     /// status.
     fn may_be_a_shell(&self) -> bool;
+    /// A shell's prompt mark ended what was working or waiting: the same
+    /// holds for what the parts last said.
+    fn at_prompt(&mut self) {}
+    /// Stop showing the parts that are waiting now. Returns how many.
+    fn dismiss_waiting_parts(&mut self) -> usize {
+        0
+    }
     fn trace(&self) -> &Trace;
 }
 
@@ -538,9 +698,17 @@ impl StatusSource for Report {
         };
         self.trace.reports = self.trace.reports.saturating_add(1);
         match &reading {
-            Reading::Task => self.trace.task_reports = self.trace.task_reports.saturating_add(1),
+            Reading::Task => {
+                self.trace.task_reports = self.trace.task_reports.saturating_add(1);
+                if let Some((id, change)) = read_part(body) {
+                    self.trace.part_reported(id, change, now);
+                }
+            }
             Reading::Status { app, .. } => self.trace.app = app.clone(),
-            Reading::Cleared | Reading::NotUnderstood(_) => {}
+            // The format: a withdrawal with no id removes every record,
+            // the parts' with the program's own.
+            Reading::Cleared => self.trace.parts.clear(),
+            Reading::NotUnderstood(_) => {}
         }
         let shown = reading.shown();
         let kept = &body[..body.len().min(LONGEST_REPORT)];
@@ -561,6 +729,17 @@ impl StatusSource for Report {
 
     fn may_be_a_shell(&self) -> bool {
         self.expected.is_none()
+    }
+
+    fn at_prompt(&mut self) {
+        let gone =
+            |p: &Part| matches!(p.state, PartState::Waiting(_) | PartState::Said(AgentStatus::Working));
+        self.trace.parts.retain(|p| !gone(p));
+    }
+
+    fn dismiss_waiting_parts(&mut self) -> usize {
+        let waiting = self.trace.parts.iter_mut().filter(|p| p.is_waiting());
+        waiting.map(|p| p.dismissed = true).count()
     }
 
     fn trace(&self) -> &Trace {
@@ -605,11 +784,41 @@ impl Track {
         self.source.trace()
     }
 
-    fn show(&mut self, status: AgentStatus) {
-        let was = matches!(self.shown, AgentStatus::NeedsYou(_));
-        if !was && matches!(status, AgentStatus::NeedsYou(_)) {
-            self.began_needing_you = true;
+    /// The parts of the program that are waiting for the user, the one
+    /// that has waited longest first.
+    pub fn waiting_parts(&self) -> Vec<&Part> {
+        self.source.trace().parts.iter().filter(|p| p.is_waiting()).collect()
+    }
+
+    /// The status of the agent: Needs you when the program itself or any
+    /// part of it is waiting, and otherwise what the program's own record
+    /// says (`shown`). A part's kind is given when only a part is waiting:
+    /// that of the one that began waiting last.
+    pub fn status(&self) -> AgentStatus {
+        if matches!(self.shown, AgentStatus::NeedsYou(_)) {
+            return self.shown.clone();
         }
+        match self.waiting_parts().last().map(|p| &p.state) {
+            Some(PartState::Waiting(kind)) => AgentStatus::NeedsYou(*kind),
+            _ => self.shown.clone(),
+        }
+    }
+
+    fn needs_you(&self) -> bool {
+        matches!(self.shown, AgentStatus::NeedsYou(_)) || !self.waiting_parts().is_empty()
+    }
+
+    /// Stop showing the parts that are waiting now, at the user's word.
+    /// One that reports again is shown again. Returns how many.
+    pub fn dismiss_waiting_parts(&mut self) -> usize {
+        let dismissed = self.source.dismiss_waiting_parts();
+        if !self.needs_you() {
+            self.began_needing_you = false;
+        }
+        dismissed
+    }
+
+    fn show(&mut self, status: AgentStatus) {
         self.shown = status;
     }
 
@@ -654,14 +863,15 @@ impl Track {
         if !self.source.may_be_a_shell() {
             return;
         }
+        self.source.at_prompt();
         if matches!(
             self.shown,
             AgentStatus::Working | AgentStatus::WorkingQuiet(_) | AgentStatus::NeedsYou(_)
         ) {
             self.shown = AgentStatus::Unknown(Why::AtPrompt);
-            // Whatever needed the user has gone: no bell for it now.
-            self.began_needing_you = false;
         }
+        // Whatever needed the user has gone: no bell for it now.
+        self.began_needing_you = false;
     }
 
     /// The agent drew something. Never grants a status: it only ends the
@@ -684,8 +894,14 @@ impl Track {
 
     /// A report arrived. `body` is everything after `7501;`.
     pub fn received(&mut self, body: &[u8], now: SystemTime) {
+        // One change into Needs you, whichever record caused it: the
+        // program's own or a part's.
+        let was = self.needs_you();
         if let Some(status) = self.source.received(body, now) {
             self.show(status);
+        }
+        if !was && self.needs_you() {
+            self.began_needing_you = true;
         }
     }
 
@@ -927,7 +1143,229 @@ mod tests {
             assert_eq!(t.shown, AgentStatus::Idle, "{body}");
         }
         assert_eq!((t.trace().reports, t.trace().task_reports), (7, 6));
+    }
+
+    fn part(t: &mut Track, body: &str, at: SystemTime) {
+        t.received(body.as_bytes(), at);
+    }
+
+    fn part_ids(t: &Track) -> Vec<&str> {
+        t.trace().parts.iter().map(|p| p.id.as_str()).collect()
+    }
+
+    #[test]
+    fn a_waiting_part_makes_the_agent_need_you_and_rings_once() {
+        let now = SystemTime::now();
+        let mut t = claude(Instant::now());
+        part(&mut t, "state=done:app=grok", now);
+        // P5: the program's own record is Done while a part is waiting.
+        let title = b64("subagent: tests");
+        part(&mut t, &format!("state=blocked:kind=permission:id=sub/1:title={title}"), now);
+        assert_eq!(t.shown, AgentStatus::Done, "its own record stands");
+        assert_eq!(t.status(), AgentStatus::NeedsYou(Some(Kind::Permission)));
+        assert_eq!(t.waiting_parts()[0].name(), "\"subagent: tests\"");
+        assert!(t.take_began_needing_you());
+        // A second waiting part, and the program's own record waiting too:
+        // the agent already needs you, so no second bell.
+        part(&mut t, "state=blocked:id=sub/2", now);
+        part(&mut t, "state=blocked:kind=question", now);
         assert!(!t.take_began_needing_you());
+        assert_eq!(
+            t.status(),
+            AgentStatus::NeedsYou(Some(Kind::Question)),
+            "its own kind, when it waits itself"
+        );
+        assert_eq!(t.waiting_parts()[1].name(), "a part with no name");
+        // The program goes on; the parts still wait.
+        part(&mut t, "state=working", now);
+        assert_eq!(t.status(), AgentStatus::NeedsYou(None), "the kind of the part that began waiting last");
+        assert!(!t.take_began_needing_you());
+        // Each part ends by saying something else, or by being withdrawn.
+        part(&mut t, "state=working:id=sub/2", now);
+        assert_eq!(t.status(), AgentStatus::NeedsYou(Some(Kind::Permission)));
+        part(&mut t, "state=clear:id=sub/1", now);
+        assert_eq!(t.status(), AgentStatus::Working);
+        assert_eq!(part_ids(&t), ["sub/2"]);
+        // Waiting again is a new change into Needs you.
+        part(&mut t, "state=blocked:id=sub/2", now);
+        assert!(t.take_began_needing_you());
+    }
+
+    #[test]
+    fn a_withdrawal_takes_the_parts_beneath_it_and_one_with_no_id_takes_all() {
+        let now = SystemTime::now();
+        let mut t = claude(Instant::now());
+        for id in ["build", "build/test", "build/test/unit", "builder", "other"] {
+            part(&mut t, &format!("state=blocked:id={id}"), now);
+        }
+        // The part and every part beneath it; a name that only begins the
+        // same is another part.
+        part(&mut t, "state=clear:id=build/test", now);
+        assert_eq!(part_ids(&t), ["build", "builder", "other"]);
+        part(&mut t, "state=clear:id=build", now);
+        assert_eq!(part_ids(&t), ["builder", "other"]);
+        assert_eq!(t.status(), AgentStatus::NeedsYou(None));
+        // As the format says: with no id, every record goes.
+        part(&mut t, "state=clear", now);
+        assert!(t.trace().parts.is_empty());
+        assert_eq!(t.status(), AgentStatus::Unknown(Why::Withdrawn));
+    }
+
+    #[test]
+    fn p1_a_flood_of_parts_is_held_to_the_limit_and_waiting_parts_are_let_go_last() {
+        let t0 = SystemTime::now();
+        let at = |n: usize| t0 + Duration::from_secs(n as u64);
+        let mut t = claude(Instant::now());
+        part(&mut t, "state=blocked:id=waits", at(0));
+        for n in 1..=5000 {
+            part(&mut t, &format!("state=working:id=p{n}"), at(n));
+        }
+        assert_eq!(t.trace().parts.len(), PARTS_KEPT);
+        assert_eq!(t.trace().parts_let_go as usize, 5001 - PARTS_KEPT);
+        // The oldest that is not waiting went each time; the waiting one stayed.
+        assert_eq!(part_ids(&t)[..2], ["waits", "p4938"]);
+        assert_eq!(t.status(), AgentStatus::NeedsYou(None));
+        // Every part waiting: then the one that has waited longest goes.
+        let mut t = claude(Instant::now());
+        for n in 0..=PARTS_KEPT {
+            part(&mut t, &format!("state=blocked:id=w{n}"), at(n));
+        }
+        assert_eq!(t.trace().parts.len(), PARTS_KEPT);
+        assert_eq!(part_ids(&t)[0], "w1");
+        assert_eq!(t.trace().parts_let_go, 1);
+        // A part reporting again takes no new place.
+        part(&mut t, "state=blocked:id=w5", at(100));
+        assert_eq!((t.trace().parts.len(), t.trace().parts_let_go), (PARTS_KEPT, 1));
+        assert_eq!(part_ids(&t).last(), Some(&"w5"));
+    }
+
+    #[test]
+    fn p2_a_waiting_part_is_never_ended_by_time_and_keeps_when_it_last_spoke() {
+        let long_ago = SystemTime::now() - Duration::from_secs(52 * 60);
+        let t0 = Instant::now();
+        let mut t = claude(t0);
+        part(&mut t, "state=idle", long_ago);
+        part(&mut t, "state=blocked:id=old", long_ago);
+        for hours in 1..=48 {
+            t.tick(t0 + Duration::from_secs(hours * 3600));
+        }
+        assert_eq!(t.status(), AgentStatus::NeedsYou(None));
+        assert_eq!(t.waiting_parts()[0].since, long_ago);
+        // Saying again that it waits does not make the wait a new one, and
+        // rings no bell.
+        t.take_began_needing_you();
+        let now = SystemTime::now();
+        part(&mut t, "state=blocked:id=old", now);
+        let old = t.waiting_parts()[0];
+        assert_eq!((old.since, old.at), (long_ago, now));
+        assert!(!t.take_began_needing_you());
+        // Something else and then waiting again is a new wait.
+        part(&mut t, "state=working:id=old", now);
+        part(&mut t, "state=blocked:id=old", now);
+        assert_eq!(t.waiting_parts()[0].since, now);
+    }
+
+    #[test]
+    fn a_withdrawal_with_a_forbidden_id_is_about_that_part_never_the_program() {
+        let now = SystemTime::now();
+        let mut t = claude(Instant::now());
+        part(&mut t, "state=working", now);
+        part(&mut t, "state=blocked:id=real", now);
+        part(&mut t, "state=clear:id=a b", now);
+        assert_eq!(t.shown, AgentStatus::Working);
+        assert_eq!(part_ids(&t), ["real"], "the parts are not all withdrawn");
+    }
+
+    #[test]
+    fn p3_ids_the_format_does_not_allow_are_kept_as_one_part_with_no_name() {
+        let now = SystemTime::now();
+        let mut t = claude(Instant::now());
+        part(&mut t, "state=idle", now);
+        let deep = "a/b/c/d/e/f/g/h/i";
+        let long = "x".repeat(33);
+        // The last three hold characters the format allows in no value.
+        for id in ["", "a//b", "/a", deep, long.as_str(), "a b", "a!", "a@b"] {
+            part(&mut t, &format!("state=blocked:id={id}"), now);
+            assert_eq!(part_ids(&t), [""], "{id}");
+        }
+        assert_eq!(t.shown, AgentStatus::Idle, "never the program's own record");
+        assert_eq!(t.status(), AgentStatus::NeedsYou(None));
+        assert_eq!(t.waiting_parts()[0].name(), "a part with no name");
+        // Withdrawing it takes only it.
+        part(&mut t, "state=blocked:id=real", now);
+        part(&mut t, "state=clear:id=", now);
+        assert_eq!(part_ids(&t), ["real"]);
+        // The longest id the format allows is a part of its own.
+        let widest = vec!["y".repeat(15); 8].join("/");
+        part(&mut t, &format!("state=working:id={widest}"), now);
+        assert_eq!(part_ids(&t), ["real", widest.as_str()]);
+    }
+
+    #[test]
+    fn p4_a_part_that_is_not_understood_does_not_speak_for_the_program() {
+        let now = SystemTime::now();
+        let mut t = claude(Instant::now());
+        part(&mut t, "state=working", now);
+        for body in ["state=pondering:id=a", "id=b"] {
+            part(&mut t, body, now);
+        }
+        assert_eq!(t.status(), AgentStatus::Working);
+        assert!(t.trace().parts.iter().all(|p| p.state == PartState::NotUnderstood));
+        // A title that cannot be read, or is too long, is left out; the
+        // part still waits.
+        let long = "QUJD".repeat(LONGEST_TITLE / 4 + 1);
+        for title in ["!!!", long.as_str()] {
+            part(&mut t, &format!("state=blocked:id=c:title={title}"), now);
+            assert_eq!(t.status(), AgentStatus::NeedsYou(None));
+            assert_eq!(t.waiting_parts()[0].title, None);
+        }
+        // A title is made safe and cut short, as a message is.
+        let title = b64(&format!("tests\x1b[2J\u{202e}{}", "x".repeat(60)));
+        part(&mut t, &format!("state=blocked:id=c:title={title}"), now);
+        let shown = t.waiting_parts()[0].title.clone().unwrap();
+        assert!(shown.starts_with("tests [2J x"), "{shown}");
+        assert_eq!(shown.chars().count(), TITLE_CHARS);
+    }
+
+    #[test]
+    fn a_dismissed_part_is_not_shown_until_it_reports_again() {
+        let now = SystemTime::now();
+        let mut t = claude(Instant::now());
+        part(&mut t, "state=done", now);
+        part(&mut t, "state=blocked:id=a", now);
+        part(&mut t, "state=blocked:id=b", now);
+        assert!(t.take_began_needing_you());
+        assert_eq!(t.dismiss_waiting_parts(), 2);
+        assert_eq!(t.status(), AgentStatus::Done);
+        assert_eq!(t.dismiss_waiting_parts(), 0);
+        assert_eq!(t.trace().parts.len(), 2, "still kept, and still listed");
+        // Another part does not bring a dismissed one back.
+        part(&mut t, "state=working:id=c", now);
+        assert_eq!(t.status(), AgentStatus::Done);
+        // It reports again: it is back, and that is a new change into Needs you.
+        part(&mut t, "state=blocked:id=a", now);
+        assert_eq!(t.status(), AgentStatus::NeedsYou(None));
+        assert_eq!(t.waiting_parts().len(), 1);
+        assert!(t.take_began_needing_you());
+    }
+
+    #[test]
+    fn a_shell_prompt_ends_what_parts_were_working_or_waiting() {
+        let now = SystemTime::now();
+        let mut t = Track::new(Instant::now(), Box::new(Report::unexpected(Why::NothingSent)));
+        part(&mut t, "state=blocked:id=a", now);
+        part(&mut t, "state=working:id=b", now);
+        part(&mut t, "state=done:id=c", now);
+        assert_eq!(t.status(), AgentStatus::NeedsYou(None));
+        t.prompt();
+        assert_eq!(part_ids(&t), ["c"]);
+        assert!(!matches!(t.status(), AgentStatus::NeedsYou(_)));
+        assert!(!t.take_began_needing_you(), "what needed the user has gone");
+        // A program known by name is not a shell: nothing but its own word.
+        let mut t = claude(Instant::now());
+        part(&mut t, "state=blocked:id=a", now);
+        t.prompt();
+        assert_eq!(t.status(), AgentStatus::NeedsYou(None));
     }
 
     #[test]

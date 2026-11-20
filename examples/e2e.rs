@@ -782,6 +782,98 @@ fn any_program(sb: &Sandbox, standin: &Path) {
     check("it is saved as a plain program", saved.contains("\"kind\": \"program\""), &saved);
 }
 
+/// A program whose parts report for themselves: a waiting part makes the
+/// agent Needs you, is named, can be dismissed, and comes back.
+fn waiting_parts(sb: &Sandbox, standin: &Path) {
+    println!("S. A part of a program that is waiting (stand-in that sends parts)");
+    let dir = sb.root.join("parts");
+    std::fs::create_dir_all(&dir).unwrap();
+    launcher(&dir, standin, "helper", "parts");
+    launcher(&dir, standin, "other", "parts");
+    let state = sb.root.join("state-parts");
+    let mut s = Session::start_in(sb, &state);
+    s.new_agent(&dir.join("helper").display().to_string());
+    s.expect("it starts", "STANDIN READY parts");
+    s.keys(b"o");
+    s.expect("its own record: done", "work  Done ");
+    let bells_before = bells(&s);
+    s.keys(b"1");
+    s.expect("a part that is waiting makes the agent need you", "work  NEEDS YOU   ");
+    s.expect("the heading counts it", " Lillignode  1 NEEDS YOU");
+    check("and the bell rings once", bells(&s) == bells_before + 1, &format!("{}", bells(&s) - bells_before));
+    s.raw(CTRL_Q);
+    s.keys(b"s");
+    s.expect("the status report says what for", "Status: Needs you: permission.");
+    s.expect(
+        "that a part is why, and what the program itself says",
+        "Its own status: Done. One of its parts is waiting for you",
+    );
+    s.expect(
+        "and names the part, its id, and how long it has waited",
+        "\"subagent: tests\" (id sub/1): waiting for you (permission), waiting since less than a minute ago",
+    );
+    s.expect("the bar names the key that stops showing it", "d: stop showing its waiting parts");
+    s.keys(b"z");
+    s.keys(b"2");
+    s.expect("a second part waits", "SENT 2");
+    s.keys(b"a");
+    s.expect("the first part goes on", "SENT a");
+    s.expect("the agent still needs you: the second still waits", "work  NEEDS YOU   ");
+    check("with no second bell", bells(&s) == bells_before + 1, &format!("{}", bells(&s) - bells_before));
+
+    // Not in front: the notice names the agent and says a part is why.
+    s.new_agent(&dir.join("other").display().to_string());
+    s.expect(
+        "with another agent in front, the notice says a part is waiting",
+        "needs you: one of its parts is waiting, a part with",
+    );
+    s.raw(CTRL_Q);
+    s.keys(b"\t");
+    s.keys(ESC);
+    s.expect("back to it", "helper (work).");
+
+    // Dismissed by hand from the status report; it comes back if it reports.
+    s.raw(CTRL_Q);
+    s.keys(b"s");
+    s.keys(b"d");
+    s.expect("d asks first", "Stop showing 1 waiting part of ");
+    s.expect("with its keys before the reason", "helper (work)? y / n");
+    s.keys(b"y");
+    s.expect("and says what it did", "A part that reports again is shown again.");
+    s.expect_gone("the agent no longer needs you", "NEEDS YOU");
+    s.never("and the key was not typed into the agent", "SENT d");
+    s.keys(b"2");
+    s.expect("the part reports again and is shown again", "work  NEEDS YOU   ");
+    check("with a bell of its own", bells(&s) == bells_before + 2, &format!("{}", bells(&s) - bells_before));
+
+    // Withdrawn: everything beneath an id, then everything.
+    s.keys(b"1");
+    s.expect("both parts wait", "SENT 1");
+    s.keys(b"c");
+    s.expect_gone("withdrawing what is above them ends both", "NEEDS YOU");
+    s.keys(b"1");
+    s.expect("a part waits again", " Lillignode  1 NEEDS YOU");
+    s.raw(CTRL_Q);
+    s.keys(b"q");
+    s.expect(
+        "quit asks about an agent with a waiting part",
+        "Quit and stop 2 running agents? y / n   Not finished or not known: ",
+    );
+    s.keys(b"n");
+    s.keys(b"x");
+    s.expect_gone("a withdrawal with no id ends the parts' records too", "NEEDS YOU");
+
+    // A flood of parts is held to the limit.
+    s.keys(b"f");
+    s.expect("two hundred parts report", "SENT f");
+    s.raw(CTRL_Q);
+    s.keys(b"s");
+    s.expect("no more than 64 are kept", "Parts that have reported: 64.");
+    s.expect("and the rest are counted as let go", "Let go, to keep no more than 64: 136.");
+    s.keys(b"z");
+    drop(s.quit("quit", true));
+}
+
 /// Options typed when starting an agent, and a kind stated for it.
 fn start_options(sb: &Sandbox, standin: &Path) {
     println!("R. Starting an agent with options and a stated kind");
@@ -1448,7 +1540,7 @@ fn main() {
     s.expect("with the raw report", "ESC ]7501;state=pondering:app=claude-code");
     s.expect("and why it was not understood", "state \"pondering\" is one Lillignode does not know");
     s.expect("who sent the last report it could read", "Sent by: Claude Code.");
-    s.expect("and counts background-task reports", "(1 about its background tasks");
+    s.expect("and counts background-task reports", "(1 about parts of it");
     s.expect(
         "the bar says how to leave",
         "STATUS REPORT  Any key: back to the agent.  Of Claude Code (work).",
@@ -1547,6 +1639,7 @@ fn main() {
     codex(&sb, &standin);
     any_program(&sb, &standin);
     start_options(&sb, &standin);
+    waiting_parts(&sb, &standin);
 
     let _ = std::fs::remove_dir_all(&sb.root);
     println!("\nAll checks passed.");

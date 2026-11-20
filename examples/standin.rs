@@ -365,6 +365,55 @@ fn codex_mode() {
 /// Report the way any program may, as the open format describes: nothing
 /// is asked, the program names itself `deploy` or gives no name, and some
 /// keys send what a careless or hostile program might.
+/// A program with parts (helper agents), each reporting for itself with
+/// an id, as the format allows. One key sends one report.
+fn parts_mode() {
+    let send = |body: &str| {
+        let mut out = std::io::stdout();
+        let _ = write!(out, "\x1b]7501;{body}\x1b\\");
+        let _ = out.flush();
+    };
+    let mut stdin = std::io::stdin();
+    let mut buf = [0u8; 256];
+    loop {
+        let n = match stdin.read(&mut buf) {
+            Ok(0) | Err(_) => return,
+            Ok(n) => n,
+        };
+        for &key in &buf[..n] {
+            match key {
+                // The program's own record.
+                b'o' => send("state=done:app=helper"),
+                b'w' => send("state=working:app=helper"),
+                // A helper with a name asks permission; one with no name waits.
+                b'1' => send(&format!(
+                    "state=blocked:kind=permission:app=helper:id=sub/1:title={}",
+                    base64("subagent: tests")
+                )),
+                b'2' => send("state=blocked:app=helper:id=sub/2"),
+                // The first helper goes on.
+                b'a' => send("state=working:app=helper:id=sub/1"),
+                // Everything beneath "sub" is withdrawn; then everything.
+                b'c' => send("state=clear:id=sub"),
+                b'x' => send("state=clear"),
+                // Two hundred parts, each working.
+                b'f' => {
+                    let mut all = String::new();
+                    for n in 0..200 {
+                        all += &format!("\x1b]7501;state=working:app=helper:id=flood/{n}\x1b\\");
+                    }
+                    let mut out = std::io::stdout();
+                    let _ = out.write_all(all.as_bytes());
+                    let _ = out.flush();
+                }
+                3 => return,
+                _ => continue,
+            }
+            say(&format!("SENT {}", key as char));
+        }
+    }
+}
+
 fn reports_mode() {
     let send = |body: &str| {
         let mut out = std::io::stdout();
@@ -541,6 +590,10 @@ fn main() {
         "reports" => {
             say("STANDIN READY reports");
             reports_mode();
+        }
+        "parts" => {
+            say("STANDIN READY parts");
+            parts_mode();
         }
         "status-silent" => {
             say("STANDIN READY status-silent");

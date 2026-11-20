@@ -12,7 +12,7 @@ use crate::agent::{AgentBackend, AgentEvent, AgentId, AgentSpec, Exit, Size, Sta
 use crate::cost::{self, Cost};
 use crate::kind::AgentKind;
 use crate::state::{SavedAgent, SavedWorkspace, VERSION};
-use crate::status::{AgentStatus, Kind, Report, Track, Why};
+use crate::status::{self, AgentStatus, Kind, Report, Track, Why};
 use crate::terminal::{StatusMessage, Terminal};
 
 /// A resumed agent that stops with an error this soon, before the user has
@@ -114,7 +114,23 @@ impl Entry {
     /// reported, or Unknown for any other agent. None once its program
     /// is not running: then the program state is all there is to show.
     pub fn reported(&self) -> Option<AgentStatus> {
+        self.is_running().then(|| self.track.status())
+    }
+
+    /// What the program's own record says, apart from its parts. None once
+    /// its program is not running.
+    pub fn own_status(&self) -> Option<AgentStatus> {
         self.is_running().then(|| self.track.shown.clone())
+    }
+
+    /// The parts of the program that are waiting for the user. None while
+    /// the program itself says it is waiting, or is not running: then the
+    /// parts are not why it needs you.
+    pub fn waiting_parts(&self) -> Vec<&status::Part> {
+        match self.own_status() {
+            Some(AgentStatus::NeedsYou(_)) | None => Vec::new(),
+            Some(_) => self.track.waiting_parts(),
+        }
     }
 
     /// What the agent's conversation has used so far, or why that is not

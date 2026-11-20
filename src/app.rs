@@ -171,6 +171,9 @@ pub enum Confirm {
     /// Changing between one agent on screen and two, while an agent is
     /// waiting for the user: every agent is told a new size and redraws.
     View,
+    /// Stop showing the waiting parts of the agent in front. Asked from
+    /// its status report.
+    Parts,
 }
 
 pub struct App<B: AgentBackend> {
@@ -275,6 +278,31 @@ fn left_out_sentence(left_out: &[char]) -> String {
 
 fn plural(n: usize, one: &str, many: &str) -> String {
     format!("{n} {}", if n == 1 { one } else { many })
+}
+
+/// How long a part has said it is waiting: "waiting since 52 minutes ago".
+/// A waiting part is not ended by a clock, so its age is always said.
+fn waiting_since(at: SystemTime) -> String {
+    format!("waiting since {}", ago(Some(at)))
+}
+
+/// One part of a program, for the status report: its name, its id, what
+/// it last said and when.
+fn part_line(part: &status::Part) -> String {
+    let id = match part.id.as_str() {
+        "" => "an id the format does not allow".to_string(),
+        id => format!("id {id}"),
+    };
+    let said = match &part.state {
+        status::PartState::Waiting(kind) => {
+            let kind = kind.map(|k| format!(" ({})", k.word())).unwrap_or_default();
+            let dismissed = if part.dismissed { ", no longer shown at your word" } else { "" };
+            format!("waiting for you{kind}, {}{dismissed}", waiting_since(part.since))
+        }
+        status::PartState::Said(said) => format!("{}, {}", said.text(), ago(Some(part.at))),
+        status::PartState::NotUnderstood => format!("not understood, {}", ago(Some(part.at))),
+    };
+    format!("  {} ({id}): {said}\n", part.name())
 }
 
 fn ago(when: Option<SystemTime>) -> String {
@@ -521,6 +549,21 @@ impl<B: AgentBackend> App<B> {
                     Confirm::Close if yes => self.close_focused(),
                     Confirm::Quit if yes => self.quit = true,
                     Confirm::View if yes => self.change_view(),
+                    Confirm::Parts => {
+                        let label = self.focused_label();
+                        let dismissed = match (yes, self.ws.focused_mut()) {
+                            (true, Some(e)) => e.track.dismiss_waiting_parts(),
+                            _ => 0,
+                        };
+                        self.notice = Some(match dismissed {
+                            0 => format!("Left as it was: the waiting parts of {label} are still shown."),
+                            n => format!(
+                                "Stopped showing {} of {label}. Nothing was sent to it. A part that \
+                                 reports again is shown again.",
+                                plural(n, "waiting part", "waiting parts")
+                            ),
+                        });
+                    }
                     Confirm::View => {
                         self.notice = Some("The view was left as it was. No agent was resized.".to_string());
                     }
@@ -710,6 +753,11 @@ impl<B: AgentBackend> App<B> {
     /// The status report scrolls with the history keys. Any other key
     /// closes it and is not passed on. A report that fits does not move.
     fn report_key(&mut self, key: KeyEvent) {
+        // Named in the bar while the agent has waiting parts, and only then.
+        if key.code == KeyCode::Char('d') && key.modifiers.is_empty() && self.focused_waiting_parts() > 0 {
+            self.mode = Mode::Confirm(Confirm::Parts);
+            return;
+        }
         // A report that fits closes on any key, as the bar says.
         let view = ui::report_view(&self.status_report_text(), self.window);
         let Some((lines, page)) =
@@ -727,6 +775,20 @@ impl<B: AgentBackend> App<B> {
             KeyCode::Down => (top + 1).min(last),
             _ => 0,
         };
+    }
+
+    /// How many parts of the agent in front are waiting for the user.
+    fn focused_waiting_parts(&self) -> usize {
+        self.ws.focused().map_or(0, |e| e.track.waiting_parts().len())
+    }
+
+    /// The words in the status report's bar for the key that stops showing
+    /// waiting parts. Empty when there are none.
+    fn dismiss_hint(&self) -> String {
+        match self.focused_waiting_parts() {
+            0 => String::new(),
+            _ => format!("   {}: stop showing its waiting parts", key("d")),
+        }
     }
 
     /// The keys that move through history and the status report.
@@ -1100,10 +1162,20 @@ impl<B: AgentBackend> App<B> {
             // The way back first, so a narrow window never cuts it off;
             // the agent's name, which may be long, last.
             Mode::StatusReport if self.report_scrolls() => format!(
-                "{}  {}: back to the agent   {} scroll.  Of {}.",
+                "{}  {}: back to the agent   {} scroll{}.  Of {}.",
                 mode("STATUS REPORT"),
                 key("Any other key"),
                 ["PgUp", "PgDn", "Up", "Down", "Home"].map(key).join(" "),
+                self.dismiss_hint(),
+                self.focused_label(),
+            ),
+            // The key that stops showing waiting parts is named only while
+            // there are some.
+            Mode::StatusReport if self.focused_waiting_parts() > 0 => format!(
+                "{}  {}: back to the agent{}.  Of {}.",
+                mode("STATUS REPORT"),
+                key("Any other key"),
+                self.dismiss_hint(),
                 self.focused_label(),
             ),
             Mode::StatusReport => format!(
@@ -1184,6 +1256,22 @@ impl<B: AgentBackend> App<B> {
                 self.focused_label()
             ),
             Mode::Confirm(Confirm::Quit) => self.quit_question(),
+            Mode::Confirm(Confirm::Parts) => {
+                let waiting = self.ws.focused().map(|e| e.track.waiting_parts()).unwrap_or_default();
+                let which = match waiting.as_slice() {
+                    [one] => format!("{}, {}", one.name(), waiting_since(one.since)),
+                    many => format!(
+                        "the longest {}",
+                        many.iter().map(|p| p.since).min().map(waiting_since).unwrap_or_default()
+                    ),
+                };
+                format!(
+                    "Stop showing {} of {}? y / n   {which}. Nothing is sent to the agent. A part that \
+                     reports again is shown again.",
+                    plural(waiting.len(), "waiting part", "waiting parts"),
+                    self.focused_label()
+                )
+            }
             Mode::Confirm(Confirm::View) => {
                 let waiting: Vec<String> =
                     self.ws.entries().iter().filter(|e| e.needs_you().is_some()).map(Entry::label).collect();
@@ -1419,9 +1507,28 @@ impl<B: AgentBackend> App<B> {
         match waiting.as_slice() {
             [] => None,
             [(i, e)] => {
-                let what = match e.needs_you().flatten() {
-                    Some(kind) => format!("needs you: {}", kind.word()),
-                    None => "needs you".to_string(),
+                let kind = |kind: Option<status::Kind>| kind.map(|k| format!(" ({})", k.word()));
+                // A part of the program, not the program itself: said, with
+                // the part's own name and how long it has waited.
+                let what = match (e.waiting_parts().as_slice(), e.needs_you().flatten()) {
+                    ([one], _) => {
+                        let why = match &one.state {
+                            status::PartState::Waiting(k) => kind(*k).unwrap_or_default(),
+                            _ => String::new(),
+                        };
+                        format!(
+                            "needs you: one of its parts is waiting{why}, {}, {}",
+                            one.name(),
+                            waiting_since(one.since)
+                        )
+                    }
+                    (many @ [_, _, ..], _) => format!(
+                        "needs you: {} of its parts are waiting, the longest {}",
+                        many.len(),
+                        many.iter().map(|p| p.since).min().map(waiting_since).unwrap_or_default()
+                    ),
+                    ([], Some(kind)) => format!("needs you: {}", kind.word()),
+                    ([], None) => "needs you".to_string(),
                 };
                 // Tab moves to the next agent in sidebar order and wraps
                 // (`Workspace::focus_next`); the menu stays open between presses.
@@ -1741,6 +1848,18 @@ impl<B: AgentBackend> App<B> {
                     out += &format!(". {}", status::why_long(why, expected));
                 }
                 out += &format!(". The sidebar shows it as {}.\n", shown.short());
+                // Said when a part, not the program itself, is why.
+                let (waiting, own) = (e.waiting_parts(), e.own_status());
+                if let (false, Some(own)) = (waiting.is_empty(), own) {
+                    out += &format!(
+                        "Its own status: {}. {} waiting for you; they are listed below.\n",
+                        own.text(),
+                        match waiting.len() {
+                            1 => "One of its parts is".to_string(),
+                            n => format!("{n} of its parts are"),
+                        }
+                    );
+                }
             }
             None => out += &format!("Status: {}. The program is not running.\n", e.status.text()),
         }
@@ -1774,12 +1893,34 @@ impl<B: AgentBackend> App<B> {
         }
         out += &format!("Reports received since it started: {}", heard.reports);
         if heard.task_reports > 0 {
-            out += &format!(
-                " ({} about its background tasks, which do not change its status)",
-                heard.task_reports
-            );
+            out +=
+                &format!(" ({} about parts of it, such as a session or a helper agent)", heard.task_reports);
         }
         out += ".\n";
+        if !heard.parts.is_empty() || heard.parts_let_go > 0 {
+            const LISTED: usize = 10;
+            out += &format!("\nParts that have reported: {}.\n", heard.parts.len());
+            // Newest first.
+            for part in heard.parts.iter().rev().take(LISTED) {
+                out += &part_line(part);
+            }
+            if let Some(more) = heard.parts.len().checked_sub(LISTED).filter(|more| *more > 0) {
+                out += &format!("  and {more} more.\n");
+            }
+            if heard.parts_let_go > 0 {
+                out += &format!(
+                    "Let go, to keep no more than {}: {}. The one that reported longest ago and was \
+                     not waiting goes first.\n",
+                    status::PARTS_KEPT,
+                    heard.parts_let_go
+                );
+            }
+            if !t.waiting_parts().is_empty() {
+                out += "A waiting part makes the agent Needs you until the part says otherwise, is \
+                        withdrawn, or the program ends: it is not ended by a clock. d stops showing the \
+                        parts that are waiting now, after asking. One that reports again is shown again.\n";
+            }
+        }
         if t.bells_held() > 0 {
             out += &format!(
                 "Bells not rung: {}. It began to need you more often than Lillignode rings for one agent \
@@ -1945,7 +2086,7 @@ fn reading_text(reading: &Reading) -> String {
         }
         Reading::Status { status, message: None, .. } => status.text(),
         Reading::Cleared => "the agent withdrew its status".to_string(),
-        Reading::Task => "about one of its background tasks, so not used for its status".to_string(),
+        Reading::Task => "about one part of the program, not the program's own status".to_string(),
         Reading::NotUnderstood(why) => format!("not understood, because {why}"),
     }
 }
@@ -2675,6 +2816,155 @@ Cost",
             "{}",
             seen[3]
         );
+    }
+
+    fn b64(text: &str) -> String {
+        const A: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut out = String::new();
+        for chunk in text.as_bytes().chunks(3) {
+            let n = chunk.iter().enumerate().fold(0u32, |n, (i, &b)| n | (b as u32) << (16 - 8 * i));
+            for i in 0..=chunk.len() {
+                out.push(A[(n >> (18 - 6 * i) & 63) as usize] as char);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn a_waiting_part_is_named_in_the_notice_the_report_and_the_quit_question() {
+        let mut app = app_with_claude_agents(2);
+        app.notice = None;
+        report(&mut app, 1, "state=done:app=claude-code");
+        report(&mut app, 2, "state=idle:app=claude-code");
+        // The title is the program's own text: what would draw or reorder
+        // becomes spaces, and it is shown in quotes.
+        let title = b64("subagent:\x1b[2J tests\u{202e}");
+        report(&mut app, 1, &format!("state=blocked:kind=permission:id=sub/1:title={title}"));
+        assert!(app.after_events(), "the bell rings for a part as for the program");
+        assert_eq!(app.needs_you_count(), 1);
+        // P5: its own record says Done, and the agent needs you.
+        assert_eq!(app.ws.entries()[0].own_status(), Some(AgentStatus::Done));
+        assert_eq!(
+            app.needs_you_notice().as_deref(),
+            Some(
+                "Claude Code (a) needs you: one of its parts is waiting (permission), \"subagent: [2J tests\", \
+                 waiting since less than a minute ago. F12 then Tab to go to it."
+            )
+            .map(|s| s.replace("F12", &app.config.menu_keys[0].label()))
+            .as_deref()
+        );
+        // A second, with no name: counted, and the oldest's age said.
+        report(&mut app, 1, "state=blocked:id=sub/2");
+        assert!(!app.after_events(), "already needing you: no second bell");
+        let notice = app.needs_you_notice().unwrap();
+        assert!(
+            notice.starts_with(
+                "Claude Code (a) needs you: 2 of its parts are waiting, the longest waiting since less than"
+            ),
+            "{notice}"
+        );
+
+        // Quit asks about it.
+        app.on_key(press(KeyCode::F(12)));
+        app.on_key(press(KeyCode::Char('q')));
+        let bar = app.bar();
+        assert!(bar.contains("Not finished or not known: Claude Code (a) (Needs you)."), "{bar}");
+        app.on_key(press(KeyCode::Char('n')));
+
+        // The status report: why, the program's own status, and each part.
+        app.ws.focus_previous();
+        let text = app.status_report_text();
+        assert!(text.contains("Status: Needs you. The sidebar shows it as Needs you.\n"), "{text}");
+        assert!(text.contains("Its own status: Done. 2 of its parts are waiting for you"), "{text}");
+        assert!(text.contains("(2 about parts of it, such as a session or a helper agent)"), "{text}");
+        let newest = text.find("  a part with no name (id sub/2): waiting for you, waiting since").unwrap();
+        let older = text
+            .find("  \"subagent: [2J tests\" (id sub/1): waiting for you (permission), waiting since")
+            .unwrap();
+        assert!(newest < older, "newest first: {text}");
+        assert!(text.contains("it is not ended by a clock. d stops showing"), "{text}");
+    }
+
+    #[test]
+    fn waiting_parts_are_dismissed_from_the_status_report_only_after_asking() {
+        let (mut app, sent) = app_with_agent();
+        report(&mut app, 1, "state=done:app=deploy");
+        report(&mut app, 1, "state=blocked:id=a");
+        report(&mut app, 1, "state=working:id=b");
+        app.after_events();
+        app.on_key(press(KeyCode::F(12)));
+        app.on_key(press(KeyCode::Char('s')));
+        let bar = app.bar();
+        assert!(
+            bar.starts_with("STATUS REPORT  Any other key: back to the agent   d: stop showing"),
+            "{bar}"
+        );
+        app.on_key(press(KeyCode::Char('d')));
+        assert!(matches!(app.mode, Mode::Confirm(Confirm::Parts)));
+        let bar = app.bar();
+        assert!(bar.starts_with("Stop showing 1 waiting part of cmd ("), "{bar}");
+        assert!(
+            bar.contains("? y / n   a part with no name, waiting since less than a minute ago."),
+            "{bar}"
+        );
+        // No: nothing changes.
+        app.on_key(press(KeyCode::Char('n')));
+        assert_eq!(app.needs_you_count(), 1);
+        assert!(app.notice.as_deref().unwrap().starts_with("Left as it was"), "{:?}", app.notice);
+        // Yes: it is no longer shown, and is still listed.
+        app.on_key(press(KeyCode::F(12)));
+        app.on_key(press(KeyCode::Char('s')));
+        app.on_key(press(KeyCode::Char('d')));
+        app.on_key(press(KeyCode::Char('y')));
+        assert_eq!(app.needs_you_count(), 0);
+        let notice = app.notice.clone().unwrap();
+        assert!(notice.starts_with("Stopped showing 1 waiting part of cmd ("), "{notice}");
+        assert!(notice.ends_with("A part that reports again is shown again."), "{notice}");
+        let text = app.status_report_text();
+        assert!(text.contains("Status: Done."), "{text}");
+        assert!(text.contains("(id a): waiting for you, waiting since"), "{text}");
+        assert!(text.contains("no longer shown at your word"), "{text}");
+        // With none waiting, d is any key again: it closes the report.
+        app.on_key(press(KeyCode::F(12)));
+        app.on_key(press(KeyCode::Char('s')));
+        assert!(app.bar().starts_with("STATUS REPORT  Any key: back to the agent."), "{}", app.bar());
+        app.on_key(press(KeyCode::Char('d')));
+        assert!(matches!(app.mode, Mode::Normal));
+        // It reports again: shown again, with its own bell.
+        report(&mut app, 1, "state=blocked:id=a");
+        assert!(app.after_events());
+        assert_eq!(app.needs_you_count(), 1);
+        assert!(sent.borrow().is_empty(), "no key reached the agent: {:?}", sent.borrow());
+    }
+
+    #[test]
+    fn the_status_report_lists_ten_parts_and_counts_the_rest_and_those_let_go() {
+        let (mut app, _) = app_with_agent();
+        for n in 0..70 {
+            report(&mut app, 1, &format!("state=working:id=p{n}"));
+        }
+        // P3 and P4 as the report words them.
+        report(&mut app, 1, "state=pondering:id=odd");
+        report(&mut app, 1, "state=blocked:id=");
+        let text = app.status_report_text();
+        assert!(text.contains("Parts that have reported: 64.\n"), "{text}");
+        assert!(
+            text.contains(
+                "  a part with no name (an id the format does not allow): waiting for you, waiting"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains("  a part with no name (id odd): not understood, less than a minute ago\n"),
+            "{text}"
+        );
+        assert!(text.contains("  a part with no name (id p62): Working, less than a minute ago\n"), "{text}");
+        assert!(!text.contains("(id p61)"), "{text}");
+        assert!(text.contains("  and 54 more.\n"), "{text}");
+        assert!(text.contains("Let go, to keep no more than 64: 8."), "{text}");
+        // P4: a part not understood leaves the program's status alone.
+        assert!(text.contains("Status: Needs you."), "{text}");
+        assert_eq!(app.ws.entries()[0].own_status(), Some(AgentStatus::Unknown(status::Why::NothingSent)));
     }
 
     /// Found in a check by hand: the screen said r would not help and the

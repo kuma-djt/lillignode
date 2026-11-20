@@ -69,7 +69,7 @@ Inside Lillignode, press `n` to start an agent: Enter for Claude Code, then its 
 | n | new agent |
 | x | close the agent in front |
 | r | start it again after it has stopped |
-| s | its status report (and its cost, if switched on). When it is longer than the window, PgUp, PgDn, Up, Down and Home move through it |
+| s | its status report (and its cost, if switched on). When it is longer than the window, PgUp, PgDn, Up, Down and Home move through it. While a part of the agent is waiting, `d` there stops showing it |
 | PgUp | read back its history |
 | v | two agents side by side, or back to one |
 
@@ -180,7 +180,7 @@ What Lillignode does with a report that is not as expected:
 - **A part it does not know is passed over,** as the format asks. A reason for waiting that it does not know still shows Needs you.
 - **A message is shown as plain words.** Characters that would draw, move, hide or reorder text become spaces, and a long message is cut.
 - **A program that changes status very fast** rings at most three bells in a row, then one every 20 seconds. Its row still shows its latest status.
-- **A report about one part of a program** (the format lets a program report several) is counted but not shown: the row is the program's own status. A program whose only waiting record is a part does not show Needs you.
+- **A part of a program that is waiting makes the agent Needs you.** The format lets a program report for each of its parts (a session, a helper agent, a tab), each with its own id. Lillignode keeps the latest report of each part, up to 64 for one agent. If the program itself or any part of it says it is waiting, the row says Needs you, with the bell, and the notice and the status report say that it is a part, give the part's own name in quotes ("a part with no name" if it gave none) and say how long it has waited. A waiting part is shown until it says something else, is withdrawn, or the program ends; it is never ended by a clock, so an old one says "waiting since 52 minutes ago". In the status report, `d` stops showing the parts waiting now, after asking; one that reports again is shown again. Parts that are working or done do not change the row. A part's id the format does not allow is still read as a part, never as the program. Built against a stand-in program and not yet seen with a real one.
 - **Inside a shell,** Working or Needs you ends when the shell marks its next prompt (shells with prompt marking switched on). Without that, a program that died while Working stays "Working, quiet N min".
 
 What to watch for:
