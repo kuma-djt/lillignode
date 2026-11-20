@@ -94,7 +94,7 @@ impl Entry {
     /// saved entry holds. Starting it again reads the same entry, so the
     /// key for that is not offered.
     pub fn start_again_cannot_help(&self) -> bool {
-        matches!(&self.status, Status::NotStarted(why) if why.contains(FIX_IN_THE_FILE))
+        matches!(&self.status, Status::NotStarted(why) if start_again_cannot_help(why))
     }
 
     pub fn kind(&self) -> AgentKind {
@@ -338,6 +338,12 @@ pub struct Restored {
     pub label: String,
     /// True if it was asked to continue its earlier conversation.
     pub continuing: bool,
+}
+
+/// True when the reason an agent was not started is its saved entry, so
+/// starting it again cannot help.
+pub fn start_again_cannot_help(why: &str) -> bool {
+    why.contains(FIX_IN_THE_FILE)
 }
 
 /// What restoring did, for the message shown at launch.

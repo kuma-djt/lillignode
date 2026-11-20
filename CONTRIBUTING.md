@@ -1,6 +1,6 @@
 # Contributing to Lillignode
 
-Thank you for looking. Lillignode is at v0.1 and rough, so bug reports are as welcome as code.
+Thank you for looking. Lillignode is at v0.2 and rough, so bug reports are as welcome as code.
 
 ## Before you write code
 
