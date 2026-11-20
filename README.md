@@ -27,7 +27,7 @@ Each agent in the sidebar has two lines: a gnome mark and its name, then its fol
 | Sign | Status |
 |---|---|
 | `+` and `*`, turning about once a second | Working |
-| `+` held still | Working, but nothing drawn for a minute or more ("Working, quiet 2 min") |
+| `+` held still | Working, but the agent has drawn nothing at all for a minute or more ("Working, quiet 2 min"). Claude Code 2.1.325 redraws about once a second while it works, even during a long command, so with it this appears only if it stops drawing altogether |
 | `!` | Needs you |
 | `=` | Done |
 | `z` | Idle |
