@@ -171,7 +171,7 @@ fn main() -> ExitCode {
     let mut output_since_key = false;
 
     let mut draw_error = None;
-    while !app.quit {
+    while !app.engine.closing() {
         app.clock = started.elapsed().as_secs();
         if let Err(e) = terminal.draw(|frame| {
             app.too_small = ui::areas(frame.area()).is_none();

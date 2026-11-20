@@ -14,7 +14,7 @@ use crate::action::Action;
 use crate::agent::{AgentBackend, AgentEvent, Size, StartError};
 use crate::config::{Billing, Config};
 use crate::cost::{self, Cost, Usage, Waiting, WhyNot};
-use crate::engine::Engine;
+use crate::engine::{Engine, Outcome, QuestionId, Refused, Unfinished};
 use crate::input::Pasted;
 use crate::keys;
 use crate::kind::AgentKind;
@@ -153,6 +153,15 @@ fn kind_words(kind: AgentKind) -> &'static str {
     }
 }
 
+/// An unfinished agent as the quit question names it: with what it last
+/// said, if anything.
+fn named(u: &Unfinished) -> String {
+    match &u.status {
+        Some(s) => format!("{} ({})", u.label, s.text()),
+        None => u.label.clone(),
+    }
+}
+
 /// What starting an agent as this kind means, said before it starts.
 fn kind_means(kind: AgentKind) -> &'static str {
     match kind {
@@ -165,7 +174,8 @@ fn kind_means(kind: AgentKind) -> &'static str {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Confirm {
     Close,
-    Quit,
+    /// The engine's question about quitting, by its id.
+    Quit(QuestionId),
     /// A paste of several lines into an agent that would take each line as
     /// a separate Enter. The text waits in `App::held_paste`.
     Paste,
@@ -195,7 +205,6 @@ pub struct App<B: AgentBackend> {
     /// Problems found on starting, repeated on the way out so they remain in
     /// the terminal after Lillignode closes.
     pub start_problems: Vec<String>,
-    pub quit: bool,
     /// Set by the caller each time it draws: the window cannot show agents.
     pub too_small: bool,
     /// How many colours to draw with. Full unless the caller says otherwise.
@@ -409,7 +418,6 @@ impl<B: AgentBackend> App<B> {
             refused: None,
             settings_problem: config_problem,
             start_problems,
-            quit: false,
             too_small: false,
             colors: Depth::Full,
             clock: 0,
@@ -549,7 +557,16 @@ impl<B: AgentBackend> App<B> {
                 let yes = key.code == KeyCode::Char('y');
                 match what {
                     Confirm::Close if yes => self.close_focused(),
-                    Confirm::Quit if yes => self.quit = true,
+                    Confirm::Quit(id) => {
+                        if let Err(why) = self.engine.answer(id, yes) {
+                            self.notice = Some(match why {
+                                Refused::NoSuchQuestion => format!(
+                                    "That question was no longer open, so nothing was done. To quit: {}, then q.",
+                                    self.config.menu_keys.first().map(|k| k.label()).unwrap_or_default()
+                                ),
+                            });
+                        }
+                    }
                     Confirm::View if yes => self.change_view(),
                     Confirm::Parts => {
                         let label = self.focused_label();
@@ -741,13 +758,10 @@ impl<B: AgentBackend> App<B> {
                     self.change_view();
                 }
             }
+            // The engine decides whether to ask; the face shows its question.
             Action::Quit => {
-                // Every running agent is stopped either way; the question is
-                // asked only when one may be stopped mid-request.
-                if self.unfinished().is_empty() {
-                    self.quit = true;
-                } else {
-                    self.mode = Mode::Confirm(Confirm::Quit);
+                if let Outcome::Asked(q) = self.engine.quit() {
+                    self.mode = Mode::Confirm(Confirm::Quit(q.id));
                 }
             }
         }
@@ -1264,7 +1278,11 @@ impl<B: AgentBackend> App<B> {
                  workspace.",
                 self.focused_label()
             ),
-            Mode::Confirm(Confirm::Quit) => self.quit_question(),
+            Mode::Confirm(Confirm::Quit(id)) => {
+                // The face shows the engine's question, never one of its own.
+                debug_assert_eq!(self.engine.question().map(|q| q.id), Some(*id));
+                self.quit_question()
+            }
             Mode::Confirm(Confirm::Parts) => {
                 let waiting = self.engine.ws.focused().map(|e| e.track.waiting_parts()).unwrap_or_default();
                 let which = match waiting.as_slice() {
@@ -1317,28 +1335,21 @@ impl<B: AgentBackend> App<B> {
     /// Codex agent starts a new conversation is kept: it is what is lost.
     fn quit_question(&self) -> String {
         let running = self.engine.ws.running_labels().len();
-        // Only Claude Code is asked to continue its conversation. Every
-        // other agent begins afresh, so what it was doing is not picked up
-        // when it comes back.
-        let fresh: Vec<String> = self
-            .engine
-            .ws
-            .entries()
-            .iter()
-            .filter(|e| e.is_running() && !e.kind().keeps_conversations())
-            .map(Entry::label)
-            .collect();
-        let fresh = match fresh.as_slice() {
+        // Every agent but Claude Code begins afresh, so what it was doing
+        // is not picked up when it comes back.
+        let fresh = match self.engine.fresh_next_time().as_slice() {
             [] => String::new(),
             [one] => format!(" {one} starts a new conversation next time."),
             many => format!(" {} start new conversations next time.", many.join(", ")),
         };
         // Shortened, an agent that needs you is still named: it is the one
         // quitting would interrupt in the middle of asking you something.
-        // Only the others are counted instead.
-        let (need, rest) = self.unfinished_by_need();
-        let kept = if need.is_empty() { rest.len().min(1) } else { need.len() };
-        let unfinished: Vec<String> = need.into_iter().chain(rest).collect();
+        // Only the others are counted instead. The engine puts those that
+        // need you first.
+        let listed = self.engine.unfinished();
+        let need = listed.iter().filter(|u| u.needs_you).count();
+        let unfinished: Vec<String> = listed.iter().map(named).collect();
+        let kept = if need == 0 { unfinished.len().min(1) } else { need };
         let head = format!(
             "Quit and stop {}? y / n   Not finished or not known: ",
             plural(running, "running agent", "running agents")
@@ -1838,30 +1849,11 @@ impl<B: AgentBackend> App<B> {
         out
     }
 
-    /// Running agents that may be in the middle of something: not Done,
-    /// Idle, or Error. Quitting asks first only if there are any.
+    /// The engine's unfinished agents as the quit question names them,
+    /// each with what it last said.
+    #[cfg(test)]
     fn unfinished(&self) -> Vec<String> {
-        let (need, rest) = self.unfinished_by_need();
-        need.into_iter().chain(rest).collect()
-    }
-
-    /// The agents quitting would interrupt, as `unfinished` names them:
-    /// first those that need you, then the rest, each in sidebar order.
-    fn unfinished_by_need(&self) -> (Vec<String>, Vec<String>) {
-        let mut need = Vec::new();
-        let mut rest = Vec::new();
-        for e in self.engine.ws.entries().iter().filter(|e| e.is_running() && !e.is_settled()) {
-            let name = match e.reported() {
-                Some(s) => format!("{} ({})", e.label(), s.text()),
-                None => e.label(),
-            };
-            if e.needs_you().is_some() {
-                need.push(name)
-            } else {
-                rest.push(name)
-            }
-        }
-        (need, rest)
+        self.engine.unfinished().iter().map(named).collect()
     }
 
     /// What the status report panel says about the focused agent: what the
@@ -2260,7 +2252,7 @@ mod tests {
         app.on_key(press(KeyCode::F(12)));
         app.on_key(press(KeyCode::Char('q')));
         app.on_key(press(KeyCode::Char('y')));
-        assert!(app.quit);
+        assert!(app.engine.closing());
     }
 
     #[test]
@@ -2393,10 +2385,10 @@ mod tests {
         // "y" arriving as a paste must not confirm a quit.
         app.on_key(press(KeyCode::F(12)));
         app.on_key(press(KeyCode::Char('q')));
-        assert!(matches!(app.mode, Mode::Confirm(Confirm::Quit)));
+        assert!(matches!(app.mode, Mode::Confirm(Confirm::Quit(_))));
         app.on_paste("y".into());
-        assert!(!app.quit);
-        assert!(matches!(app.mode, Mode::Confirm(Confirm::Quit)));
+        assert!(!app.engine.closing());
+        assert!(matches!(app.mode, Mode::Confirm(Confirm::Quit(_))));
     }
 
     #[test]
@@ -2674,19 +2666,19 @@ Cost",
         report(&mut app, 2, "state=working:app=claude-code");
         app.on_key(press(KeyCode::F(12)));
         app.on_key(press(KeyCode::Char('q')));
-        assert!(matches!(app.mode, Mode::Confirm(Confirm::Quit)));
+        assert!(matches!(app.mode, Mode::Confirm(Confirm::Quit(_))));
         let bar = app.bar();
         assert!(bar.starts_with("Quit and stop 2 running agents? y / n"), "{bar}");
         assert!(bar.contains("Not finished or not known: Claude Code (b) (Working)."), "{bar}");
         assert!(!bar.contains("Claude Code (a)"), "{bar}");
         app.on_key(press(KeyCode::Char('n')));
-        assert!(!app.quit);
+        assert!(!app.engine.closing());
 
         // Done, Idle and Error: nothing is in progress, so it quits at once.
         report(&mut app, 2, "state=error:app=claude-code");
         app.on_key(press(KeyCode::F(12)));
         app.on_key(press(KeyCode::Char('q')));
-        assert!(app.quit);
+        assert!(app.engine.closing());
     }
 
     #[test]
@@ -2698,7 +2690,7 @@ Cost",
             }
             app.on_key(press(KeyCode::F(12)));
             app.on_key(press(KeyCode::Char('q')));
-            assert!(matches!(app.mode, Mode::Confirm(Confirm::Quit)), "{body:?}");
+            assert!(matches!(app.mode, Mode::Confirm(Confirm::Quit(_))), "{body:?}");
         }
         let (mut app, _) = app_with_agent();
         app.on_key(press(KeyCode::F(12)));
@@ -3847,7 +3839,7 @@ Cost",
             assert!(matches!(app.mode, Mode::Menu));
             app.on_key(menu_key);
             assert!(matches!(app.mode, Mode::Normal), "the menu key again closes the menu");
-            assert!(!app.quit, "and does not quit");
+            assert!(!app.engine.closing(), "and does not quit");
         }
         // A key held with Ctrl or Alt is not a command.
         app.on_key(press(KeyCode::F(12)));
@@ -4045,7 +4037,7 @@ Cost",
         }
         app.on_key(press(KeyCode::Enter));
         assert_eq!(app.engine.ws.entries().len(), 2, "nothing was removed");
-        assert!(!app.quit, "nothing quit");
+        assert!(!app.engine.closing(), "nothing quit");
         assert!(matches!(app.mode, Mode::Normal), "no question was opened");
         let notice = app.notice.clone().unwrap();
         assert!(notice.contains("has stopped, so what you typed was not sent."), "{notice}");
