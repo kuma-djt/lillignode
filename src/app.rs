@@ -1016,6 +1016,11 @@ impl<B: AgentBackend> App<B> {
     fn view_refusal(&self, why: Refused) -> String {
         let menu = self.config.menu_keys.first().map(|k| k.label()).unwrap_or_default();
         match why {
+            // Not fitting because no agent fits at all is said as that,
+            // wherever it is found: at the key or at the answer.
+            Refused::TwoDoNotFit if self.too_small || ui::areas(self.window).is_none() => {
+                TOO_SMALL_FOR_VIEW.to_string()
+            }
             Refused::TwoDoNotFit => format!(
                 "This window is too narrow for two agents side by side: it is {} columns wide and that \
                  takes {}. Nothing was changed. Widen the window, then {menu} then v.",
@@ -4428,6 +4433,20 @@ Cost",
         assert_eq!((app.engine.ws.pair(), app.engine.ws.size()), (None, size));
         app.set_window(WIDE);
         assert!(!app.two_shown());
+    }
+
+    #[test]
+    fn a_yes_to_two_after_the_window_became_too_small_says_too_small() {
+        let mut app = app_with_claude_agents(2);
+        app.set_window(WIDE);
+        report(&mut app, 1, PERMISSION);
+        app.on_key(press(KeyCode::F(12)));
+        app.on_key(press(KeyCode::Char('v')));
+        assert!(matches!(app.mode, Mode::Confirm(Confirm::View(_))));
+        app.set_window(Rect::new(0, 0, 200, 5));
+        app.on_key(press(KeyCode::Char('y')));
+        assert_eq!(app.notice.as_deref(), Some(TOO_SMALL_FOR_VIEW));
+        assert_eq!(app.engine.ws.pair(), None);
     }
 
     #[test]

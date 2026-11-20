@@ -283,6 +283,8 @@ impl<B: AgentBackend> Engine<B> {
         self.ws.resize(size);
     }
 
+    /// Whether two could be put side by side now: refused when two do not
+    /// fit, then when fewer than two are open. Asks nothing.
     pub fn can_show_two(&self) -> Result<(), Refused> {
         if self.room.two.is_none() {
             return Err(Refused::TwoDoNotFit);
