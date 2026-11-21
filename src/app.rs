@@ -3532,7 +3532,7 @@ Cost",
         // Said once, in the notice rows, with where the reason is; and it
         // never replaces a notice already up.
         app.notice = Some("Earlier.".into());
-        app.engine.status_already_said(&[AgentKind::ClaudeCode, AgentKind::Codex]);
+        app.engine.status_already_said(&[AgentKind::ClaudeCode]);
         app.after_events();
         let notice = app.notice.clone().unwrap();
         assert!(
@@ -4168,7 +4168,12 @@ Cost",
             let bar = app.bar();
             assert!(bar.contains(reason), "{width}: {bar}");
             // The keys come first at every width.
-            assert!(bar.starts_with("Cannot start it as typed. n") || bar.starts_with("n "), "{bar}");
+            assert!(
+                bar.starts_with("Cannot start it as typed. n")
+                    || bar.starts_with("n change, k kind, Esc cancel   ")
+                    || bar.starts_with("n / k / Esc   "),
+                "{bar}"
+            );
             if width >= 95 {
                 assert!(bar.chars().count() <= width as usize, "{width}: {bar}");
             }

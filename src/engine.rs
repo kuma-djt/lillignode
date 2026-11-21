@@ -339,7 +339,8 @@ impl<B: AgentBackend> Engine<B> {
     }
 
     /// For a test of something else: as if status had already been said to
-    /// be unavailable for these kinds.
+    /// be unavailable for these kinds. It lasts only for a kind that has an
+    /// agent showing the failure: the next settling takes any other back.
     #[cfg(test)]
     pub(crate) fn status_already_said(&mut self, kinds: &[AgentKind]) {
         self.status_said = kinds.to_vec();
