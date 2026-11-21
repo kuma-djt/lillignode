@@ -121,8 +121,8 @@ fn page_on_screen(screen: &str) -> Option<(u16, String)> {
     Some((port.parse().ok()?, word))
 }
 
-/// Open the page's stream on the first agent, as a browser showing it
-/// would, and keep reading it on a thread. Returns how many bytes it has
+/// Open the page's stream on the agent in front, which is the one typed
+/// into, as a browser showing it would, and keep reading it on a thread. Returns how many bytes it has
 /// read so far, as it goes.
 fn hold_page(port: u16, word: &str) -> Result<Arc<AtomicUsize>, String> {
     let get = |path: &str| -> Result<TcpStream, String> {
@@ -135,7 +135,9 @@ fn hold_page(port: u16, word: &str) -> Result<Arc<AtomicUsize>, String> {
     get("state")?.read_to_string(&mut state).map_err(|e| e.to_string())?;
     let body: serde_json::Value = serde_json::from_str(state.split_once("\r\n\r\n").map_or("", |(_, b)| b))
         .map_err(|e| e.to_string())?;
-    let agent = body["state"]["agents"][0]["key"].as_u64().ok_or("no agent on the page")?;
+    let agents = body["state"]["agents"].as_array().ok_or("no agents on the page")?;
+    let front = agents.iter().find(|a| a["front"] == true).ok_or("no agent in front")?;
+    let agent = front["key"].as_u64().ok_or("no key")?;
     let stream = get(&format!("stream?agent={agent}"))?;
     let read = Arc::new(AtomicUsize::new(0));
     let counted = read.clone();

@@ -44,7 +44,7 @@
   let asked = undefined;   // the agent the open stream was asked for
   let run = null;
   let lastEvent = 0;
-  let restartedAt = null;
+  let retry = null;        // the one pending look after contact was lost
   // Set once Lillignode is found answering under another word: each start
   // has its own, so this page's address will never work again.
   let movedOn = false;
@@ -247,13 +247,12 @@
       return;
     }
     const quiet = Date.now() - heardAt;
-    const again = restartedAt ? " Lillignode was started again at " + clock(restartedAt) + "." : "";
     if (quiet >= LATE_MS) {
       contact.className = "late";
-      contact.textContent = "No word from Lillignode for " + ago(quiet) + ". What is below may be out of date." + again;
+      contact.textContent = "No word from Lillignode for " + ago(quiet) + ". What is below may be out of date.";
     } else {
       contact.className = "";
-      contact.textContent = "Last heard from Lillignode " + ago(quiet) + " ago." + again;
+      contact.textContent = "Last heard from Lillignode " + ago(quiet) + " ago.";
     }
   }
 
@@ -268,8 +267,9 @@
   function choose(key) {
     chosen = key;
     draw();
-    // The stream carries one agent's screen: ask for this one's.
-    if (asked !== shownKey()) listen();
+    // The stream carries one agent's screen: ask for this one's. While
+    // contact is lost the look already pending will ask for it.
+    if (lostAt === null && !movedOn && asked !== shownKey()) listen();
   }
 
   function heard(message) {
@@ -278,13 +278,8 @@
     lostAt = null;
     if (message.state) {
       const next = message.state;
-      if (run !== null && next.run !== run) {
-        // Another run of Lillignode: its agents are not the ones chosen
-        // before, and its events are numbered from the start.
-        chosen = null;
-        lastEvent = 0;
-        restartedAt = new Date();
-      }
+      // Each run of Lillignode has its own address, so the run never
+      // changes under an open page.
       run = next.run;
       for (const event of next.events) lastEvent = Math.max(lastEvent, event.n);
       state = next;
@@ -300,13 +295,16 @@
     stream = null;
     if (lostAt === null) lostAt = new Date();
     draw();
-    setTimeout(lookAgain, RETRY_MS);
+    if (movedOn) return;
+    clearTimeout(retry);
+    retry = setTimeout(lookAgain, RETRY_MS);
   }
 
   // Ask once, plainly, before listening again: a refusal that is
   // Lillignode's own means it is running under a new word.
   function lookAgain() {
-    fetch("state", { cache: "no-store" })
+    retry = null;
+    fetch("state", { cache: "no-store", signal: AbortSignal.timeout(5000) })
       .then((answer) => (answer.status === 404 ? answer.text() : null))
       .then((said) => {
         if (said !== null && said.includes("Lillignode shows its page's address")) {

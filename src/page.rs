@@ -146,10 +146,30 @@ struct Request {
 /// Why a request is not answered, as a status line and a sentence.
 type Refusal = (&'static str, String);
 
+/// Reads from a connection until a time, and no later: each read may wait
+/// only for what is left of it. So a request sent a byte at a time does
+/// not hold a place for longer than `HEAD_WITHIN`, in all.
+struct Until<'a> {
+    stream: &'a TcpStream,
+    until: Instant,
+}
+
+impl std::io::Read for Until<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let left = self.until.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(std::io::ErrorKind::TimedOut.into());
+        }
+        self.stream.set_read_timeout(Some(left))?;
+        (&mut &*self.stream).read(buf)
+    }
+}
+
 /// Read and check one request. Nothing is answered that fails a check.
 fn read_request(stream: &TcpStream, port: u16) -> Result<Request, Refusal> {
     let bad = |why: &str| ("400 Bad Request", why.to_string());
-    let mut head = BufReader::new(std::io::Read::take(stream, MAX_HEAD as u64));
+    let until = Until { stream, until: Instant::now() + HEAD_WITHIN };
+    let mut head = BufReader::new(std::io::Read::take(until, MAX_HEAD as u64));
     let mut line = String::new();
     head.read_line(&mut line).map_err(|_| bad("The request could not be read."))?;
     let mut parts = line.split_whitespace();
@@ -158,12 +178,7 @@ fn read_request(stream: &TcpStream, port: u16) -> Result<Request, Refusal> {
     };
     let (method, target) = (method.to_string(), target.to_string());
     let (mut host, mut origin, mut site) = (None, None, None);
-    let began = Instant::now();
     loop {
-        // A request fed a byte at a time does not hold a place for hours.
-        if began.elapsed() > HEAD_WITHIN {
-            return Err(bad("The request took too long to arrive."));
-        }
         let mut line = String::new();
         match head.read_line(&mut line) {
             Ok(0) | Err(_) => return Err(bad("The request was cut short or too long.")),
@@ -222,6 +237,11 @@ fn send(mut stream: &TcpStream, status: &str, kind: &str, body: &str) -> std::io
 fn refuse(stream: &TcpStream, status: &str, why: &str) -> std::io::Result<()> {
     send(stream, status, "text/plain; charset=utf-8", why)
 }
+
+/// The part of `NOTHING` by which an open page knows that Lillignode is
+/// running again under a new word (`page.js`, `lookAgain`).
+#[cfg(test)]
+const MOVED_ON: &str = "Lillignode shows its page's address";
 
 /// Said to a request without the word. Nothing of the page, and no data.
 const NOTHING: &str =
@@ -572,6 +592,9 @@ mod tests {
             assert_eq!(body, NOTHING, "{path}: the same few words, whatever was asked");
             assert!(!answer.contains(word), "{path}: the word is never said back");
         }
+        // The page tells a new start from a lost one by these words: the
+        // two must not drift apart.
+        assert!(NOTHING.contains(MOVED_ON) && JS.contains(MOVED_ON), "{MOVED_ON}");
         // With it, all of it.
         assert!(raw(&format!("/{word}/")).contains("<title>Lillignode</title>"));
         assert!(raw(&format!("/{word}/state")).contains("\"agents\""));
@@ -579,6 +602,33 @@ mod tests {
         let moved = raw(&format!("/{word}"));
         assert!(moved.starts_with("HTTP/1.1 308"), "{moved}");
         assert!(moved.contains(&format!("Location: /{word}/\r\n")), "{moved}");
+    }
+
+    #[test]
+    fn a_request_sent_a_byte_at_a_time_is_dropped_when_its_time_is_up() {
+        let (_publisher, at) = served();
+        let began = std::time::Instant::now();
+        let mut stream = TcpStream::connect(at.address).unwrap();
+        // When the page lets go of the connection, by its 400 or by closing
+        // it (on Windows, closing with bytes unread resets it, and the 400
+        // may be lost): either way the reading here ends.
+        let mut reading = stream.try_clone().unwrap();
+        let ended = std::thread::spawn(move || {
+            let mut answer = Vec::new();
+            let _ = reading.read_to_end(&mut answer);
+            began.elapsed()
+        });
+        // One byte every second, never ending its first line: each read
+        // alone is well inside the five seconds a read may wait.
+        for byte in b"GET /aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".iter() {
+            if ended.is_finished() || stream.write_all(&[*byte]).is_err() {
+                break;
+            }
+            std::thread::sleep(Duration::from_secs(1));
+        }
+        let held = ended.join().unwrap();
+        assert!(held <= HEAD_WITHIN + Duration::from_secs(3), "held for {held:?}");
+        assert!(held >= HEAD_WITHIN - Duration::from_secs(1), "let go too soon, at {held:?}");
     }
 
     #[test]

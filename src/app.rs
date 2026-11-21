@@ -591,7 +591,8 @@ impl<B: AgentBackend> App<B> {
         let menu = self.config.menu_keys.first().map(|k| k.label()).unwrap_or_default();
         let text = match started {
             // Cut to fit, a notice keeps its last sentence: if the address
-            // is lost from it, how to see it again is not.
+            // is lost from it, how to see it again is not. So this goes
+            // after anything already said, not before it.
             Ok(address) => {
                 self.page_address = Some(address.clone());
                 format!(
@@ -605,7 +606,10 @@ impl<B: AgentBackend> App<B> {
                 self.config.page_port
             ),
         };
-        self.say_first(text);
+        self.notice = Some(match self.notice.take() {
+            Some(earlier) => format!("{earlier}  {text}"),
+            None => text,
+        });
     }
 
     /// Put before the notice already up, which stays after it.
@@ -4161,12 +4165,13 @@ Cost",
         app.page_started(Ok(format!("http://127.0.0.1:7501/{word}/")));
         let said = app.notice.clone().unwrap();
         assert!(
-            said.starts_with(&format!(
-                "The page is on: http://127.0.0.1:7501/{word}/  Anyone with this address can see your agents."
+            said.ends_with(&format!(
+                "The page is on: http://127.0.0.1:7501/{word}/  Anyone with this address can see your agents. \
+                 Ctrl+Q then s shows it again."
             )),
             "{said}"
         );
-        assert!(said.ends_with("Earlier notice."), "what was up stays after it");
+        assert!(said.starts_with("Earlier notice."), "what was up stays, before it");
         // Alone, it fits the two notice rows of the narrowest window whole,
         // with the longest address there is.
         app.notice = None;
@@ -4174,10 +4179,23 @@ Cost",
         let said = app.notice.clone().unwrap();
         assert!(said.chars().count() <= room, "{} characters: {said}", said.chars().count());
         assert!(said.ends_with("Ctrl+Q then s shows it again."), "{said}");
-        // Cut to fit beside other notices, it keeps how to see it again.
-        app.notice = Some(said.clone() + "  Another notice ends here.");
-        let fitted = app.notice_fitted(60).unwrap();
-        assert!(fitted.ends_with("Another notice ends here."), "{fitted}");
+        // Found by a review: started with a notice already up (an agent
+        // that could not continue), the address and the way to see it
+        // again were both cut from the two rows of a narrow window. Now
+        // the way to see it again is kept, whatever was up before.
+        let mut busy = app_with_claude_agents(1);
+        busy.notice = Some(
+            "Claude Code (api) could not continue its earlier conversation (there may have been nothing in \
+             it yet), so it started a new conversation. If there was an earlier one, the agent's own resume \
+             command may still find it."
+                .into(),
+        );
+        busy.page_started(Ok(format!("http://127.0.0.1:65535/{word}/")));
+        let fitted = busy.notice_fitted(room).unwrap();
+        assert!(fitted.chars().count() <= room, "{fitted}");
+        assert!(fitted.ends_with("Ctrl+Q then s shows it again."), "{fitted}");
+        // And the address is never shown in part: whole, or not at all.
+        assert!(!fitted.contains("127.0.0.1") || fitted.contains(&format!("/{word}/")), "{fitted}");
         // The status report has the address whole, at its foot, with or
         // without an agent open.
         let report = app.status_report_text();
