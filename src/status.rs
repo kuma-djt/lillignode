@@ -764,6 +764,8 @@ pub struct Track {
     began_needing_you: bool,
     /// When it last changed into Needs you.
     needs_you_since: Option<SystemTime>,
+    /// When the report arrived that said what is shown now.
+    said_at: Option<SystemTime>,
     /// How many bells this agent may still ring in a row, and when one was
     /// last given back.
     bells: u8,
@@ -781,6 +783,7 @@ impl Track {
             last_output: started,
             began_needing_you: false,
             needs_you_since: None,
+            said_at: None,
             bells: BELLS,
             bell_back_since: started,
             bells_held: 0,
@@ -824,9 +827,13 @@ impl Track {
         self.needs_you_since.filter(|_| self.needs_you())
     }
 
-    /// When the latest status report arrived, of any kind.
+    /// When the program last reported its own status: the arrival of the
+    /// report that what is shown rests on. A report about one of its parts
+    /// does not move it, so it is never newer than what the program itself
+    /// said. None when nothing shown came from a report: before the first,
+    /// and after a shell's prompt ended what was said.
     pub fn reported_at(&self) -> Option<SystemTime> {
-        self.trace().last.as_ref().map(|last| last.at)
+        self.said_at
     }
 
     /// Stop showing the parts that are waiting now, at the user's word.
@@ -891,6 +898,8 @@ impl Track {
             AgentStatus::Working | AgentStatus::WorkingQuiet(_) | AgentStatus::NeedsYou(_)
         ) {
             self.shown = AgentStatus::Unknown(Why::AtPrompt);
+            // What is shown now was not reported by anything.
+            self.said_at = None;
         }
         // Whatever needed the user has gone: no bell for it now.
         self.began_needing_you = false;
@@ -921,6 +930,7 @@ impl Track {
         let was = self.needs_you();
         if let Some(status) = self.source.received(body, now) {
             self.show(status);
+            self.said_at = Some(now);
         }
         if !was && self.needs_you() {
             self.began_needing_you = true;

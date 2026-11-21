@@ -68,6 +68,8 @@ jobs:
         run: powershell -ExecutionPolicy Bypass -File scripts\package-windows.ps1 -BesideBuild
       - name: End-to-end check against the stand-in
         run: cargo run --release --locked --example e2e
+      - name: The read-only page, checked against the stand-in
+        run: cargo run --release --locked --example page_check
       # A .tar.gz keeps the program's permission to run, which the download
       # of a run does not.
       - name: Pack the macOS build

@@ -583,6 +583,24 @@ impl<B: AgentBackend> App<B> {
         began
     }
 
+    /// Say whether the page the user asked for was started: where it is
+    /// and what it shows to whom, or why it is not there and what to do.
+    /// Either way agents are not affected.
+    pub fn page_started(&mut self, started: Result<String, String>) {
+        let text = match started {
+            Ok(address) => format!(
+                "The page is on: {address}  It shows agents' names, status and screens to \
+                 anything on this machine. Off: take \"page\" out of the settings file."
+            ),
+            Err(why) => format!(
+                "The page was not started on port {} ({why}). Agents work as before. If another program \
+                 has that port, set \"page_port\" in the settings file, or take \"page\" out.",
+                self.config.page_port
+            ),
+        };
+        self.say_first(text);
+    }
+
     /// Put before the notice already up, which stays after it.
     fn say_first(&mut self, text: String) {
         self.notice = Some(match self.notice.take() {
@@ -4106,6 +4124,38 @@ Cost",
         // The same words on the way out, for the terminal.
         assert_eq!(app.save().err(), app.save_problem);
         let _ = std::fs::remove_file(&not_a_folder);
+    }
+
+    #[test]
+    fn the_page_being_on_or_not_is_said_once_with_where_it_is_or_what_to_do() {
+        let room = 2 * usize::from(crate::ui::MIN_COLS);
+        let mut app = app_with_claude_agents(1);
+        app.notice = Some("Earlier notice.".into());
+        app.page_started(Ok("http://127.0.0.1:7501/".into()));
+        let said = app.notice.clone().unwrap();
+        assert!(said.starts_with("The page is on: http://127.0.0.1:7501/  It shows"), "{said}");
+        assert!(said.ends_with("Earlier notice."), "what was up stays after it");
+        // Alone, it fits the two notice rows of the narrowest window whole,
+        // with the longest address there is.
+        app.notice = None;
+        app.page_started(Ok("http://127.0.0.1:65535/".into()));
+        let said = app.notice.clone().unwrap();
+        assert!(said.chars().count() <= room, "{} characters: {said}", said.chars().count());
+        assert!(said.ends_with("Off: take \"page\" out of the settings file."), "{said}");
+
+        // Not started: the port, the system's reason, that agents are not
+        // affected, and what to do, which is kept however long the reason.
+        app.notice = None;
+        app.config.page_port = 65535;
+        let reason = "Only one usage of each socket address (protocol/network address/port) is normally \
+                      permitted. (os error 10048)";
+        app.page_started(Err(reason.into()));
+        let said = app.notice.clone().unwrap();
+        assert!(said.starts_with("The page was not started on port 65535 (Only one usage"), "{said}");
+        assert!(said.contains("Agents work as before."), "{said}");
+        let fitted = app.notice_fitted(room).unwrap();
+        assert!(fitted.chars().count() <= room, "{fitted}");
+        assert!(fitted.ends_with("or take \"page\" out."), "{fitted}");
     }
 
     /// Found by a review: an agent that could not continue its conversation

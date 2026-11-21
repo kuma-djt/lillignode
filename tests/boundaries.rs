@@ -4,6 +4,11 @@
 //! Every file in `src/` is on one of two sides. An engine file may not name
 //! the drawing library or the keyboard library, and may not use a file from
 //! the other side. A new file must be put on a side here before this passes.
+//!
+//! A third kind of file is a reader: a face on another thread that is
+//! handed the engine's published copies and nothing else. It may not name
+//! the engine, the agents or the half that publishes, so it has no way to
+//! ask for anything.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -27,6 +32,24 @@ const ENGINE: &[&str] = &[
 
 /// Draws, reads keys, and words what the engine decided.
 const FACE: &[&str] = &["app", "fit", "input", "keys", "look", "main", "ui", "view"];
+
+/// Reads the engine's published copies and nothing else: the page.
+const READER: &[&str] = &["page"];
+
+/// What a reader may not name outside its tests: the engine and what it
+/// holds, the running agents, the saved workspace, the terminal face, and
+/// the half that publishes.
+const NOT_FOR_A_READER: &[&str] = &[
+    "crate::agent",
+    "crate::config",
+    "engine::",
+    "local::",
+    "state::",
+    "Engine",
+    "Workspace",
+    "AgentBackend",
+    "Publisher",
+];
 
 /// Declares the modules and nothing else.
 const ROOT: &str = "lib";
@@ -102,7 +125,7 @@ fn source_files() -> BTreeSet<String> {
 #[test]
 fn every_source_file_is_on_one_side() {
     let mut listed: BTreeSet<String> = BTreeSet::new();
-    for name in ENGINE.iter().chain(FACE).chain([&ROOT]) {
+    for name in ENGINE.iter().chain(FACE).chain(READER).chain([&ROOT]) {
         assert!(listed.insert(name.to_string()), "{name} is listed twice in tests/boundaries.rs");
     }
     let present = source_files();
@@ -129,6 +152,46 @@ fn engine_files_hold_no_screen_or_keyboard_code() {
         "engine files must not draw or read keys, or use a file that does:\n  {}",
         problems.join("\n  ")
     );
+}
+
+/// What a reader's text does that it may not. Its tests may publish, to
+/// have something to read; they are not looked at.
+fn reader_trespasses(text: &str) -> Vec<String> {
+    let own = text.split("#[cfg(test)]\nmod tests").next().unwrap_or(text);
+    let mut found = trespasses(own);
+    found.extend(
+        NOT_FOR_A_READER.iter().filter(|name| own.contains(**name)).map(|name| format!("names {name}")),
+    );
+    found
+}
+
+#[test]
+fn a_reader_is_handed_copies_and_can_reach_nothing_else() {
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut problems = Vec::new();
+    for name in READER {
+        let text = fs::read_to_string(src.join(format!("{name}.rs"))).expect("a reader file can be read");
+        problems.extend(reader_trespasses(&text).into_iter().map(|what| format!("src/{name}.rs {what}")));
+    }
+    assert!(
+        problems.is_empty(),
+        "a reader must not draw, read keys, or reach the engine or its agents:\n  {}",
+        problems.join("\n  ")
+    );
+    assert_eq!(
+        reader_trespasses("use crate::snapshot::Reader;\nuse crate::status::AgentStatus;"),
+        Vec::<String>::new()
+    );
+    assert_eq!(reader_trespasses("use crate::engine::Event;"), ["names engine::"]);
+    assert_eq!(reader_trespasses("fn f(p: &snapshot::Publisher) {}"), ["names Publisher"]);
+    assert_eq!(reader_trespasses("fn f<B>(w: &Workspace<B>) {}"), ["names Workspace"]);
+    assert_eq!(reader_trespasses("use crate::ui;"), ["uses crate::ui"]);
+    assert_eq!(
+        reader_trespasses("fn f() {}\n#[cfg(test)]\nmod tests { use super::Publisher; }"),
+        Vec::<String>::new()
+    );
+    assert_eq!(reader_trespasses("#[cfg(test)]\nfn f() {}\nfn g(p: Publisher) {}"), ["names Publisher"]);
+    assert_eq!(reader_trespasses("let e = super::engine::quit();"), ["names engine::"]);
 }
 
 #[test]

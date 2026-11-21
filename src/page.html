@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Lillignode</title>
+<link rel="stylesheet" href="/page.css">
+</head>
+<body>
+<header>
+  <h1>Lillignode</h1>
+  <p id="readonly">Read only. This page shows what Lillignode shows and sends nothing back.</p>
+  <p id="contact">Waiting to hear from Lillignode.</p>
+</header>
+
+<section id="blocking" hidden>
+  <h2 id="blocking-title">Blocking now</h2>
+  <ul id="blocking-list"></ul>
+</section>
+
+<main>
+  <section id="threads" aria-labelledby="threads-title">
+    <h2 id="threads-title">Threads</h2>
+    <ul id="seats"></ul>
+    <p id="no-seats" class="quiet" hidden>No agents are open in Lillignode.</p>
+  </section>
+
+  <section id="middle" aria-labelledby="terminal-title">
+    <h2 id="terminal-title">Terminal<span id="terminal-name"></span></h2>
+    <p id="terminal-note" class="quiet">Choose a thread to see its terminal.</p>
+    <pre id="terminal" aria-label="The selected agent's terminal, read only" tabindex="0"></pre>
+  </section>
+
+  <section id="board" aria-labelledby="board-title">
+    <h2 id="board-title">Board</h2>
+    <p class="quiet">Not connected yet.</p>
+  </section>
+</main>
+
+<!-- Said aloud to a screen reader only when who is waiting, or contact, changes: not every second. -->
+<p id="announce" role="status" aria-live="assertive"></p>
+
+<noscript><p class="lost">This page needs JavaScript to hear from Lillignode. Nothing is shown without it.</p></noscript>
+<script src="/page.js"></script>
+</body>
+</html>

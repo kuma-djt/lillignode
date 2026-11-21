@@ -130,6 +130,16 @@ Put `"cost": true` in the settings file and Lillignode shows, under each Claude 
 - **A warning, if you want one.** Add `"cost_warning_tokens": 500000` (any count above zero) and a conversation that reaches it gets PAST WARNING in bold beside its figure, and one notice. That is all it does: nothing is stopped, held, or asked. The warning is for each conversation by itself, not for all of them added up, and it is given again each time Lillignode is started while the conversation is past it.
 - **Dollars** are an estimate from a price list built into the program, shown in the sidebar only if you put `"billing": "key"` in the settings file. Unlike the token count, the estimate includes cache reads, because they are billed. Plan limits are not shown.
 
+## The page (read only, off by default)
+
+Put `"page": true` in the settings file and Lillignode also serves a page for a browser on this machine, at `http://127.0.0.1:7501/` (`"page_port"` sets another port). Lillignode says the address when it starts, and `lillignode --where` prints it.
+
+- **What it shows.** One row for each agent with its status and how long ago it reported it ("Working, 2 s ago", "Needs you, waiting 4 min", "Unknown: no report"); the terminal of the agent you choose, live; and, above everything, a strip titled "Blocking now" naming each agent that needs you and how long it has waited. A third column, "Board", says it is not connected yet: nothing is behind it.
+- **It is read only.** The page can ask Lillignode for nothing and type nothing. Choosing an agent on the page changes only what the page shows.
+- **It says how fresh it is.** The header says when the page last heard from Lillignode, and says so plainly when it has lost contact; what is on the page then is marked as old.
+- **Who can read it.** It listens on this machine only, never on the network. While it is on, any program on this machine can read every agent's name, folder, status and screen from it; a page on another web site cannot. It is the one way an agent's screen leaves Lillignode's own window, which is why it is off unless you ask.
+- **Not yet checked by a person.** Checked by script, with stand-in agents, in a browser with no window. The agent's terminal on the page is its text and colours as the agent sent them; it is not an exact copy of the terminal window, and history cannot be read there.
+
 ## Settings
 
 One JSON file; `lillignode --where` says where it is.
@@ -144,9 +154,15 @@ Those two are the defaults. The settings for cost, which is off unless you ask:
 { "cost": true, "cost_warning_tokens": 500000, "billing": "key" }
 ```
 
+The page, which is off unless you ask:
+
+```json
+{ "page": true, "page_port": 7501 }
+```
+
 If the colours come out wrong, add `"colors"` with `"full"`, `"256"`, `"16"` or `"none"`. Setting the `NO_COLOR` environment variable also switches colour off.
 
-All are optional, and a change takes effect the next time Lillignode is started. `billing` does nothing without `cost`, and `cost_warning_tokens` without it is reported as a mistake.
+All are optional, and a change takes effect the next time Lillignode is started. `billing` does nothing without `cost`, and `cost_warning_tokens` without it is reported as a mistake; so is `page_port` without `page`. A Lillignode older than the page does not know `"page"` and treats it as a mistake in the file.
 
 **The file is strict.** One mistake in it and none of it is used: every setting is at its default until it is fixed. Lillignode never changes the file. It tells you when it starts, beginning with how to fix it ("To fix your settings file: ...") and naming the line and column where it can.
 
@@ -244,6 +260,7 @@ These are known and not yet fixed. Please do not report them as security problem
 - It saves which agents are open, their folders, and their conversation ids. It never saves what an agent printed.
 - Only if you switch cost on, it reads Claude Code's own record of each conversation it started, read-only, and keeps only the token counts and the model name.
 - It does not change Claude Code's settings.
+- Only if you switch the page on, it listens on this machine (127.0.0.1) and shows agents' status and screens to a browser here. It opens no port otherwise.
 
 ## Checking your changes
 
@@ -253,13 +270,14 @@ cargo test
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 cargo run --release --example e2e
+cargo run --release --example page_check
 ```
 
-The last one drives the real program against a stand-in agent and takes about two minutes. On Windows, run the packaging script with `-BesideBuild` first so it covers status. See [CONTRIBUTING.md](CONTRIBUTING.md) before sending a change, including the rule that tests never touch a real Claude Code setup.
+The last two drive the real program against a stand-in agent; the first of them takes several minutes, the second checks the page and takes about one. On Windows, run the packaging script with `-BesideBuild` first so it covers status. See [CONTRIBUTING.md](CONTRIBUTING.md) before sending a change, including the rule that tests never touch a real Claude Code setup.
 
 ## How it is built
 
-Most of Lillignode's code is written by an AI coding agent, Claude Code, directed by a person. Every change passes the five checks above and independent reviews, and each release is checked by hand by a person against real Claude Code. What has not been checked yet is listed under [Known limits in 0.2](#known-limits-in-02).
+Most of Lillignode's code is written by an AI coding agent, Claude Code, directed by a person. Every change passes the checks above and independent reviews, and each release is checked by hand by a person against real Claude Code. What has not been checked yet is listed under [Known limits in 0.2](#known-limits-in-02).
 
 ## Licence
 

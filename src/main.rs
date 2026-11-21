@@ -1,7 +1,7 @@
 use std::io::Write;
 use std::process::ExitCode;
 use std::sync::mpsc::{self, RecvTimeoutError};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use crossterm::event::{DisableBracketedPaste, EnableBracketedPaste};
 use crossterm::execute;
@@ -11,7 +11,11 @@ use lillignode::app::App;
 use lillignode::config::{self, Config};
 use lillignode::input::{self, Input};
 use lillignode::local::LocalAgents;
-use lillignode::{state, ui};
+use lillignode::{page, snapshot, state, ui};
+
+/// A copy for the page is published no more often than this, however fast
+/// agents write.
+const PUBLISH_EVERY: Duration = Duration::from_millis(50);
 
 enum Msg {
     /// A key, paste or resize, and when it was read.
@@ -47,6 +51,11 @@ To see what each Claude Code conversation has used, add \"cost\": true to that
 file. It is experimental and off unless you ask. Lillignode then reads Claude
 Code's own record of each conversation on this machine, and changes nothing.
 
+To see your agents in a browser on this machine, add \"page\": true to that
+file. It is off unless you ask. The page is at http://127.0.0.1:7501/ (set
+\"page_port\" for another port), is read only, and while it is on it shows
+every agent's name, status and screen to any program on this machine.
+
 Each agent uses its own account. Lillignode does not ask for your keys and
 sends nothing anywhere.",
         keys = config.menu_keys_label()
@@ -77,6 +86,12 @@ fn main() -> ExitCode {
                 Ok(dir) => {
                     println!("workspace: {}", state::file_in(dir).display());
                     println!("settings:  {}", dir.join(config::FILE).display());
+                    if config.page {
+                        println!(
+                            "page:      http://127.0.0.1:{}/ while Lillignode is open",
+                            config.page_port
+                        );
+                    }
                     if let Some(problem) = &config_problem {
                         println!("\n{problem}");
                     }
@@ -159,6 +174,15 @@ fn main() -> ExitCode {
         app.engine.ws.set_cost_warning(app.config.cost_warning_tokens);
     }
     app.colors = lillignode::look::depth(app.config.colors, |name| std::env::var(name).ok(), cfg!(windows));
+    // The page: only when the user has asked for it. It is handed the
+    // reading half and nothing else; this loop publishes to the other.
+    let publisher = app.config.page.then(snapshot::channel).and_then(|(publisher, reader)| {
+        let started = page::serve(reader, app.config.page_port);
+        let listening = started.is_ok();
+        app.page_started(started.map(page::url));
+        listening.then_some(publisher)
+    });
+    let mut published_at: Option<Instant> = None;
     let started = Instant::now();
     input::spawn_reader(tx, Msg::Input);
 
@@ -189,8 +213,24 @@ fn main() -> ExitCode {
         // Block for one message, then take everything else already waiting so
         // a burst of output costs one redraw.
         // Wake at least once a second, so a status that has gone past its
-        // deadline is shown without waiting for a key or output.
-        let first = match rx.recv_timeout(Duration::from_secs(1)) {
+        // deadline is shown without waiting for a key or output. Sooner
+        // when a copy for the page was held back, so the page is never more
+        // than a moment behind.
+        let mut wait = Duration::from_secs(1);
+        if let Some(publisher) = &publisher {
+            // Each turn of this loop follows something that may have
+            // changed what the page shows, or a second of quiet.
+            let since = published_at.map_or(PUBLISH_EVERY, |at| at.elapsed());
+            if since >= PUBLISH_EVERY {
+                // Only the screens an open page is showing are copied.
+                let screens = publisher.screens_shown();
+                publisher.publish(app.engine.published(SystemTime::now(), &screens));
+                published_at = Some(Instant::now());
+            } else {
+                wait = PUBLISH_EVERY - since;
+            }
+        }
+        let first = match rx.recv_timeout(wait) {
             Ok(msg) => Some(msg),
             Err(RecvTimeoutError::Timeout) => None,
             Err(RecvTimeoutError::Disconnected) => break,
@@ -222,6 +262,8 @@ fn main() -> ExitCode {
             let _ = out.flush();
         }
     }
+    // The page is told Lillignode has gone, not left to find out.
+    drop(publisher);
 
     let stopped = app.engine.ws.running_labels();
     let ended = app.engine.ws.ended_labels();

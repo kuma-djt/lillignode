@@ -1,0 +1,135 @@
+/* Lillignode's page. Four colours: a navy ground, cream text, copper for
+   what Lillignode itself points at, teal for an agent that is working.
+   Colour is never the only signal: every state is also said in words. */
+:root {
+  --navy: #14202B;
+  --navy-deep: #0E1820;
+  --navy-raised: #1C2C3A;
+  --cream: #F2EAD9;
+  --cream-quiet: #B9B2A3;
+  --copper: #C17B3E;
+  --teal: #4FB3A5;
+  --rule: #2B3E4F;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  background: var(--navy);
+  color: var(--cream);
+  font: 15px/1.45 "Segoe UI", system-ui, -apple-system, sans-serif;
+}
+
+body { display: flex; flex-direction: column; }
+
+h1, h2 { margin: 0; font-weight: 600; }
+h1 { font-size: 18px; color: var(--copper); letter-spacing: 0.02em; }
+h2 {
+  font-size: 12px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--cream-quiet);
+  padding: 12px 16px 8px;
+}
+p { margin: 0; }
+ul { list-style: none; margin: 0; padding: 0; }
+.quiet { color: var(--cream-quiet); padding: 0 16px 12px; }
+
+header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 20px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--rule);
+}
+#readonly { color: var(--cream-quiet); font-size: 13px; }
+#contact { margin-left: auto; font-size: 14px; }
+#contact.late { color: var(--copper); font-weight: 600; }
+/* Lost contact: the loudest thing on the page, in the page's own colours
+   turned over. */
+#contact.lost, .lost {
+  background: var(--cream);
+  color: var(--navy);
+  font-weight: 700;
+  padding: 6px 12px;
+  border-radius: 3px;
+  flex-basis: 100%;
+  margin-left: 0;
+}
+
+#blocking {
+  background: var(--copper);
+  color: var(--navy-deep);
+  padding: 8px 16px 10px;
+}
+#blocking h2 { color: var(--navy-deep); padding: 0 0 2px; }
+#blocking li { font-size: 17px; font-weight: 600; }
+/* Contact is lost: this is who was waiting then, not a claim about now. */
+body.stale #blocking { opacity: 0.55; }
+/* An agent's name is shown as it is written, not in capitals. */
+#terminal-name { text-transform: none; letter-spacing: 0; font-size: 14px; color: var(--cream); padding-left: 10px; }
+
+main {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(230px, 300px) minmax(0, 1fr) minmax(180px, 260px);
+}
+main > section { min-height: 0; overflow: auto; }
+#threads, #middle { border-right: 1px solid var(--rule); }
+
+#seats li { border-top: 1px solid var(--rule); }
+#seats li:last-child { border-bottom: 1px solid var(--rule); }
+#seats button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: 0;
+  border-left: 4px solid transparent;
+  color: inherit;
+  font: inherit;
+  padding: 9px 12px 10px;
+  cursor: pointer;
+}
+#seats button:hover { background: var(--navy-raised); }
+#seats button:focus-visible, #terminal:focus-visible { outline: 2px solid var(--copper); outline-offset: -2px; }
+#seats button[aria-pressed="true"] { background: var(--navy-raised); border-left-color: var(--copper); }
+.seat-name { display: block; font-weight: 600; }
+.seat-folder { color: var(--cream-quiet); font-weight: 400; }
+.seat-state { display: block; font-size: 14px; color: var(--cream-quiet); }
+.seat-state .word { color: var(--cream); }
+li.working .seat-state .word { color: var(--teal); font-weight: 600; }
+li.needs-you .seat-state .word { color: var(--copper); font-weight: 700; }
+li.needs-you button { border-left-color: var(--copper); }
+li.gone .seat-name { color: var(--cream-quiet); }
+
+#middle { display: flex; flex-direction: column; }
+#terminal-note { flex: none; }
+#terminal {
+  flex: 1;
+  margin: 0 16px 16px;
+  padding: 10px 12px;
+  overflow: auto;
+  background: var(--navy-deep);
+  color: var(--cream);
+  border: 1px solid var(--rule);
+  font: 14px/1.25 "Cascadia Mono", "Cascadia Code", Consolas, "DejaVu Sans Mono", Menlo, monospace;
+  white-space: pre;
+  tab-size: 8;
+}
+#terminal:empty { display: none; }
+/* Read by a screen reader, not shown. */
+#announce { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+/* What is on the page is from before contact was lost. */
+body.stale main { opacity: 0.55; }
+
+@media (max-width: 760px) {
+  main { display: block; overflow: auto; }
+  #threads, #middle { border-right: 0; border-bottom: 1px solid var(--rule); }
+  #terminal { margin: 0 8px 12px; }
+  #contact { margin-left: 0; }
+}

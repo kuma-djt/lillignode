@@ -11,7 +11,8 @@
 //!
 //! A second face on another thread is given a `Reader`: the reading half of
 //! `channel()`. It can read the latest copy and wait for a newer one. It
-//! has no way to ask the engine for anything.
+//! has no way to ask the engine to do anything. The one thing it can say is
+//! which agents' screens it is showing, so that only those are copied.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex};
@@ -45,8 +46,10 @@ pub struct AgentCopy {
     pub needs_you: Option<Option<Kind>>,
     /// When it began to need the user, while it does.
     pub needs_you_since: Option<SystemTime>,
-    /// When its latest status report arrived. None if it has sent none
-    /// since it was started, or is not running.
+    /// When the program last reported its own status: the report `status`
+    /// rests on. A report about one of its parts does not move it. None if
+    /// it has reported none since it was started, if a shell's prompt has
+    /// ended what it said, or if it is not running.
     pub reported_at: Option<SystemTime>,
     /// What its conversation has used, or why that is not known.
     pub cost: Cost,
@@ -112,7 +115,7 @@ pub struct EventCopy {
 #[derive(Clone, Debug)]
 pub struct Published {
     pub state: StateCopy,
-    /// Each agent's screen, by its key.
+    /// The screens a reader said it is showing, each by its agent's key.
     pub screens: Vec<(AgentKey, ScreenCopy)>,
     /// The events still kept, oldest first.
     pub events: Vec<EventCopy>,
@@ -123,6 +126,9 @@ pub struct Published {
 struct Shared {
     latest: Mutex<Latest>,
     newer: Condvar,
+    /// The agents whose screens readers are showing now, by key number,
+    /// once for each reader showing one.
+    shown: Mutex<Vec<u64>>,
 }
 
 #[derive(Default)]
@@ -143,7 +149,11 @@ pub struct Reader(Arc<Shared>);
 
 /// A place to publish copies, and the half that reads them.
 pub fn channel() -> (Publisher, Reader) {
-    let shared = Arc::new(Shared { latest: Mutex::new(Latest::default()), newer: Condvar::new() });
+    let shared = Arc::new(Shared {
+        latest: Mutex::new(Latest::default()),
+        newer: Condvar::new(),
+        shown: Mutex::new(Vec::new()),
+    });
     (Publisher(shared.clone()), Reader(shared))
 }
 
@@ -160,9 +170,38 @@ impl Publisher {
         let copy = Arc::new(copy);
         let mut latest = locked(&self.0);
         latest.count += 1;
-        latest.copy = Some(copy);
+        let earlier = latest.copy.replace(copy);
         drop(latest);
+        // The copy before, if no reader still holds it, is freed here:
+        // outside the lock, which is held only for the swap.
+        drop(earlier);
         self.0.newer.notify_all();
+    }
+}
+
+impl Publisher {
+    /// The agents whose screens some reader is showing now, by key number.
+    /// Only these need copying; with no reader, none.
+    pub fn screens_shown(&self) -> Vec<u64> {
+        let mut shown = self.0.shown.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
+        shown.sort_unstable();
+        shown.dedup();
+        shown
+    }
+}
+
+/// Held by a reader for as long as it shows one agent's screen.
+pub struct Showing {
+    shared: Arc<Shared>,
+    agent: u64,
+}
+
+impl Drop for Showing {
+    fn drop(&mut self) {
+        let mut shown = self.shared.shown.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(at) = shown.iter().position(|agent| *agent == self.agent) {
+            shown.swap_remove(at);
+        }
     }
 }
 
@@ -185,6 +224,14 @@ pub enum Read {
 }
 
 impl Reader {
+    /// Say that this reader is showing the screen of the agent with this
+    /// key number, until what is returned is dropped. Copies published
+    /// from then on carry that screen.
+    pub fn show(&self, agent: u64) -> Showing {
+        self.0.shown.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push(agent);
+        Showing { shared: self.0.clone(), agent }
+    }
+
     /// The latest copy, if any has been published.
     pub fn latest(&self) -> Option<(u64, Arc<Published>)> {
         let latest = locked(&self.0);
@@ -259,6 +306,33 @@ mod tests {
         let (first, then) = waiting.join().unwrap();
         assert!(matches!(first, Read::Copy(1, _)), "{first:?}");
         assert!(matches!(then, Read::Ended), "{then:?}");
+    }
+
+    #[test]
+    fn a_copy_published_before_the_engine_went_is_still_read_and_then_it_is_said_to_be_gone() {
+        let (publisher, reader) = channel();
+        publisher.publish(published(1));
+        drop(publisher);
+        assert!(matches!(reader.newer_than(0, Duration::from_secs(30)), Read::Copy(1, _)));
+        let began = std::time::Instant::now();
+        assert!(matches!(reader.newer_than(1, Duration::from_secs(30)), Read::Ended));
+        assert!(began.elapsed() < Duration::from_secs(5), "told at once, not after the wait");
+    }
+
+    #[test]
+    fn only_the_screens_readers_are_showing_are_asked_for_and_only_while_they_show_them() {
+        let (publisher, reader) = channel();
+        assert!(publisher.screens_shown().is_empty(), "no reader: no screen is copied");
+        let first = reader.show(4);
+        let second = reader.clone().show(4);
+        let other = reader.show(2);
+        assert_eq!(publisher.screens_shown(), [2, 4]);
+        drop(first);
+        assert_eq!(publisher.screens_shown(), [2, 4], "another reader still shows it");
+        drop(second);
+        assert_eq!(publisher.screens_shown(), [2]);
+        drop(other);
+        assert!(publisher.screens_shown().is_empty());
     }
 
     #[test]

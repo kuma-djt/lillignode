@@ -82,7 +82,9 @@ pub struct EventsAfter {
 
 impl Event {
     /// The event said plainly, with its number: a fixed word for what
-    /// happened, and the agent it happened to, if to one.
+    /// happened, and the name and folder of the agent it happened to, if
+    /// to one. The agent's key is given only for an agent that began to
+    /// need you; the other events name their agent by its label alone.
     pub fn plain(&self, number: u64) -> EventCopy {
         let (what, agent, label) = match self {
             Event::Exited { label, .. } => ("exited", None, Some(label)),
@@ -480,11 +482,20 @@ impl<B: AgentBackend> Engine<B> {
     }
 
     /// Everything a reader on another thread is handed: the copy of state,
-    /// each agent's screen as text, and the events still kept.
-    pub fn published(&self, now: SystemTime) -> Published {
+    /// the events still kept, and the screens of the agents with these key
+    /// numbers, as text. A screen is the costly part to copy, so only
+    /// those a reader is showing are.
+    pub fn published(&self, now: SystemTime, screens: &[u64]) -> Published {
+        let shown = |e: &&Entry| screens.contains(&e.key().number());
         Published {
             state: self.copy(now),
-            screens: self.ws.entries().iter().map(|e| (e.key(), e.term.copy_screen())).collect(),
+            screens: self
+                .ws
+                .entries()
+                .iter()
+                .filter(shown)
+                .map(|e| (e.key(), e.term.copy_screen()))
+                .collect(),
             events: self.events.iter().map(|(number, event)| event.plain(*number)).collect(),
             events_let_go: self.happened - self.events.len() as u64,
         }
@@ -533,6 +544,10 @@ impl<B: AgentBackend> Engine<B> {
     /// is kept.
     pub fn take_events(&mut self) -> Vec<Event> {
         let after = std::mem::replace(&mut self.taken, self.happened);
+        debug_assert!(
+            self.happened - after <= EVENTS_KEPT as u64,
+            "the terminal face fell behind what is kept"
+        );
         self.events.iter().filter(|(number, _)| *number > after).map(|(_, event)| event.clone()).collect()
     }
 
@@ -1444,6 +1459,19 @@ mod tests {
         let b = e.copy(at(401)).agents[1].clone();
         assert_eq!((b.needs_you, b.needs_you_since), (Some(None), Some(at(400))));
 
+        // A report about one of its parts, and one that is not about its
+        // status at all, do not make what it said look newer than it is.
+        report_at(&mut e, 0, "state=done:id=helper", at(450));
+        let a = e.copy(at(460)).agents[0].clone();
+        assert_eq!((a.status, a.reported_at), (Some(AgentStatus::Working), Some(at(100))));
+        // One that is not understood is what is shown, from when it came.
+        report_at(&mut e, 0, "state=pondering", at(470));
+        let a = e.copy(at(480)).agents[0].clone();
+        assert_eq!(
+            (a.status, a.reported_at),
+            (Some(AgentStatus::Unknown(Why::NotUnderstood)), Some(at(470)))
+        );
+
         // Its program ends: how it ended, and nothing reported.
         e.handle(AgentEvent::Exited(AgentId(2), crate::agent::Exit { code: 3 }));
         let b = e.copy(at(500)).agents[1].clone();
@@ -1461,6 +1489,24 @@ mod tests {
         assert_eq!(a.needs_you, Some(None), "its part is waiting");
         assert_eq!(a.needs_you_since, Some(at(50)));
         assert_eq!(a.reported_at, Some(at(60)));
+    }
+
+    #[test]
+    fn what_a_shell_prompt_ended_and_a_new_start_carry_no_time_from_before() {
+        let mut e = engine(&["state=idle"]);
+        report_at(&mut e, 0, "state=blocked", at(10));
+        // The shell's prompt came back: whatever was waiting has gone.
+        e.handle(AgentEvent::Output(AgentId(1), b"\x1b]133;A\x1b\\".to_vec()));
+        let a = e.copy(at(20)).agents[0].clone();
+        assert_eq!(a.status, Some(AgentStatus::Unknown(Why::AtPrompt)));
+        assert_eq!((a.needs_you_since, a.reported_at), (None, None), "nothing reported what is shown");
+        // It needs you again, stops, and is started again: a clean slate.
+        report_at(&mut e, 0, "state=blocked", at(30));
+        assert_eq!(e.copy(at(31)).agents[0].needs_you_since, Some(at(30)));
+        e.handle(AgentEvent::Exited(AgentId(1), crate::agent::Exit { code: 0 }));
+        assert_eq!(e.start_again(key(&e, 0)), Ok(false));
+        let a = e.copy(at(40)).agents[0].clone();
+        assert_eq!((a.needs_you, a.needs_you_since, a.reported_at), (None, None, None));
     }
 
     #[test]
@@ -1524,14 +1570,19 @@ mod tests {
         assert!(e.take_events().is_empty());
         assert_eq!(e.events_after(0).events.len(), 2);
         // Said plainly for a reader on another thread.
-        let published = e.published(at(5));
+        let published = e.published(at(5), &[key(&e, 0).number(), key(&e, 1).number()]);
         assert_eq!(published.state.as_of, 2);
         assert_eq!(published.events_let_go, 0);
         let plain: Vec<(u64, &str)> = published.events.iter().map(|ev| (ev.number, ev.what)).collect();
         assert_eq!(plain, [(1, "exited"), (2, "exited")]);
         assert_eq!(published.events[0].label.as_deref(), Some(e.ws.entries()[0].label().as_str()));
-        assert_eq!(published.screens.len(), 2, "a screen for each agent");
+        assert_eq!(published.screens.len(), 2, "a screen for each agent asked for");
         assert_eq!(published.screens[0].0, key(&e, 0));
+        // Only those asked for: a screen is the costly part to copy.
+        assert!(e.published(at(5), &[]).screens.is_empty());
+        let one = e.published(at(5), &[key(&e, 1).number(), 999]);
+        assert_eq!(one.screens.len(), 1);
+        assert_eq!(one.screens[0].0, key(&e, 1));
     }
 
     #[test]
@@ -1555,9 +1606,9 @@ mod tests {
         assert_eq!((near.missed, near.events.len()), (0, 3));
         // One that had read up to 4 missed 5 to 10.
         assert_eq!(e.events_after(4).missed, 6);
-        assert_eq!(e.published(at(1)).events_let_go, 10);
-        // The terminal face, which takes after every batch, gets what is kept.
-        assert_eq!(e.take_events().len(), EVENTS_KEPT);
+        assert_eq!(e.published(at(1), &[]).events_let_go, 10);
+        // (The terminal face takes after every batch and never falls this
+        // far behind; that is asserted where it takes.)
     }
 
     #[test]
@@ -1565,7 +1616,7 @@ mod tests {
         let mut e = engine(&["state=idle", "state=idle"]);
         report(&mut e, 2, "state=blocked:kind=question");
         e.settle();
-        let plain = e.published(at(1)).events;
+        let plain = e.published(at(1), &[]).events;
         assert_eq!(plain.len(), 1);
         assert_eq!((plain[0].what, plain[0].agent), ("began-needing-you", Some(key(&e, 1))));
     }

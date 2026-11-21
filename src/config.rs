@@ -21,6 +21,11 @@
 //! "full", "256", "16" or "none". For a terminal whose colours come out
 //! wrong.
 //!
+//! `page`: true to serve a read-only page on this machine, for a browser:
+//! each agent's status and screen. Off unless set to true. It listens only
+//! on this machine (127.0.0.1), at `page_port` (7501 unless said). While it
+//! is on, any program on this machine can read it.
+//!
 //! A missing file means the defaults. A file that cannot be used also means
 //! the defaults, with a message saying what was wrong: a mistake in this
 //! file must never leave the user without a way into the menu.
@@ -31,6 +36,8 @@ use serde::Deserialize;
 
 pub const FILE: &str = "config.json";
 pub const DEFAULT_MENU_KEYS: [&str; 2] = ["ctrl+q", "f12"];
+/// Where the page is served unless the settings file says otherwise.
+pub const DEFAULT_PAGE_PORT: u16 = 7501;
 
 /// A key that opens Lillignode's menu, as the settings file names it. The
 /// terminal face decides whether a key pressed is this one (`keys`).
@@ -129,6 +136,10 @@ pub struct Config {
     pub billing: Billing,
     /// How many colours to draw with, if the user has said.
     pub colors: Colors,
+    /// Serve the read-only page on this machine. Off unless the user asks.
+    pub page: bool,
+    /// The port the page is served at.
+    pub page_port: u16,
 }
 
 /// How the user pays, which decides whether a dollar figure means anything
@@ -156,6 +167,8 @@ impl Default for Config {
             cost_warning_tokens: None,
             billing: Billing::Unsaid,
             colors: Colors::Auto,
+            page: false,
+            page_port: DEFAULT_PAGE_PORT,
         }
     }
 }
@@ -190,6 +203,8 @@ struct File {
     cost_warning_tokens: Option<u64>,
     billing: Option<String>,
     colors: Option<String>,
+    page: Option<bool>,
+    page_port: Option<u32>,
 }
 
 fn parse(text: &str) -> Result<Config, String> {
@@ -223,6 +238,18 @@ fn parse(text: &str) -> Result<Config, String> {
     if let Some(colors) = &file.colors {
         config.colors = Colors::parse(colors)?;
     }
+    config.page = file.page.unwrap_or(false);
+    config.page_port = match file.page_port {
+        None => DEFAULT_PAGE_PORT,
+        // Said, so the user does not look for a page that is not there.
+        Some(_) if !config.page => {
+            return Err("add \"page\": true, or take out \"page_port\", which needs it".to_string());
+        }
+        Some(port @ 1024..=65535) => port as u16,
+        Some(port) => {
+            return Err(format!("make \"page_port\" a number from 1024 to 65535; it is {port}"));
+        }
+    };
     let Some(specs) = file.menu_keys else { return Ok(config) };
     if specs.is_empty() {
         return Err(
@@ -302,6 +329,24 @@ mod tests {
         let mut c = parse(r#"{"menu_keys": ["alt+m", "f9", "ctrl+t", "f2"]}"#).unwrap();
         c.function_keys_first();
         assert_eq!(c.menu_keys_label(), "F9 or F2 or Alt+M or Ctrl+T");
+    }
+
+    #[test]
+    fn the_page_is_off_unless_asked_for_and_its_port_must_be_usable() {
+        assert!(!Config::default().page);
+        assert!(!parse(r#"{"bell": false}"#).unwrap().page);
+        let on = parse(r#"{"page": true}"#).unwrap();
+        assert_eq!((on.page, on.page_port), (true, DEFAULT_PAGE_PORT));
+        assert_eq!(parse(r#"{"page": true, "page_port": 8123}"#).unwrap().page_port, 8123);
+        assert!(!parse(r#"{"page": false}"#).unwrap().page);
+        // Each mistake is said, with what to do.
+        let needs = parse(r#"{"page_port": 8123}"#).unwrap_err();
+        assert!(needs.starts_with("add \"page\": true"), "{needs}");
+        for port in ["0", "80", "70000"] {
+            let bad = parse(&format!(r#"{{"page": true, "page_port": {port}}}"#)).unwrap_err();
+            assert!(bad.starts_with("make \"page_port\" a number from 1024 to 65535"), "{bad}");
+        }
+        assert!(parse(r#"{"page": "yes"}"#).is_err());
     }
 
     #[test]
