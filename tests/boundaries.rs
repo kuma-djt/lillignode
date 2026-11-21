@@ -18,6 +18,7 @@ const ENGINE: &[&str] = &[
     "engine",
     "kind",
     "local",
+    "snapshot",
     "state",
     "status",
     "terminal",

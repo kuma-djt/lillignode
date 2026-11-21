@@ -49,6 +49,14 @@ impl Status {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct AgentKey(u64);
 
+impl AgentKey {
+    /// The key as a number, for a face that writes it out. It means
+    /// nothing but which agent, and only in this run.
+    pub fn number(self) -> u64 {
+        self.0
+    }
+}
+
 pub struct Entry {
     key: AgentKey,
     pub saved: SavedAgent,
@@ -507,6 +515,12 @@ impl<B: AgentBackend> Workspace<B> {
 
     pub fn focused(&self) -> Option<&Entry> {
         self.entries.get(self.focused)
+    }
+
+    /// For a test of something else: an agent to change directly.
+    #[cfg(test)]
+    pub(crate) fn entry_mut_for_test(&mut self, index: usize) -> &mut Entry {
+        &mut self.entries[index]
     }
 
     pub fn focused_mut(&mut self) -> Option<&mut Entry> {

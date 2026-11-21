@@ -17,6 +17,11 @@
 //!
 //! Lillignode colours its own sidebar, notice and bar. It never colours an
 //! agent's screen: that is drawn exactly as the agent sent it (`view`).
+//!
+//! The sidebar, the headings over two agents and which agents are on screen
+//! are drawn from the engine's plain copy of its state (`snapshot`), taken
+//! once for each draw. An agent's own screen is the one thing read from the
+//! engine directly, because it is the emulator's.
 
 use ratatui::layout::{Position, Rect};
 use ratatui::style::{Modifier, Style};
@@ -29,6 +34,7 @@ use crate::app::{App, BarPart, Mode};
 use crate::cost::Cost;
 use crate::fit;
 use crate::look::{self, Palette, Tone};
+use crate::snapshot::{AgentCopy, StateCopy};
 use crate::status::AgentStatus;
 use crate::view;
 use crate::workspace::{printable, Entry, Status};
@@ -132,20 +138,19 @@ fn clip(text: &str, width: usize) -> String {
 
 /// The words for an agent's status on the second line of its row: the
 /// short status only. Its reason is in the notice and the status report.
-fn status_words(entry: &Entry) -> String {
-    match entry.reported() {
+fn status_words(agent: &AgentCopy) -> String {
+    match &agent.status {
         // In capitals: with its block, the loudest thing on screen.
         Some(AgentStatus::NeedsYou(_)) => "NEEDS YOU".to_string(),
         Some(reported) => reported.short(),
-        None => entry.status.text(),
+        None => agent.program.text(),
     }
 }
 
 /// An agent's two lines: its gnome mark and name, then its folder and
 /// status. `width` is the whole sidebar row.
-fn agent_rows(entry: &Entry, focused: bool, width: usize, clock: u64, p: Palette) -> [Line<'static>; 2] {
-    let reported = entry.reported();
-    let (sign, tone) = look::sign(reported.as_ref(), &entry.status, clock);
+fn agent_rows(entry: &AgentCopy, focused: bool, width: usize, clock: u64, p: Palette) -> [Line<'static>; 2] {
+    let (sign, tone) = look::sign(entry.status.as_ref(), &entry.program, clock);
     let room = width.saturating_sub(NAME_AT);
     // The agent in front: a marker, and its name in copper.
     let name_style = if focused { p.copper() } else { Style::default() };
@@ -154,16 +159,16 @@ fn agent_rows(entry: &Entry, focused: bool, width: usize, clock: u64, p: Palette
         Span::styled(look::HAT, p.copper()),
         Span::styled(sign.to_string(), p.tone(tone)),
         Span::raw(" "),
-        Span::styled(clip(&entry.name(), room), name_style),
+        Span::styled(clip(&entry.name, room), name_style),
     ]);
 
     // The folder is how agents with the same name are told apart, so some
     // of it is always kept; the status has the rest of the line.
     let room = width.saturating_sub(DETAIL_AT);
-    let folder = entry.folder_name();
-    let kept = fit::width(&folder).min(FOLDER_KEPT);
+    let folder = &entry.folder_name;
+    let kept = fit::width(folder).min(FOLDER_KEPT);
     let status = clip(&status_words(entry), room.saturating_sub(kept + 2));
-    let folder = clip(&folder, room.saturating_sub(fit::width(&status) + 2));
+    let folder = clip(folder, room.saturating_sub(fit::width(&status) + 2));
     let indent = " ".repeat(DETAIL_AT);
     let second = if tone == Tone::NeedsYou {
         // A solid block across the sidebar, the only row ever drawn so.
@@ -184,13 +189,13 @@ fn agent_rows(entry: &Entry, focused: bool, width: usize, clock: u64, p: Palette
 /// The rows that stand for agents the sidebar has no room for: how many,
 /// and where, in words; and when any of them needs you, who, on a yellow
 /// row, so an agent that needs you is never out of sight without a pointer.
-fn more_rows(hidden: &[Entry], where_: &str, width: usize, p: Palette) -> Vec<Line<'static>> {
+fn more_rows(hidden: &[AgentCopy], where_: &str, width: usize, p: Palette) -> Vec<Line<'static>> {
     let mut rows =
         vec![Line::from(Span::styled(clip(&format!(" {} more {where_}", hidden.len()), width), p.dim()))];
-    let waiting: Vec<&Entry> = hidden.iter().filter(|e| e.needs_you().is_some()).collect();
+    let waiting: Vec<&AgentCopy> = hidden.iter().filter(|e| e.needs_you.is_some()).collect();
     let who = match waiting.as_slice() {
         [] => return rows,
-        [one] => format!("{}{} NEEDS YOU", " ".repeat(DETAIL_AT), one.label()),
+        [one] => format!("{}{} NEEDS YOU", " ".repeat(DETAIL_AT), one.label),
         many => format!("{}{} of them NEED YOU", " ".repeat(DETAIL_AT), many.len()),
     };
     rows.push(Line::from(Span::styled(fit::pad(&clip(&who, width), width), p.needs_you_block())));
@@ -238,56 +243,63 @@ pub(crate) fn shown_agents(
     choices.into_iter().min_by_key(|&(a, _)| (a.abs_diff(top), a)).unwrap_or((front, front))
 }
 
-fn draw_sidebar<B: AgentBackend>(frame: &mut Frame, area: Rect, app: &App<B>, p: Palette) {
+fn draw_sidebar<B: AgentBackend>(frame: &mut Frame, area: Rect, app: &App<B>, state: &StateCopy, p: Palette) {
     let panel = p.panel();
     let row = (area.width - 1) as usize;
     frame.render_widget(Block::default().style(panel), area);
 
     let mut heading = vec![Span::styled(" Lillignode", p.copper())];
     // Shown even when the row of the agent that needs you is off screen.
-    let waiting = app.needs_you_count();
+    let waiting = state.agents.iter().filter(|a| a.needs_you.is_some()).count();
     if waiting > 0 {
         heading.push(Span::raw("  "));
         heading.push(Span::styled(format!("{waiting} NEEDS YOU"), p.needs_you_text()));
     }
     let mut lines = vec![Line::from(heading)];
-    if app.engine.ws.entries().is_empty() {
+    if state.agents.is_empty() {
         lines.push(Line::from(Span::styled(" No agents yet. Press n.", p.dim())));
     }
     // Which agents fit. The total of cost at the foot gives way first.
-    let entries = app.engine.ws.entries();
-    let per = if app.cost_shown() { 3 } else { 2 };
+    let entries = &state.agents;
+    let per = if state.cost_on { 3 } else { 2 };
     let total = app.cost_total();
     let room = (area.height as usize).saturating_sub(1);
     let total_fits = entries.len() * per + total.len() <= room;
     // With no room for the total, one dim row at the foot says where it is.
     let pointer = !total.is_empty() && !total_fits;
     let agent_room = if pointer { room.saturating_sub(1) } else { room };
-    let needs: Vec<bool> = entries.iter().map(|e| e.needs_you().is_some()).collect();
-    let front = app.engine.ws.focused_index().unwrap_or(0);
-    let beside = app.engine.ws.pair().map(|pair| if pair.left == front { pair.right } else { pair.left });
+    let needs: Vec<bool> = entries.iter().map(|e| e.needs_you.is_some()).collect();
+    let front = state.front_index().unwrap_or(0);
+    // With two on screen, the one beside the agent in front.
+    let beside = state
+        .shown_two
+        .map(|(left, right)| if state.front == Some(left) { right } else { left })
+        .and_then(|key| entries.iter().position(|e| e.key == key));
     let (first, last) = shown_agents(&needs, per, agent_room, front, beside, app.sidebar_top.get());
     app.sidebar_top.set(first);
     if first > 0 {
         lines.extend(more_rows(&entries[..first], "above", row, p));
     }
-    for (i, entry) in entries.iter().enumerate().take(last + 1).skip(first) {
-        let focused = app.engine.ws.focused_index() == Some(i);
+    for entry in entries.iter().take(last + 1).skip(first) {
+        let focused = state.front == Some(entry.key);
         lines.extend(agent_rows(entry, focused, row, app.clock, p));
-        if app.cost_shown() {
+        if state.cost_on {
             // A third line, only when the user has switched cost on.
             let room = row.saturating_sub(DETAIL_AT);
-            let known = matches!(entry.cost(), Cost::Known(_));
+            let known = matches!(entry.cost, Cost::Known(_));
             // Past the user's warning: PAST WARNING leads the figure, and
             // it is bold. Not yellow, which means only Needs you.
-            let style = match (known, app.engine.ws.over_cost_warning(entry)) {
+            let style = match (known, entry.over_cost_warning) {
                 (_, Some(_)) => Style::default().add_modifier(Modifier::BOLD),
                 (true, None) => Style::default(),
                 (false, None) => p.dim(),
             };
             lines.push(Line::from(vec![
                 Span::raw(" ".repeat(DETAIL_AT)),
-                Span::styled(clip(&app.cost_short(entry), room), style),
+                Span::styled(
+                    clip(&app.cost_words(&entry.cost, entry.over_cost_warning.is_some()), room),
+                    style,
+                ),
             ]));
         }
     }
@@ -456,17 +468,21 @@ fn draw_entry(frame: &mut Frame, area: Rect, entry: &Entry) {
 /// "Typing goes here" is said only when it is true: the agent is in front,
 /// it is running, and Lillignode is not showing its menu, a question or
 /// history, when keys are Lillignode's.
-fn pane_head(entry: &Entry, front: bool, keys_go_to_agents: bool, width: usize, p: Palette) -> Line<'static> {
-    let label = entry.label();
+fn pane_head(
+    entry: &AgentCopy,
+    front: bool,
+    keys_go_to_agents: bool,
+    width: usize,
+    p: Palette,
+) -> Line<'static> {
+    let label = &entry.label;
     let typing = front && keys_go_to_agents && entry.is_running();
-    let (text, style) = match (entry.needs_you().is_some(), front) {
+    let (text, style) = match (entry.needs_you.is_some(), front) {
         (true, false) => (" ! NEEDS YOU - you are NOT typing here", p.needs_you_block()),
         (true, true) if typing => (" > NEEDS YOU - you are typing here", p.needs_you_block()),
         (true, true) => (" > NEEDS YOU - in front, keys are Lillignode's now", p.needs_you_block()),
         (false, true) if typing => (" > TYPING GOES HERE", p.mode()),
-        (false, true) if entry.start_again_cannot_help() => {
-            (" > NOT STARTED - menu, then x remove", p.mode())
-        }
+        (false, true) if entry.start_again_cannot_help => (" > NOT STARTED - menu, then x remove", p.mode()),
         (false, true) if !entry.is_running() => (" > STOPPED - menu, then r start again, x remove", p.mode()),
         (false, true) => (" > IN FRONT - keys are Lillignode's now", p.mode()),
         (false, false) if !entry.is_running() => (" - stopped, its last screen", p.dim()),
@@ -476,13 +492,17 @@ fn pane_head(entry: &Entry, front: bool, keys_go_to_agents: bool, width: usize, 
     Line::from(Span::styled(fit::pad(&clip(&text, width), width), style))
 }
 
-/// The two agents side by side, if the user asked for two and the window
-/// has room for them.
-fn pair_shown<B: AgentBackend>(app: &App<B>, window: Rect) -> Option<crate::workspace::Pair> {
-    app.engine.ws.pair().filter(|_| fits_two(window))
+/// Where in the list the two agents side by side are, left then right:
+/// the engine says which two are on screen. They are drawn only in a
+/// window that has room for them now, which can differ for the moment
+/// between a resize and the engine being told of it.
+fn pair_shown(state: &StateCopy, window: Rect) -> Option<(usize, usize)> {
+    let (left, right) = state.shown_two.filter(|_| fits_two(window))?;
+    let at = |key| state.agents.iter().position(|a| a.key == key);
+    Some((at(left)?, at(right)?))
 }
 
-fn draw_agent<B: AgentBackend>(frame: &mut Frame, area: Rect, app: &App<B>, p: Palette) {
+fn draw_agent<B: AgentBackend>(frame: &mut Frame, area: Rect, app: &App<B>, state: &StateCopy, p: Palette) {
     if matches!(app.mode, Mode::StatusReport) {
         draw_report(frame, area, app, p);
         return;
@@ -491,17 +511,20 @@ fn draw_agent<B: AgentBackend>(frame: &mut Frame, area: Rect, app: &App<B>, p: P
         draw_welcome(frame, area, app, p);
         return;
     };
-    let Some(pair) = pair_shown(app, frame.area()) else {
+    let Some((left, right)) = pair_shown(state, frame.area()) else {
         draw_entry(frame, area, front);
         return;
     };
     let panes = panes(area);
-    let sides = [(pair.left, panes.left_head, panes.left), (pair.right, panes.right_head, panes.right)];
+    let sides = [(left, panes.left_head, panes.left), (right, panes.right_head, panes.right)];
     for (index, head, body) in sides {
-        let Some(entry) = app.engine.ws.entries().get(index) else { continue };
-        let in_front = app.engine.ws.focused_index() == Some(index);
+        // The screen is the emulator's, so it is read from the engine: the
+        // same agent, by its key.
+        let Some(agent) = state.agents.get(index) else { continue };
+        let Some(entry) = app.engine.ws.by_key(agent.key) else { continue };
+        let in_front = state.front == Some(agent.key);
         let keys_go_to_agents = matches!(app.mode, Mode::Normal);
-        let line = pane_head(entry, in_front, keys_go_to_agents, head.width as usize, p);
+        let line = pane_head(agent, in_front, keys_go_to_agents, head.width as usize, p);
         frame.render_widget(Paragraph::new(line), head);
         draw_entry(frame, body, entry);
     }
@@ -647,8 +670,10 @@ fn bar_line(parts: &[(BarPart, String)], width: usize, p: Palette) -> Line<'stat
 pub fn draw<B: AgentBackend>(frame: &mut Frame, app: &App<B>) {
     let window = frame.area();
     let p = Palette(app.colors);
+    // One copy of the engine's state for the whole draw.
+    let state = app.engine.copy(std::time::SystemTime::now());
     let Some(a) = areas(window) else {
-        let running = app.engine.ws.running_labels().len();
+        let running = state.agents.iter().filter(|a| a.is_running()).count();
         // The bar text is included so the way to the menu, and any question
         // Lillignode is asking, stay visible even here.
         let text = format!(
@@ -667,8 +692,8 @@ pub fn draw<B: AgentBackend>(frame: &mut Frame, app: &App<B>) {
         return;
     };
 
-    draw_sidebar(frame, a.sidebar, app, p);
-    draw_agent(frame, a.agent, app, p);
+    draw_sidebar(frame, a.sidebar, app, &state, p);
+    draw_agent(frame, a.agent, app, &state, p);
     draw_notice(frame, a.notice, app, p);
 
     let width = a.bar.width as usize;
@@ -693,8 +718,8 @@ pub fn draw<B: AgentBackend>(frame: &mut Frame, app: &App<B>) {
             if !screen.hide_cursor() && entry.term.scrolled_back() == 0 {
                 // With two agents side by side, the cursor is in the one
                 // that typing goes to.
-                let at = match pair_shown(app, window) {
-                    Some(pair) if app.engine.ws.focused_index() == Some(pair.right) => panes(a.agent).right,
+                let at = match pair_shown(&state, window) {
+                    Some((_, right)) if state.front_index() == Some(right) => panes(a.agent).right,
                     Some(_) => panes(a.agent).left,
                     None => a.agent,
                 };

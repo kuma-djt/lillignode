@@ -762,6 +762,8 @@ pub struct Track {
     last_output: Instant,
     /// Set when the status changes into Needs you, until taken.
     began_needing_you: bool,
+    /// When it last changed into Needs you.
+    needs_you_since: Option<SystemTime>,
     /// How many bells this agent may still ring in a row, and when one was
     /// last given back.
     bells: u8,
@@ -778,6 +780,7 @@ impl Track {
             shown: source.at_start(),
             last_output: started,
             began_needing_you: false,
+            needs_you_since: None,
             bells: BELLS,
             bell_back_since: started,
             bells_held: 0,
@@ -812,6 +815,18 @@ impl Track {
 
     fn needs_you(&self) -> bool {
         matches!(self.shown, AgentStatus::NeedsYou(_)) || !self.waiting_parts().is_empty()
+    }
+
+    /// When the agent began to need the user, while it does: the arrival
+    /// of the report that changed it into Needs you. Reports that repeat
+    /// that it is waiting do not move it.
+    pub fn needs_you_since(&self) -> Option<SystemTime> {
+        self.needs_you_since.filter(|_| self.needs_you())
+    }
+
+    /// When the latest status report arrived, of any kind.
+    pub fn reported_at(&self) -> Option<SystemTime> {
+        self.trace().last.as_ref().map(|last| last.at)
     }
 
     /// Stop showing the parts that are waiting now, at the user's word.
@@ -909,6 +924,7 @@ impl Track {
         }
         if !was && self.needs_you() {
             self.began_needing_you = true;
+            self.needs_you_since = Some(now);
         }
     }
 

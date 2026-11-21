@@ -88,6 +88,60 @@ pub struct Terminal {
     parser: vt100::Parser<Replies>,
 }
 
+/// A colour of text or of what is behind it, as the agent asked for it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Tint {
+    /// The terminal's own.
+    #[default]
+    Default,
+    /// One of the 256 numbered colours.
+    Indexed(u8),
+    Rgb(u8, u8, u8),
+}
+
+impl From<vt100::Color> for Tint {
+    fn from(color: vt100::Color) -> Self {
+        match color {
+            vt100::Color::Default => Tint::Default,
+            vt100::Color::Idx(i) => Tint::Indexed(i),
+            vt100::Color::Rgb(r, g, b) => Tint::Rgb(r, g, b),
+        }
+    }
+}
+
+/// How a stretch of text is drawn.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Drawn {
+    pub fg: Tint,
+    pub bg: Tint,
+    pub bold: bool,
+    pub dim: bool,
+    pub italic: bool,
+    pub underline: bool,
+    pub inverse: bool,
+}
+
+/// Text on one row that is all drawn the same way.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Run {
+    pub text: String,
+    pub drawn: Drawn,
+}
+
+/// What a terminal is showing, as plain text and how it is drawn: nothing
+/// of the emulator, so it can be handed to another thread or written out.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ScreenCopy {
+    pub rows: u16,
+    pub cols: u16,
+    /// One for each row. Plain blank space at the end of a row is left out.
+    pub lines: Vec<Vec<Run>>,
+    /// Row and column of the cursor, when it is shown.
+    pub cursor: Option<(u16, u16)>,
+    /// The view is scrolled back: this is history, not the live screen.
+    pub scrolled_back: bool,
+}
+
 fn nz(n: u16) -> NonZeroU16 {
     // The emulator refuses a zero size, so a window squeezed to nothing is
     // treated as one cell.
@@ -154,11 +208,98 @@ impl Terminal {
     pub fn screen(&self) -> &vt100::Screen {
         self.parser.screen()
     }
+
+    /// What the terminal is showing now, as a plain copy.
+    pub fn copy_screen(&self) -> ScreenCopy {
+        let screen = self.parser.screen();
+        let (rows, cols) = screen.size();
+        let (rows, cols) = (rows.get(), cols.get());
+        let mut lines = Vec::with_capacity(rows as usize);
+        for row in 0..rows {
+            let mut runs: Vec<Run> = Vec::new();
+            for col in 0..cols {
+                let Some(cell) = screen.cell(row, col) else { continue };
+                // The second half of a double-width letter: already drawn.
+                if cell.is_wide_continuation() {
+                    continue;
+                }
+                let drawn = Drawn {
+                    fg: cell.fgcolor().into(),
+                    bg: cell.bgcolor().into(),
+                    bold: cell.bold(),
+                    dim: cell.dim(),
+                    italic: cell.italic(),
+                    underline: cell.underline(),
+                    inverse: cell.inverse(),
+                };
+                let text = if cell.has_contents() { cell.contents() } else { " " };
+                match runs.last_mut() {
+                    Some(run) if run.drawn == drawn => run.text.push_str(text),
+                    _ => runs.push(Run { text: text.to_string(), drawn }),
+                }
+            }
+            // Blank space at the end, drawn plainly, says nothing.
+            if let Some(last) = runs.last_mut().filter(|run| run.drawn == Drawn::default()) {
+                last.text.truncate(last.text.trim_end_matches(' ').len());
+                if last.text.is_empty() {
+                    runs.pop();
+                }
+            }
+            lines.push(runs);
+        }
+        let scrolled_back = screen.scrollback() > 0;
+        let cursor = (!screen.hide_cursor() && !scrolled_back).then(|| screen.cursor_position());
+        ScreenCopy { rows, cols, lines, cursor, scrolled_back }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn line_text(copy: &ScreenCopy, row: usize) -> String {
+        copy.lines[row].iter().map(|run| run.text.as_str()).collect()
+    }
+
+    #[test]
+    fn the_copy_of_a_screen_is_its_text_in_runs_drawn_the_same_way() {
+        let mut t = Terminal::new(4, 20);
+        let _ = t.feed("plain \x1b[1;31mred bold\x1b[m after\r\n日本 ok\r\n\x1b[44m  \x1b[m".as_bytes());
+        let copy = t.copy_screen();
+        assert_eq!((copy.rows, copy.cols, copy.lines.len()), (4, 20, 4));
+        assert_eq!(line_text(&copy, 0), "plain red bold after", "blank space at the end is left out");
+        let runs = &copy.lines[0];
+        assert_eq!(runs.len(), 3, "{runs:?}");
+        assert_eq!(runs[0].drawn, Drawn::default());
+        assert_eq!(runs[1].text, "red bold");
+        assert_eq!((runs[1].drawn.fg, runs[1].drawn.bold), (Tint::Indexed(1), true));
+        // A double-width letter is there once, not once for each column.
+        assert_eq!(line_text(&copy, 1), "日本 ok");
+        // Space that is drawn (a colour behind it) is kept.
+        assert_eq!(copy.lines[2].len(), 1);
+        assert_eq!((copy.lines[2][0].text.as_str(), copy.lines[2][0].drawn.bg), ("  ", Tint::Indexed(4)));
+        assert!(copy.lines[3].is_empty());
+        assert_eq!(copy.cursor, Some((2, 2)));
+        assert!(!copy.scrolled_back);
+    }
+
+    #[test]
+    fn the_copy_says_when_it_is_history_and_shows_no_cursor_then() {
+        let mut t = Terminal::new(2, 20);
+        for i in 1..=6 {
+            let _ = t.feed(format!("line {i}\r\n").as_bytes());
+        }
+        assert!(!t.copy_screen().scrolled_back);
+        t.scroll_to_oldest();
+        let copy = t.copy_screen();
+        assert!(copy.scrolled_back);
+        assert_eq!(copy.cursor, None);
+        assert_eq!(line_text(&copy, 0), "line 1");
+        // A hidden cursor is not shown either.
+        let mut t = Terminal::new(2, 20);
+        let _ = t.feed(b"\x1b[?25l");
+        assert_eq!(t.copy_screen().cursor, None);
+    }
 
     /// What a narrower size costs, written down so nobody has to guess:
     /// what is on screen beyond the new width is gone until the agent draws

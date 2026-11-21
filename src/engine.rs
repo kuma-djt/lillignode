@@ -10,19 +10,26 @@
 //! to need you, status or cost cannot be read, a cost warning was passed)
 //! have moved.
 
+use std::collections::VecDeque;
 use std::path::PathBuf;
+use std::time::SystemTime;
 
 use crate::agent::{AgentBackend, AgentEvent, Exit, Size, StartError};
 use crate::cost::{Cost, WhyNot};
 use crate::kind::AgentKind;
+use crate::snapshot::{AgentCopy, EventCopy, Published, StateCopy};
 use crate::state::{self, SavedWorkspace};
 use crate::status::{AgentStatus, Why};
 use crate::workspace::{AgentKey, Entry, Happened, NoPair, Pair, RestoreReport, Workspace};
 
-/// Something that happened, for a face to say in its own words. A face
-/// takes them in the order they happened (`Engine::take_events`). They are
-/// hints: whatever can be read from the engine at any time (a status, who
-/// needs you, a cost) is not an event.
+/// Something that happened, for a face to say in its own words. Events are
+/// numbered from 1 in the order they happened, and the last few hundred are
+/// kept (`EVENTS_KEPT`). The terminal face takes each once
+/// (`Engine::take_events`); any other reader asks for everything after the
+/// number it last saw (`Engine::events_after`) and is told how many it
+/// missed. They are hints: whatever can be read from the engine at any time
+/// (a status, who needs you, a cost) is not an event, and no rule depends
+/// on a reader having seen one.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Event {
     /// An agent's program ended.
@@ -55,6 +62,42 @@ pub enum Event {
     /// this many tokens. Once for a conversation. A warning only: nothing
     /// was stopped.
     PassedCostWarning { label: String, tokens: u64 },
+}
+
+/// How many of the latest events are kept for a reader that asks late.
+pub const EVENTS_KEPT: usize = 512;
+
+/// What a reader that asked for everything after a number is given.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EventsAfter {
+    /// How many events after that number are no longer kept. More than
+    /// none: the reader has missed them for good, and reads the state again.
+    pub missed: u64,
+    /// Those still kept, oldest first, each with its number.
+    pub events: Vec<(u64, Event)>,
+    /// The number of the last event that has happened. Less than the number
+    /// asked after: that number is not from this run.
+    pub last: u64,
+}
+
+impl Event {
+    /// The event said plainly, with its number: a fixed word for what
+    /// happened, and the agent it happened to, if to one.
+    pub fn plain(&self, number: u64) -> EventCopy {
+        let (what, agent, label) = match self {
+            Event::Exited { label, .. } => ("exited", None, Some(label)),
+            Event::StartedNewConversation { label } => ("started-new-conversation", None, Some(label)),
+            Event::CouldNotContinue { label, .. } => ("could-not-continue", None, Some(label)),
+            Event::SaveFailed { .. } => ("save-failed", None, None),
+            Event::SavedAgain => ("saved-again", None, None),
+            Event::BeganNeedingYou { agent, label } => ("began-needing-you", Some(*agent), Some(label)),
+            Event::StatusUnavailable { .. } => ("status-unavailable", None, None),
+            Event::StatusBack { .. } => ("status-back", None, None),
+            Event::CostUnreadable { label } => ("cost-unreadable", None, Some(label)),
+            Event::PassedCostWarning { label, .. } => ("passed-cost-warning", None, Some(label)),
+        };
+        EventCopy { number, what, agent, label: label.cloned() }
+    }
 }
 
 /// Names one question the engine asked. An answer carries it, so a "yes"
@@ -261,8 +304,15 @@ pub struct Engine<B: AgentBackend> {
     /// The folder the workspace is saved in. None: there is nowhere to
     /// save, and nothing is.
     save_in: Option<PathBuf>,
-    /// What has happened since a face last took them.
-    events: Vec<Event>,
+    /// The latest events, each with its number, oldest first. Never more
+    /// than `EVENTS_KEPT`.
+    events: VecDeque<(u64, Event)>,
+    /// The number of the last event. Only ever counts up.
+    happened: u64,
+    /// The number of the last event the terminal face took.
+    taken: u64,
+    /// Tells this run from any other, for a reader that outlives one.
+    run: u64,
     /// The kinds of agent whose status has been said not to reach
     /// Lillignode, and has not come back since.
     status_said: Vec<AgentKind>,
@@ -285,7 +335,12 @@ impl<B: AgentBackend> Engine<B> {
             held: None,
             room,
             save_in: None,
-            events: Vec::new(),
+            events: VecDeque::new(),
+            happened: 0,
+            taken: 0,
+            run: SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .map_or(0, |since| since.as_nanos() as u64),
             status_said: Vec::new(),
             cost_said: false,
             save_failing: false,
@@ -298,8 +353,9 @@ impl<B: AgentBackend> Engine<B> {
     /// unavailable is back; status is unavailable, for one kind of agent at
     /// a time; a cost could not be read; a cost warning was passed.
     pub fn settle(&mut self) {
+        let mut said = Vec::new();
         for (agent, label) in self.ws.take_began_needing_you_each() {
-            self.events.push(Event::BeganNeedingYou { agent, label });
+            said.push(Event::BeganNeedingYou { agent, label });
         }
         let broken = |e: &Entry| match e.reported() {
             Some(AgentStatus::Unknown(why)) if why.is_breakage() => Some(why),
@@ -312,7 +368,7 @@ impl<B: AgentBackend> Engine<B> {
             .into_iter()
             .partition(|kind| entries.iter().any(|e| e.kind() == *kind && broken(e).is_some()));
         self.status_said = still;
-        self.events.extend(back.into_iter().map(|kind| Event::StatusBack { kind }));
+        said.extend(back.into_iter().map(|kind| Event::StatusBack { kind }));
         // Said once for each kind of agent: one kind's reporting failing
         // says nothing about another's. Only of a kind expected to report.
         let unavailable = entries.iter().find_map(|e| {
@@ -323,7 +379,7 @@ impl<B: AgentBackend> Engine<B> {
         });
         if let Some((kind, why)) = unavailable {
             self.status_said.push(kind);
-            self.events.push(Event::StatusUnavailable { kind, why });
+            said.push(Event::StatusUnavailable { kind, why });
         }
         if !self.cost_said {
             // A cost Lillignode tried to read and could not. Pending, and an
@@ -336,11 +392,101 @@ impl<B: AgentBackend> Engine<B> {
             });
             if let Some(entry) = failed {
                 self.cost_said = true;
-                self.events.push(Event::CostUnreadable { label: entry.label() });
+                said.push(Event::CostUnreadable { label: entry.label() });
             }
         }
         for (label, tokens) in self.ws.take_passed_cost_warning() {
-            self.events.push(Event::PassedCostWarning { label, tokens });
+            said.push(Event::PassedCostWarning { label, tokens });
+        }
+        for event in said {
+            self.say(event);
+        }
+    }
+
+    /// Something happened: it gets the next number and is kept, and the
+    /// oldest kept is let go when there are too many.
+    fn say(&mut self, event: Event) {
+        self.happened += 1;
+        self.events.push_back((self.happened, event));
+        if self.events.len() > EVENTS_KEPT {
+            self.events.pop_front();
+        }
+    }
+
+    /// The number of the last event that has happened. None yet: 0.
+    pub fn last_event(&self) -> u64 {
+        self.happened
+    }
+
+    /// Every event after number `after` that is still kept, oldest first,
+    /// and how many after it are not. Takes nothing: asked again with the
+    /// same number, the answer is the same or longer.
+    pub fn events_after(&self, after: u64) -> EventsAfter {
+        let oldest_kept = self.events.front().map_or(self.happened + 1, |(number, _)| *number);
+        EventsAfter {
+            missed: oldest_kept.saturating_sub(after + 1),
+            events: self.events.iter().filter(|(number, _)| *number > after).cloned().collect(),
+            last: self.happened,
+        }
+    }
+
+    /// A plain copy of what the engine holds, as of `now`: every agent,
+    /// which is in front, which two are on screen, whether a question is
+    /// open, and cost. It carries the number of the last event, so a
+    /// reader can tell how far it has read.
+    pub fn copy(&self, now: SystemTime) -> StateCopy {
+        let entries = self.ws.entries();
+        let agents = entries
+            .iter()
+            .map(|e| AgentCopy {
+                key: e.key(),
+                name: e.name(),
+                folder: e.saved.folder.clone(),
+                folder_name: e.folder_name(),
+                label: e.label(),
+                kind: e.kind(),
+                program: e.status.clone(),
+                status: e.reported(),
+                needs_you: e.needs_you(),
+                needs_you_since: e.track.needs_you_since().filter(|_| e.is_running()),
+                reported_at: e.track.reported_at().filter(|_| e.is_running()),
+                cost: e.cost(),
+                over_cost_warning: self.ws.over_cost_warning(e),
+                start_again_cannot_help: e.start_again_cannot_help(),
+            })
+            .collect();
+        let key_at = |index: usize| entries.get(index).map(Entry::key);
+        let shown_two = self
+            .ws
+            .pair()
+            .filter(|_| self.two_shown())
+            .and_then(|pair| Some((key_at(pair.left)?, key_at(pair.right)?)));
+        StateCopy {
+            run: self.run,
+            as_of: self.happened,
+            taken_at: now,
+            agents,
+            front: self.ws.focused().map(Entry::key),
+            shown_two,
+            question: self.question.map(|q| match q.about {
+                About::Quit => "quit",
+                About::Close(_) => "close",
+                About::Paste(_) => "paste",
+                About::View { .. } => "view",
+            }),
+            cost_on: self.ws.cost_on(),
+            cost_summary: self.ws.cost_summary(),
+        }
+    }
+
+    /// Everything a reader on another thread is handed: the copy of state,
+    /// each agent's screen as text, and the events still kept.
+    pub fn published(&self, now: SystemTime) -> Published {
+        Published {
+            state: self.copy(now),
+            screens: self.ws.entries().iter().map(|e| (e.key(), e.term.copy_screen())).collect(),
+            events: self.events.iter().map(|(number, event)| event.plain(*number)).collect(),
+            events_let_go: self.happened - self.events.len() as u64,
         }
     }
 
@@ -374,16 +520,20 @@ impl<B: AgentBackend> Engine<B> {
         match self.save() {
             Err(why) => {
                 self.save_failing = true;
-                self.events.push(Event::SaveFailed { why });
+                self.say(Event::SaveFailed { why });
             }
-            Ok(()) if std::mem::take(&mut self.save_failing) => self.events.push(Event::SavedAgain),
+            Ok(()) if std::mem::take(&mut self.save_failing) => self.say(Event::SavedAgain),
             Ok(()) => {}
         }
     }
 
-    /// What has happened since the last call, oldest first.
+    /// What has happened since the last call, oldest first. For the one
+    /// face that words every event, once: the terminal. It takes them after
+    /// every batch of output and every tick, so it never falls behind what
+    /// is kept.
     pub fn take_events(&mut self) -> Vec<Event> {
-        std::mem::take(&mut self.events)
+        let after = std::mem::replace(&mut self.taken, self.happened);
+        self.events.iter().filter(|(number, _)| *number > after).map(|(_, event)| event.clone()).collect()
     }
 
     /// Reopen the agents of a saved workspace. Saved at once: restoring may
@@ -420,7 +570,7 @@ impl<B: AgentBackend> Engine<B> {
             }
             Happened::CouldNotContinue { label, why } => Event::CouldNotContinue { label, why },
         };
-        self.events.push(event);
+        self.say(event);
     }
 
     /// The face's measure of the room agents have. Agents are given the
@@ -704,6 +854,7 @@ mod tests {
     use crate::agent::{AgentEvent, AgentId, AgentSpec, Size, StartError};
     use crate::kind::AgentKind;
     use crate::status::Kind;
+    use std::time::SystemTime;
 
     /// Starts anything, and keeps the ids it was asked to stop and what was
     /// sent to each.
@@ -1239,6 +1390,184 @@ mod tests {
         e.answer(q.id, true).unwrap();
         e.settle();
         assert_eq!(e.take_events(), [Event::StatusBack { kind: AgentKind::Codex }]);
+    }
+
+    fn at(seconds: u64) -> SystemTime {
+        SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(seconds)
+    }
+
+    /// A report that arrives at a time the test names.
+    fn report_at(e: &mut Engine<Fake>, n: usize, body: &str, when: SystemTime) {
+        let key = key(e, n);
+        let index = e.ws.index_of(key).unwrap();
+        e.ws.entry_mut_for_test(index).track.received(body.as_bytes(), when);
+    }
+
+    #[test]
+    fn the_copy_says_what_each_agent_is_doing_and_when_it_last_said_so() {
+        let mut e = engine(&[]);
+        for name in ["a", "b", "c"] {
+            e.start_new(name, Vec::new(), AgentKind::Program, std::env::temp_dir().join("work")).unwrap();
+        }
+        report_at(&mut e, 0, "state=working", at(100));
+        report_at(&mut e, 1, "state=blocked:kind=permission", at(110));
+        let copy = e.copy(at(130));
+        assert_eq!(copy.taken_at, at(130));
+        assert_eq!(copy.agents.len(), 3);
+        let [a, b, c] = [&copy.agents[0], &copy.agents[1], &copy.agents[2]];
+        assert_eq!((a.key, a.name.as_str(), a.folder_name.as_str()), (key(&e, 0), "a", "work"));
+        assert_eq!(a.label, e.ws.entries()[0].label());
+        assert_eq!(a.kind, AgentKind::Program);
+        assert!(a.is_running());
+        // Working, and the report that said so arrived at 100: a reader
+        // can say how long ago.
+        assert_eq!(a.status, Some(AgentStatus::Working));
+        assert_eq!((a.reported_at, a.needs_you, a.needs_you_since), (Some(at(100)), None, None));
+        // Needs you, since 110.
+        assert_eq!(b.needs_you, Some(Some(Kind::Permission)));
+        assert_eq!((b.reported_at, b.needs_you_since), (Some(at(110)), Some(at(110))));
+        // Not known carries its reason, and no time: nothing was reported.
+        assert_eq!(c.status, Some(AgentStatus::Unknown(Why::NothingSent)));
+        assert_eq!((c.reported_at, c.needs_you_since), (None, None));
+        assert_eq!(copy.front, Some(key(&e, 2)), "the last started is in front");
+        assert_eq!(copy.front_index(), Some(2));
+
+        // It says it is still waiting: when it last reported moves; when it
+        // began to need you does not.
+        report_at(&mut e, 1, "state=blocked:kind=permission", at(200));
+        let b = e.copy(at(201)).agents[1].clone();
+        assert_eq!((b.reported_at, b.needs_you_since), (Some(at(200)), Some(at(110))));
+        // It goes back to work and waits again: a new wait, timed anew.
+        report_at(&mut e, 1, "state=working", at(300));
+        assert_eq!(e.copy(at(301)).agents[1].needs_you_since, None);
+        report_at(&mut e, 1, "state=blocked", at(400));
+        let b = e.copy(at(401)).agents[1].clone();
+        assert_eq!((b.needs_you, b.needs_you_since), (Some(None), Some(at(400))));
+
+        // Its program ends: how it ended, and nothing reported.
+        e.handle(AgentEvent::Exited(AgentId(2), crate::agent::Exit { code: 3 }));
+        let b = e.copy(at(500)).agents[1].clone();
+        assert_eq!(b.program, crate::workspace::Status::Exited(crate::agent::Exit { code: 3 }));
+        assert!(!b.is_running());
+        assert_eq!((b.status, b.needs_you, b.needs_you_since, b.reported_at), (None, None, None, None));
+    }
+
+    #[test]
+    fn a_waiting_part_times_the_wait_from_when_the_agent_began_to_need_you() {
+        let mut e = engine(&["state=working"]);
+        report_at(&mut e, 0, "state=blocked:id=helper", at(50));
+        report_at(&mut e, 0, "state=working", at(60));
+        let a = e.copy(at(70)).agents[0].clone();
+        assert_eq!(a.needs_you, Some(None), "its part is waiting");
+        assert_eq!(a.needs_you_since, Some(at(50)));
+        assert_eq!(a.reported_at, Some(at(60)));
+    }
+
+    #[test]
+    fn the_copy_says_which_two_are_on_screen_only_while_they_are() {
+        let mut e = engine(&["state=idle", "state=idle"]);
+        assert_eq!(e.copy(at(1)).shown_two, None);
+        e.set_room(WIDE);
+        let _ = e.show_two();
+        let (a, b) = (key(&e, 0), key(&e, 1));
+        assert_eq!(e.copy(at(1)).shown_two, Some((b, a)), "left, then right");
+        // Asked for and no longer fitting: not on screen, so not said.
+        e.set_room(NARROW);
+        assert_eq!(e.copy(at(1)).shown_two, None);
+        e.set_room(WIDE);
+        assert_eq!(e.copy(at(1)).shown_two, Some((b, a)));
+        // An open question is said, in a word.
+        assert_eq!(e.copy(at(1)).question, None);
+        let _ = e.close(a);
+        assert_eq!(e.copy(at(1)).question, Some("close"));
+    }
+
+    #[test]
+    fn the_copy_is_the_same_until_something_changes_and_names_its_run() {
+        let mut e = engine(&["state=idle"]);
+        let first = e.copy(at(9));
+        assert_eq!(first, e.copy(at(9)));
+        assert_eq!(first.as_of, 0);
+        // A second engine is another run.
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        assert_ne!(engine(&[]).copy(at(9)).run, first.run);
+        report(&mut e, 1, "state=blocked");
+        e.settle();
+        let then = e.copy(at(9));
+        assert_ne!(first, then);
+        assert_eq!(then.as_of, 1, "it carries the number of the last event");
+    }
+
+    #[test]
+    fn events_are_numbered_and_a_reader_gets_everything_after_the_number_it_names() {
+        let mut e = engine(&["state=idle", "state=idle"]);
+        assert_eq!(e.last_event(), 0);
+        assert_eq!(e.events_after(0), EventsAfter { missed: 0, events: vec![], last: 0 });
+        e.handle(AgentEvent::Exited(AgentId(1), crate::agent::Exit { code: 0 }));
+        e.handle(AgentEvent::Exited(AgentId(2), crate::agent::Exit { code: 1 }));
+        assert_eq!(e.last_event(), 2);
+        let all = e.events_after(0);
+        assert_eq!((all.missed, all.last), (0, 2));
+        let numbers: Vec<u64> = all.events.iter().map(|(number, _)| *number).collect();
+        assert_eq!(numbers, [1, 2], "numbered from 1, oldest first");
+        assert!(matches!(&all.events[1].1, Event::Exited { exit, .. } if exit.code == 1));
+        // Asking takes nothing: asked again, the same answer.
+        assert_eq!(e.events_after(0), all);
+        assert_eq!(e.events_after(1).events.len(), 1);
+        assert!(e.events_after(2).events.is_empty());
+        // A number from some other run: nothing, and `last` shows it.
+        let other = e.events_after(40);
+        assert_eq!((other.missed, other.events.len(), other.last), (0, 0, 2));
+        // The terminal face takes each once, and that takes nothing from
+        // any other reader.
+        assert_eq!(e.take_events().len(), 2);
+        assert!(e.take_events().is_empty());
+        assert_eq!(e.events_after(0).events.len(), 2);
+        // Said plainly for a reader on another thread.
+        let published = e.published(at(5));
+        assert_eq!(published.state.as_of, 2);
+        assert_eq!(published.events_let_go, 0);
+        let plain: Vec<(u64, &str)> = published.events.iter().map(|ev| (ev.number, ev.what)).collect();
+        assert_eq!(plain, [(1, "exited"), (2, "exited")]);
+        assert_eq!(published.events[0].label.as_deref(), Some(e.ws.entries()[0].label().as_str()));
+        assert_eq!(published.screens.len(), 2, "a screen for each agent");
+        assert_eq!(published.screens[0].0, key(&e, 0));
+    }
+
+    #[test]
+    fn only_the_latest_events_are_kept_and_a_late_reader_is_told_how_many_it_missed() {
+        let mut e = engine(&["state=idle"]);
+        let a = key(&e, 0);
+        // Each round: it stops, and is started again.
+        let rounds = EVENTS_KEPT as u64 + 10;
+        for round in 0..rounds {
+            e.handle(AgentEvent::Exited(AgentId(round as u32 + 1), crate::agent::Exit { code: 0 }));
+            assert_eq!(e.start_again(a), Ok(false));
+        }
+        assert_eq!(e.last_event(), rounds);
+        let all = e.events_after(0);
+        assert_eq!(all.events.len(), EVENTS_KEPT);
+        assert_eq!(all.missed, 10, "ten are gone for good");
+        assert_eq!(all.events[0].0, 11, "the oldest kept");
+        assert_eq!(all.events.last().unwrap().0, rounds);
+        // A reader that was only a little behind missed nothing.
+        let near = e.events_after(rounds - 3);
+        assert_eq!((near.missed, near.events.len()), (0, 3));
+        // One that had read up to 4 missed 5 to 10.
+        assert_eq!(e.events_after(4).missed, 6);
+        assert_eq!(e.published(at(1)).events_let_go, 10);
+        // The terminal face, which takes after every batch, gets what is kept.
+        assert_eq!(e.take_events().len(), EVENTS_KEPT);
+    }
+
+    #[test]
+    fn beginning_to_need_you_is_an_event_that_names_the_agent_for_any_reader() {
+        let mut e = engine(&["state=idle", "state=idle"]);
+        report(&mut e, 2, "state=blocked:kind=question");
+        e.settle();
+        let plain = e.published(at(1)).events;
+        assert_eq!(plain.len(), 1);
+        assert_eq!((plain[0].what, plain[0].agent), ("began-needing-you", Some(key(&e, 1))));
     }
 
     const ONE: Size = Size { rows: 30, cols: 120 };

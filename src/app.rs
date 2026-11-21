@@ -1775,11 +1775,14 @@ impl<B: AgentBackend> App<B> {
     /// Pending and unknown are said as such, never shown as a number. A
     /// conversation past the user's warning says PAST WARNING before its figure.
     pub fn cost_short(&self, entry: &Entry) -> String {
-        match entry.cost() {
-            Cost::Known(usage) if self.engine.ws.over_cost_warning(entry).is_some() => {
-                format!("PAST WARNING {}", self.figure(&usage))
-            }
-            Cost::Known(usage) => self.figure(&usage),
+        self.cost_words(&entry.cost(), self.engine.ws.over_cost_warning(entry).is_some())
+    }
+
+    /// The same, from a cost and whether it is past the user's warning.
+    pub fn cost_words(&self, cost: &Cost, past_warning: bool) -> String {
+        match cost {
+            Cost::Known(usage) if past_warning => format!("PAST WARNING {}", self.figure(usage)),
+            Cost::Known(usage) => self.figure(usage),
             Cost::Pending(_) => "cost pending".to_string(),
             Cost::Unknown(_) => "cost unknown".to_string(),
         }
