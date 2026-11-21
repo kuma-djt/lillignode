@@ -25,7 +25,7 @@ const ENGINE: &[&str] = &[
 ];
 
 /// Draws, reads keys, and words what the engine decided.
-const FACE: &[&str] = &["app", "input", "keys", "look", "main", "ui", "view"];
+const FACE: &[&str] = &["app", "fit", "input", "keys", "look", "main", "ui", "view"];
 
 /// Declares the modules and nothing else.
 const ROOT: &str = "lib";

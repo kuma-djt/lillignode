@@ -35,10 +35,13 @@ pub enum Event {
     /// The workspace could not be saved after a change. What was saved
     /// before is left as it was; nothing in memory is lost.
     SaveFailed { why: String },
-    /// An agent has just begun to need the user: the edge a bell rings on.
-    /// Whether to ring is the face's setting. Who needs you now is read
+    /// The workspace was saved after a change, and the save before it had
+    /// failed: what was said then is no longer true.
+    SavedAgain,
+    /// This agent has just begun to need the user: the edge a bell rings
+    /// on. Whether to ring is the face's setting. Who needs you now is read
     /// from the agents, not from this.
-    BeganNeedingYou,
+    BeganNeedingYou { agent: AgentKey, label: String },
     /// The status of an agent of this kind, which is expected to report it,
     /// is not reaching Lillignode. Once for each kind, until it is back.
     StatusUnavailable { kind: AgentKind, why: Why },
@@ -265,6 +268,8 @@ pub struct Engine<B: AgentBackend> {
     status_said: Vec<AgentKind>,
     /// A cost that could not be read has been said in this run.
     cost_said: bool,
+    /// The last save after a change failed.
+    save_failing: bool,
 }
 
 impl<B: AgentBackend> Engine<B> {
@@ -283,6 +288,7 @@ impl<B: AgentBackend> Engine<B> {
             events: Vec::new(),
             status_said: Vec::new(),
             cost_said: false,
+            save_failing: false,
         }
     }
 
@@ -292,8 +298,8 @@ impl<B: AgentBackend> Engine<B> {
     /// unavailable is back; status is unavailable, for one kind of agent at
     /// a time; a cost could not be read; a cost warning was passed.
     pub fn settle(&mut self) {
-        if self.ws.take_began_needing_you() {
-            self.events.push(Event::BeganNeedingYou);
+        for (agent, label) in self.ws.take_began_needing_you_each() {
+            self.events.push(Event::BeganNeedingYou { agent, label });
         }
         let broken = |e: &Entry| match e.reported() {
             Some(AgentStatus::Unknown(why)) if why.is_breakage() => Some(why),
@@ -365,8 +371,13 @@ impl<B: AgentBackend> Engine<B> {
     /// Save after a change to what is saved. A failure is an event, each
     /// time; the engine carries on.
     fn changed(&mut self) {
-        if let Err(why) = self.save() {
-            self.events.push(Event::SaveFailed { why });
+        match self.save() {
+            Err(why) => {
+                self.save_failing = true;
+                self.events.push(Event::SaveFailed { why });
+            }
+            Ok(()) if std::mem::take(&mut self.save_failing) => self.events.push(Event::SavedAgain),
+            Ok(()) => {}
         }
     }
 
@@ -1136,6 +1147,13 @@ mod tests {
         // Started again: saved again, and it fails again.
         assert_eq!(e.start_again(key(&e, 1)), Ok(false));
         assert!(matches!(e.take_events().as_slice(), [Event::SaveFailed { .. }]));
+
+        // Once a save works, that is said, once: what was said is no longer true.
+        e.save_in(dir.join("folder"));
+        e.start_new("c", Vec::new(), AgentKind::Program, std::env::temp_dir()).unwrap();
+        assert_eq!(e.take_events(), [Event::SavedAgain]);
+        e.start_new("d", Vec::new(), AgentKind::Program, std::env::temp_dir()).unwrap();
+        assert!(e.take_events().is_empty(), "only after a failure");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1169,13 +1187,14 @@ mod tests {
         assert!(e.take_events().is_empty());
         report(&mut e, 1, "state=blocked:kind=permission");
         e.settle();
-        assert_eq!(e.take_events(), [Event::BeganNeedingYou]);
+        let began = Event::BeganNeedingYou { agent: key(&e, 0), label: e.ws.entries()[0].label() };
+        assert_eq!(e.take_events(), std::slice::from_ref(&began), "it names the agent");
         e.settle();
         assert!(e.take_events().is_empty(), "still waiting: not said again");
         report(&mut e, 1, "state=working");
         report(&mut e, 1, "state=blocked");
         e.settle();
-        assert_eq!(e.take_events(), [Event::BeganNeedingYou], "it began again");
+        assert_eq!(e.take_events(), [began], "it began again");
     }
 
     #[test]

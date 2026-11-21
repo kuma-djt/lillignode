@@ -934,7 +934,10 @@ fn start_options(sb: &Sandbox, standin: &Path) {
     s.keys(b"n");
     s.keys(b"\r--resume x\r\r");
     s.expect("are refused before anything starts", "Cannot start it as typed. n: change it, k: another kind");
-    s.expect("with what to do first", "Esc: cancel   Take out --resume: Lillignode gives Claude Code");
+    s.expect(
+        "with what to do first",
+        "Esc: cancel   Take out --resume: Lillignode sets the conversation itself.",
+    );
     s.keys(b"y");
     s.keys(ESC);
     s.expect("Esc leaves it", "Cancelled. Nothing was started.");

@@ -27,6 +27,7 @@ use ratatui::Frame;
 use crate::agent::{AgentBackend, Size};
 use crate::app::{App, BarPart, Mode};
 use crate::cost::Cost;
+use crate::fit;
 use crate::look::{self, Palette, Tone};
 use crate::status::AgentStatus;
 use crate::view;
@@ -123,16 +124,10 @@ pub fn agent_size(window: Rect, two: bool) -> Size {
     }
 }
 
+/// `text` in at most `width` columns, the cut marked. Counted in columns:
+/// a double-width letter takes two.
 fn clip(text: &str, width: usize) -> String {
-    if text.chars().count() <= width {
-        text.to_string()
-    } else {
-        let mut s: String = text.chars().take(width.saturating_sub(1)).collect();
-        if width > 0 {
-            s.push('…');
-        }
-        s
-    }
+    fit::clip(text, width)
 }
 
 /// The words for an agent's status on the second line of its row: the
@@ -166,14 +161,14 @@ fn agent_rows(entry: &Entry, focused: bool, width: usize, clock: u64, p: Palette
     // of it is always kept; the status has the rest of the line.
     let room = width.saturating_sub(DETAIL_AT);
     let folder = entry.folder_name();
-    let kept = folder.chars().count().min(FOLDER_KEPT);
+    let kept = fit::width(&folder).min(FOLDER_KEPT);
     let status = clip(&status_words(entry), room.saturating_sub(kept + 2));
-    let folder = clip(&folder, room.saturating_sub(status.chars().count() + 2));
+    let folder = clip(&folder, room.saturating_sub(fit::width(&status) + 2));
     let indent = " ".repeat(DETAIL_AT);
     let second = if tone == Tone::NeedsYou {
         // A solid block across the sidebar, the only row ever drawn so.
         let text = format!("{indent}{folder}  {status}");
-        Line::from(Span::styled(format!("{:<width$}", clip(&text, width)), p.needs_you_block()))
+        Line::from(Span::styled(fit::pad(&clip(&text, width), width), p.needs_you_block()))
     } else {
         // Colour is never the only signal: the sign and the word say it too.
         Line::from(vec![
@@ -198,7 +193,7 @@ fn more_rows(hidden: &[Entry], where_: &str, width: usize, p: Palette) -> Vec<Li
         [one] => format!("{}{} NEEDS YOU", " ".repeat(DETAIL_AT), one.label()),
         many => format!("{}{} of them NEED YOU", " ".repeat(DETAIL_AT), many.len()),
     };
-    rows.push(Line::from(Span::styled(format!("{:<width$}", clip(&who, width)), p.needs_you_block())));
+    rows.push(Line::from(Span::styled(fit::pad(&clip(&who, width), width), p.needs_you_block())));
     rows
 }
 
@@ -304,9 +299,9 @@ fn draw_sidebar<B: AgentBackend>(frame: &mut Frame, area: Rect, app: &App<B>, p:
     // With no room for it there, a dim row says where it is: the status
     // report has it.
     let total: Vec<Line> = if total_fits {
-        total.iter().map(|text| Line::from(format!("{:<row$}", clip(text, row)))).collect()
+        total.iter().map(|text| Line::from(fit::pad(&clip(text, row), row))).collect()
     } else if pointer && room > 0 {
-        vec![Line::from(Span::styled(format!("{:<row$}", clip(TOTAL_POINTER, row)), p.dim()))]
+        vec![Line::from(Span::styled(fit::pad(&clip(TOTAL_POINTER, row), row), p.dim()))]
     } else {
         Vec::new()
     };
@@ -478,7 +473,7 @@ fn pane_head(entry: &Entry, front: bool, keys_go_to_agents: bool, width: usize, 
         (false, false) => (" - not typing here", p.dim()),
     };
     let text = format!("{text}  {label}");
-    Line::from(Span::styled(format!("{:<width$}", clip(&text, width)), style))
+    Line::from(Span::styled(fit::pad(&clip(&text, width), width), style))
 }
 
 /// The two agents side by side, if the user asked for two and the window
@@ -574,14 +569,16 @@ fn notice_lines(
             lines.truncate(rows);
             return Some(Wrapped { yellow: waiting.chars().count(), chars, lines });
         }
-        let over: usize = lines[rows..].iter().map(|(s, e)| e - s + 1).sum();
+        let cols = |&(s, e): &(usize, usize)| chars[s..e].iter().map(|c| fit::char_width(*c)).sum::<usize>();
+        let over: usize = lines[rows..].iter().map(|line| cols(line) + 1).sum();
         room = room.saturating_sub(over.max(1));
     }
 }
 
-/// Lines of at most `width` characters, broken at spaces, as ranges of
+/// Lines of at most `width` columns, broken at spaces, as ranges of
 /// `chars`. The spaces at a break are dropped. Only a word longer than a
-/// whole line is broken inside itself.
+/// whole line is broken inside itself. A double-width letter counts as two
+/// columns.
 pub(crate) fn wrap_at_spaces(chars: &[char], width: usize) -> Vec<(usize, usize)> {
     let width = width.max(1);
     let mut lines = Vec::new();
@@ -595,12 +592,18 @@ pub(crate) fn wrap_at_spaces(chars: &[char], width: usize) -> Vec<(usize, usize)
                 break;
             }
         }
-        if chars.len() - start <= width {
+        // `limit` is the first character that does not fit on this line.
+        let mut used = 0;
+        let fitting = chars[start..].iter().take_while(|c| {
+            used += fit::char_width(**c);
+            used <= width
+        });
+        // A letter wider than the whole line is still shown, alone.
+        let limit = start + fitting.count().max(1);
+        if limit >= chars.len() {
             lines.push((start, chars.len()));
             break;
         }
-        // `limit` is the first character that does not fit on this line.
-        let limit = start + width;
         match (start + 1..=limit).rev().find(|&i| chars[i] == ' ') {
             Some(space) => {
                 let mut end = space;
@@ -629,7 +632,7 @@ fn bar_line(parts: &[(BarPart, String)], width: usize, p: Palette) -> Line<'stat
             break;
         }
         let shown = clip(text, left);
-        left -= shown.chars().count();
+        left -= fit::width(&shown);
         let style = match part {
             BarPart::Mode => p.mode(),
             BarPart::Key => p.key(),
@@ -675,8 +678,8 @@ pub fn draw<B: AgentBackend>(frame: &mut Frame, app: &App<B>) {
     let skip = cursor.map_or(0, |c| (c + 1).saturating_sub(width));
     if matches!(app.mode, Mode::NewAgent(_) | Mode::Confirm(_)) {
         // Lillignode is waiting for the user: make that hard to miss.
-        let bar = clip(&app.bar().chars().skip(skip).collect::<String>(), width);
-        frame.render_widget(Paragraph::new(format!("{bar:<width$}")).style(p.question()), a.bar);
+        let bar = clip(fit::skip(&app.bar(), skip), width);
+        frame.render_widget(Paragraph::new(fit::pad(&bar, width)).style(p.question()), a.bar);
     } else {
         frame.render_widget(Paragraph::new(bar_line(&app.bar_parts(), width, p)).style(p.panel()), a.bar);
     }
@@ -761,7 +764,7 @@ mod tests {
                     too narrow for two agents side by side. Nothing was changed.";
         for width in 1..60 {
             for line in wrapped(text, width) {
-                assert!(line.chars().count() <= width, "{width}: {line:?}");
+                assert!(fit::width(&line) <= width, "{width}: {line:?}");
             }
         }
     }

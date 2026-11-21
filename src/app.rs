@@ -18,6 +18,7 @@ use crate::engine::{
     About, Answered, Engine, Event, Outcome, PasteOutcome, QuestionId, Refused, Room, RoomChange, Sent,
     SentAs, Unfinished, ViewOutcome, Viewed,
 };
+use crate::fit;
 use crate::input::Pasted;
 use crate::keys;
 use crate::kind::AgentKind;
@@ -224,6 +225,10 @@ pub struct App<B: AgentBackend> {
     /// before any other notice and never cut before the fix; it goes at the
     /// next menu action, and is said again when Lillignode closes.
     settings_problem: Option<String>,
+    /// The workspace could not be saved after a change. Shown before any
+    /// other notice, and nothing that happens later replaces it: it goes at
+    /// the next menu action, or when a save works again.
+    save_problem: Option<String>,
     /// Problems found on starting, repeated on the way out so they remain in
     /// the terminal after Lillignode closes.
     pub start_problems: Vec<String>,
@@ -451,6 +456,7 @@ impl<B: AgentBackend> App<B> {
             notice,
             refused: None,
             settings_problem: config_problem,
+            save_problem: None,
             start_problems,
             too_small: false,
             colors: Depth::Full,
@@ -489,7 +495,7 @@ impl<B: AgentBackend> App<B> {
             // What happened to an agent or to the saved workspace replaces
             // the notice. What is said once in a run goes before it.
             let text = match event {
-                Event::BeganNeedingYou => {
+                Event::BeganNeedingYou { .. } => {
                     began = true;
                     continue;
                 }
@@ -527,7 +533,18 @@ impl<B: AgentBackend> App<B> {
                     ));
                     continue;
                 }
-                Event::SaveFailed { why } => save_failed(&why),
+                // Goes first and stays: what happens next (an agent that
+                // could not continue, in the same instant) is said after it
+                // and does not replace it.
+                Event::SaveFailed { why } => {
+                    self.save_problem = Some(save_failed(&why));
+                    continue;
+                }
+                // No longer true, so no longer said.
+                Event::SavedAgain => {
+                    self.save_problem = None;
+                    continue;
+                }
                 Event::Exited { label, exit } if exit.clean() => format!("{label} exited. {still_here}"),
                 Event::Exited { label, exit } => {
                     // Started as a kind its name does not suggest, it may
@@ -754,6 +771,9 @@ impl<B: AgentBackend> App<B> {
         }
         // The settings problem has been seen; it is said again on the way out.
         self.settings_problem = None;
+        // So has a workspace that could not be saved. If it still cannot be
+        // saved, that is said at the next change, and on the way out.
+        self.save_problem = None;
         if let Some(refused) = self.refused.take() {
             if self.notice.as_ref() == Some(&refused) {
                 self.notice = None;
@@ -1465,8 +1485,11 @@ impl<B: AgentBackend> App<B> {
     /// does not fit, what is given up, in this order: the words saying the
     /// agents come back (the line printed on closing says so again), then
     /// the names of agents that do not need you, counted instead (the
-    /// first is kept when none needs you). That a
-    /// Codex agent starts a new conversation is kept: it is what is lost.
+    /// first is kept when none needs you), then that an agent starts a new
+    /// conversation next time, then everything but who needs you, by name
+    /// alone, and last that too, leaving the question and its keys. A
+    /// sentence is given up whole: the question is never cut in the middle
+    /// of one.
     fn quit_question(&self) -> String {
         let running = self.engine.ws.running_labels().len();
         // Every agent but Claude Code begins afresh, so what it was doing
@@ -1484,22 +1507,26 @@ impl<B: AgentBackend> App<B> {
         let need = listed.iter().filter(|u| u.needs_you).count();
         let unfinished: Vec<String> = listed.iter().map(named).collect();
         let kept = if need == 0 { unfinished.len().min(1) } else { need };
-        let head = format!(
-            "Quit and stop {}? y / n   Not finished or not known: ",
-            plural(running, "running agent", "running agents")
-        );
+        let question = format!("Quit and stop {}? y / n", plural(running, "running agent", "running agents"));
+        let head = format!("{question}   Not finished or not known: ");
         let all = unfinished.join(", ");
         let first = match unfinished.len() - kept {
             0 => all.clone(),
             more => format!("{} and {more} more", unfinished[..kept].join(", ")),
         };
         let back = if running == 1 { "It comes back" } else { "They come back" };
-        let tries = [
+        let waiting: Vec<&str> = listed.iter().filter(|u| u.needs_you).map(|u| u.label.as_str()).collect();
+        let mut tries = vec![
             format!("{head}{all}. {back} next time you start Lillignode.{fresh}"),
             format!("{head}{all}. {back} next time.{fresh}"),
             format!("{head}{all}.{fresh}"),
             format!("{head}{first}.{fresh}"),
+            format!("{head}{first}."),
         ];
+        if !waiting.is_empty() {
+            tries.push(format!("{question}   Needs you: {}.", waiting.join(", ")));
+        }
+        tries.push(question);
         self.fitted(&tries)
     }
 
@@ -1511,7 +1538,7 @@ impl<B: AgentBackend> App<B> {
             0 => usize::MAX,
             width => width as usize,
         };
-        tries.iter().find(|t| t.chars().count() <= room).or(tries.last()).cloned().unwrap_or_default()
+        tries.iter().find(|t| fit::width(t) <= room).or(tries.last()).cloned().unwrap_or_default()
     }
 
     /// Call after each batch of events and ticks. The engine says what has
@@ -1671,7 +1698,8 @@ impl<B: AgentBackend> App<B> {
     /// sentence about who needs you, then the latest notice. Either may be
     /// empty. None when there is nothing to say.
     pub fn notice_parts(&self, room: usize) -> Option<(String, String)> {
-        let notice = match (&self.settings_problem, &self.notice) {
+        let standing = self.standing();
+        let notice = match (&standing, &self.notice) {
             (Some(settings), Some(notice)) => Some(format!("{settings}  {notice}")),
             (settings, notice) => settings.clone().or_else(|| notice.clone()),
         };
@@ -1680,7 +1708,7 @@ impl<B: AgentBackend> App<B> {
             (Some(waiting), None) => return Some((keep_end(&waiting, room), String::new())),
             (None, notice) => return notice.map(|_| (String::new(), self.notice_fit(room))),
         };
-        let count = |s: &str| s.chars().count();
+        let count = fit::width;
         if count(&waiting) + 2 + count(&notice) <= room {
             return Some((waiting, notice));
         }
@@ -1688,11 +1716,21 @@ impl<B: AgentBackend> App<B> {
         // it is promised room for its last sentence, up to half the rows.
         let reserve = (count(last_sentence(&notice)) + 2).min(count(&notice)).min(room / 2);
         // A settings problem is never cut before its fix, its first sentence.
-        let fix = self.settings_problem.as_deref().map_or(0, |s| count(first_sentence(s)) + 2);
+        let fix = standing.as_deref().map_or(0, |s| count(first_sentence(s)) + 2);
         let reserve = reserve.max(fix).min(room);
         let waiting = keep_end(&waiting, room.saturating_sub(reserve + 2));
         let notice = self.notice_fit(room.saturating_sub(count(&waiting) + 2));
         Some((waiting, notice))
+    }
+
+    /// What stays before any other notice until the next menu action: what
+    /// is wrong with the settings file, then a workspace that could not be
+    /// saved.
+    fn standing(&self) -> Option<String> {
+        match (&self.settings_problem, &self.save_problem) {
+            (Some(settings), Some(save)) => Some(format!("{settings}  {save}")),
+            (settings, save) => settings.clone().or_else(|| save.clone()),
+        }
     }
 
     /// The notice, with any settings problem before it, in `room`
@@ -1700,8 +1738,9 @@ impl<B: AgentBackend> App<B> {
     /// The settings problem leads with its fix, so it keeps its start, and
     /// it is shortened only when nothing else is left to shorten.
     fn notice_fit(&self, room: usize) -> String {
-        let count = |s: &str| s.chars().count();
-        match (&self.settings_problem, &self.notice) {
+        let count = fit::width;
+        let standing = self.standing();
+        match (&standing, &self.notice) {
             (None, Some(notice)) => keep_end(notice, room),
             (None, None) => String::new(),
             (Some(settings), None) => cut_end(settings, room),
@@ -2096,7 +2135,7 @@ impl<B: AgentBackend> App<B> {
         out
     }
 
-    /// Where the typing cursor sits in the bar, counted in characters, while
+    /// Where the typing cursor sits in the bar, counted in columns, while
     /// the bar is asking for text.
     pub fn bar_cursor(&self) -> Option<usize> {
         match &self.mode {
@@ -2107,7 +2146,7 @@ impl<B: AgentBackend> App<B> {
                     Step::Folder => FOLDER_PROMPT.to_string(),
                     Step::Check => return None,
                 };
-                Some(prompt.chars().count() + form.input.chars().count())
+                Some(fit::width(&prompt) + fit::width(&form.input))
             }
             _ => None,
         }
@@ -2136,40 +2175,28 @@ fn last_sentence(text: &str) -> &str {
     text.rfind(". ").map_or(text, |at| text[at + 2..].trim_start())
 }
 
-/// `text` in at most `room` characters, cut at its end and the cut marked.
+/// `text` in at most `room` columns, cut at its end and the cut marked.
 /// For a message that leads with what to do.
 fn cut_end(text: &str, room: usize) -> String {
-    if text.chars().count() <= room {
-        return text.to_string();
-    }
-    let mut cut: String = text.chars().take(room.saturating_sub(1)).collect();
-    if room > 0 {
-        cut.push('…');
-    }
-    cut
+    fit::clip(text, room)
 }
 
-/// `text` in at most `room` characters. When it is too long its last
+/// `text` in at most `room` columns. When it is too long its last
 /// sentence is kept whole and the cut, marked with an ellipsis, is made
 /// before it. Only a last sentence that is itself longer than the room loses
 /// its end; then the start of the message is the most that can be shown.
 pub(crate) fn keep_end(text: &str, room: usize) -> String {
-    if text.chars().count() <= room {
+    if fit::width(text) <= room {
         return text.to_string();
     }
     let tail = last_sentence(text);
-    let tail_chars = tail.chars().count();
     // Two more for the ellipsis and the space that join the two halves.
-    let Some(head_chars) = room.checked_sub(tail_chars + 2) else {
-        let mut cut: String = text.chars().take(room.saturating_sub(1)).collect();
-        if room > 0 {
-            cut.push('…');
-        }
-        return cut;
+    let Some(head_cols) = room.checked_sub(fit::width(tail) + 2) else {
+        return fit::clip(text, room);
     };
-    let mut head: String = text.chars().take(head_chars).collect();
+    let mut head = fit::take(text, head_cols).to_string();
     // The cut falls between words, not inside one.
-    if text.chars().nth(head_chars).is_some_and(|c| c != ' ') {
+    if text[head.len()..].chars().next().is_some_and(|c| c != ' ') {
         if let Some(space) = head.rfind(' ') {
             head.truncate(space);
         }
@@ -2956,12 +2983,20 @@ Cost",
             "{whole}"
         );
         let mut seen = vec![whole.clone()];
-        for width in (80..=count(&whole) as u16).rev() {
+        for width in (30..=count(&whole) as u16).rev() {
             app.set_window(Rect::new(0, 0, width, 30));
             let bar = app.bar();
-            assert!(bar.starts_with("Quit and stop 2 running agents? y / n   Not finished or not known: "));
-            assert!(bar.ends_with(fresh), "{width}: {bar}");
-            if count(&bar) <= width as usize {
+            // The question and its keys come first at every width.
+            assert!(bar.starts_with("Quit and stop 2 running agents? y / n"), "{width}: {bar}");
+            // Never cut in the middle of a sentence: it ends with a whole
+            // sentence, or with the keys. In any window Lillignode draws
+            // in, it fits.
+            assert!(bar.ends_with('.') || bar.ends_with("y / n"), "{width}: {bar}");
+            assert!(!bar.contains('…'), "{width}: {bar}");
+            if width >= crate::ui::MIN_COLS {
+                assert!(count(&bar) <= width as usize, "{width}: {bar}");
+            }
+            if bar.ends_with(fresh) && count(&bar) <= width as usize {
                 // Whenever every name fits, every name is there.
                 let names = bar.contains(reason);
                 assert!(
@@ -2975,7 +3010,18 @@ Cost",
             }
         }
         // Each step gives up one thing, in this order.
-        assert_eq!(seen.len(), 4, "{seen:#?}");
+        assert_eq!(seen.len(), 7, "{seen:#?}");
+        // Then that an agent starts a new conversation, whole.
+        assert!(
+            seen[4].ends_with("or not known: Claude Code (a) (Needs you: permission) and 1 more."),
+            "{}",
+            seen[4]
+        );
+        // Then only who needs you, by name.
+        assert_eq!(seen[5], "Quit and stop 2 running agents? y / n   Needs you: Claude Code (a).");
+        assert!(count(&seen[5]) <= usize::from(crate::ui::MIN_COLS), "named in the narrowest window");
+        // Last, the question and its keys alone.
+        assert_eq!(seen[6], "Quit and stop 2 running agents? y / n");
         assert!(seen[1].contains(&format!("{reason} They come back next time.{fresh}")), "{}", seen[1]);
         assert!(seen[2].ends_with(&format!("{reason}{fresh}")), "{}", seen[2]);
         assert!(
@@ -3165,11 +3211,17 @@ Cost",
         // Narrow enough that only the shortest form fits, which is where
         // names are given up.
         let mut shortened = false;
-        for width in (60..=whole.chars().count() as u16).rev() {
+        for width in (crate::ui::MIN_COLS..=whole.chars().count() as u16).rev() {
             app.set_window(Rect::new(0, 0, width, 30));
             let bar = app.bar();
             assert!(bar.starts_with("Quit and stop 2 running agents? y / n"), "{width}: {bar}");
-            assert!(bar.contains(needs), "{width}: {bar}");
+            // Named in every window Lillignode draws in: with what it said
+            // while that fits, by name alone after.
+            assert!(
+                bar.contains(needs) || bar.ends_with("y / n   Needs you: Codex (web)."),
+                "{width}: {bar}"
+            );
+            assert!(bar.chars().count() <= width as usize, "{width}: {bar}");
             if bar.contains("and 1 more") {
                 shortened = true;
                 assert!(bar.contains(&format!("{needs} and 1 more.")), "{width}: {bar}");
@@ -3178,13 +3230,19 @@ Cost",
         }
         assert!(shortened, "the test never reached the shortened form");
 
-        // Both need you: both are named, in sidebar order, however narrow,
-        // and nothing is counted.
+        // Both need you: both are named, in sidebar order, and neither is
+        // counted away, while a whole sentence naming them fits.
         report(&mut app, 1, PERMISSION);
-        app.set_window(Rect::new(0, 0, 60, 30));
+        app.set_window(Rect::new(0, 0, 150, 30));
         let bar = app.bar();
-        assert!(bar.contains(&format!("Claude Code (a) (Needs you: permission), {needs}.")), "{bar}");
+        assert!(bar.ends_with(&format!("Claude Code (a) (Needs you: permission), {needs}.")), "{bar}");
         assert!(!bar.contains("more"), "{bar}");
+        app.set_window(Rect::new(0, 0, crate::ui::MIN_COLS, 30));
+        assert!(app.bar().ends_with("y / n   Needs you: Claude Code (a), Codex (web)."), "{}", app.bar());
+        // Narrower than any sentence naming both: the question and its
+        // keys, whole, and nothing cut.
+        app.set_window(Rect::new(0, 0, 79, 30));
+        assert_eq!(app.bar(), "Quit and stop 2 running agents? y / n");
     }
 
     /// Found in a check by hand: the screen said r would not help and the
@@ -4022,10 +4080,10 @@ Cost",
             None,
         );
         let failed = |app: &App<Fake>| {
-            let said = app.notice.clone().unwrap_or_default();
+            let said = app.notice_text().unwrap_or_default();
             assert!(said.starts_with("Could not save your workspace (could not create the folder"), "{said}");
             assert!(
-                said.ends_with(
+                said.contains(
                     "The last saved workspace is unchanged; changes since then will not be restored."
                 ),
                 "{said}"
@@ -4043,8 +4101,82 @@ Cost",
         assert!(app.engine.ws.entries().is_empty());
         failed(&app);
         // The same words on the way out, for the terminal.
-        assert_eq!(app.save().err(), app.notice);
+        assert_eq!(app.save().err(), app.save_problem);
         let _ = std::fs::remove_file(&not_a_folder);
+    }
+
+    /// Found by a review: an agent that could not continue its conversation
+    /// was given a new one, the workspace could not be saved with it, and
+    /// the sentence about the conversation replaced the one about the save
+    /// in the same instant. The save failure was never seen.
+    #[test]
+    fn a_save_failure_goes_first_and_stays_until_a_menu_key_or_a_save_that_works() {
+        use crate::state::{SavedAgent, SavedWorkspace};
+        let not_a_folder =
+            std::env::temp_dir().join(format!("lillignode-app-save-first-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&not_a_folder);
+        std::fs::write(&not_a_folder, "x").unwrap();
+        let mut app = App::launch(
+            Fake::default(),
+            Size { rows: 30, cols: 120 },
+            Ok(not_a_folder.clone()),
+            std::env::temp_dir(),
+            Config::default(),
+            None,
+        );
+        let claude = SavedAgent {
+            name: "Claude Code".into(),
+            command: "claude".into(),
+            kind: Some("claude-code".into()),
+            args: vec![],
+            folder: std::env::temp_dir(),
+            conversation: Some("11111111-2222-4333-8444-555555555555".into()),
+            other: Default::default(),
+        };
+        let _ = app.engine.restore(SavedWorkspace { agents: vec![claude], ..Default::default() });
+        app.after_events();
+        app.on_key(press(KeyCode::F(12)));
+        app.on_key(press(KeyCode::Esc));
+        assert_eq!(app.save_problem, None, "a menu key: it has been seen");
+
+        // It cannot continue, starts a new conversation, and that cannot be
+        // saved: both are said, the save first.
+        let id = app.engine.ws.entries().len() as u32;
+        app.on_agent_event(AgentEvent::Exited(AgentId(id), crate::agent::Exit { code: 1 }));
+        let said = app.notice_text().unwrap();
+        let save = "Could not save your workspace (";
+        let conversation = "could not continue its earlier conversation";
+        assert!(said.starts_with(save), "{said}");
+        assert!(said.contains(conversation), "{said}");
+        assert!(said.find(save) < said.find(conversation), "{said}");
+
+        // Whatever is said next, it stays, and stays first.
+        app.notice = Some("Something else happened.".into());
+        let said = app.notice_text().unwrap();
+        assert!(said.starts_with(save) && said.ends_with("Something else happened."), "{said}");
+        // In two rows of the narrowest window its start is kept: what could
+        // not be done.
+        let narrow = app.notice_fitted(2 * usize::from(crate::ui::MIN_COLS)).unwrap();
+        assert!(narrow.starts_with(save), "{narrow}");
+
+        // A key that is not a menu action leaves it.
+        app.on_key(press(KeyCode::Char('a')));
+        assert!(app.notice_text().unwrap().starts_with(save));
+        // The next menu action: seen, so it goes. The other notice stays.
+        app.on_key(press(KeyCode::F(12)));
+        app.on_key(press(KeyCode::Tab));
+        assert!(!app.notice_text().unwrap_or_default().contains(save));
+
+        // It fails again at the next change, and is said again.
+        app.on_key(press(KeyCode::Esc));
+        answer_form(&mut app, &["", "", ""]);
+        assert!(app.notice_text().unwrap().starts_with(save));
+        // Once a save works, it is no longer true and no longer said.
+        std::fs::remove_file(&not_a_folder).unwrap();
+        answer_form(&mut app, &["", "", ""]);
+        assert_eq!(app.save_problem, None);
+        assert!(!app.notice_text().unwrap_or_default().contains(save));
+        let _ = std::fs::remove_dir_all(&not_a_folder);
     }
 
     #[test]
@@ -4145,7 +4277,7 @@ Cost",
         assert_eq!(
             bar,
             "Cannot start it as typed. n: change it, k: another kind, Esc: cancel   Take out --resume: \
-             Lillignode gives Claude Code its conversation itself. Or start it as a plain program."
+             Lillignode sets the conversation itself. Or start it as a plain program."
         );
         app.on_key(press(KeyCode::Char('y')));
         assert!(app.engine.ws.entries().is_empty(), "y does nothing while it cannot start");
@@ -4160,7 +4292,7 @@ Cost",
 
     #[test]
     fn a_refusal_keeps_what_to_take_out_and_why_in_a_narrow_window() {
-        let reason = "Take out --resume: Lillignode gives Claude Code its conversation itself";
+        let reason = "Take out --resume: Lillignode sets the conversation itself";
         for width in [60, 95, 120, 150, 200] {
             let mut app = app_with_claude_agents(0);
             app.set_window(Rect::new(0, 0, width, 30));
@@ -4174,11 +4306,11 @@ Cost",
                     || bar.starts_with("n / k / Esc   "),
                 "{bar}"
             );
-            if width >= 95 {
+            if width >= 80 {
                 assert!(bar.chars().count() <= width as usize, "{width}: {bar}");
             }
             // What the keys do goes only after the other way out has.
-            if width >= 150 {
+            if width >= 130 {
                 assert!(bar.contains("n: change it, k: another kind, Esc: cancel"), "{bar}");
             }
             if width >= 200 {
@@ -4189,25 +4321,81 @@ Cost",
 
     #[test]
     fn a_refusal_names_what_its_keys_do_in_a_word_each_wherever_that_fits() {
-        let reason = "Take out --resume: Lillignode gives Claude Code its conversation itself.";
-        let at = |width| {
+        let reason = "Take out --resume: Lillignode sets the conversation itself.";
+        let at = |width, options: &str| {
             let mut app = app_with_claude_agents(0);
             app.set_window(Rect::new(0, 0, width, 30));
-            answer_form(&mut app, &["claude", "--resume abc", ""]);
+            answer_form(&mut app, &["claude", options, ""]);
             app.bar()
         };
         let long = "Cannot start it as typed. n: change it, k: another kind, Esc: cancel   ";
-        assert_eq!(at(143), format!("{long}{reason}"));
+        assert_eq!(at(130, "--resume abc"), format!("{long}{reason}"));
         // One column less: a word for each key, and the opening words stay.
         let worded = "n change, k kind, Esc cancel   ";
-        assert_eq!(at(142), format!("Cannot start it as typed. {worded}{reason}"));
-        assert_eq!(at(129), format!("Cannot start it as typed. {worded}{reason}"));
+        assert_eq!(at(129, "--resume abc"), format!("Cannot start it as typed. {worded}{reason}"));
+        assert_eq!(at(116, "--resume abc"), format!("Cannot start it as typed. {worded}{reason}"));
         // Then the opening words go, and the keys keep their words.
-        assert_eq!(at(128), format!("{worded}{reason}"));
-        assert_eq!(at(103), format!("{worded}{reason}"));
+        assert_eq!(at(115, "--resume abc"), format!("{worded}{reason}"));
+        // At 95 columns, where a check by hand found bare keys, the keys
+        // keep their words, for the longest option that is refused too, and
+        // however long a value is joined to it.
+        assert_eq!(at(95, "--resume abc"), format!("{worded}{reason}"));
+        let longest = "Take out --session-id: Lillignode sets the conversation itself.";
+        assert_eq!(at(95, "--session-id abc"), format!("{worded}{longest}"));
+        assert_eq!(
+            at(95, "--session-id=0123456789012345678901234567890123456789"),
+            format!("{worded}{longest}")
+        );
+        assert_eq!(at(90, "--resume abc"), format!("{worded}{reason}"));
         // Bare keys only when even a word each does not fit.
-        assert_eq!(at(102), format!("n / k / Esc   {reason}"));
-        assert_eq!(at(95), format!("n / k / Esc   {reason}"));
+        assert_eq!(at(89, "--resume abc"), format!("n / k / Esc   {reason}"));
+        assert_eq!(at(80, "--resume abc"), format!("n / k / Esc   {reason}"));
+    }
+
+    /// Width is what a line takes on screen, not how many characters it
+    /// has: a letter of Chinese, Japanese or Korean takes two columns. A
+    /// form counted as fitting in characters ran past the edge and lost its
+    /// end.
+    #[test]
+    fn a_line_with_double_width_letters_is_fitted_by_the_columns_it_takes() {
+        // A launcher refuses an option that holds "&"; the reason names
+        // the option as typed. Here the folder typed is in Japanese.
+        let tries =
+            refusal_tries("Take out 設定ファイル: Lillignode sets the conversation itself. Or start it");
+        let mut app = app_with_claude_agents(0);
+        for width in 60..=170u16 {
+            app.set_window(Rect::new(0, 0, width, 30));
+            let bar = app.fitted(&tries);
+            let fits = fit::width(&bar) <= width as usize;
+            // The last form is the shortest there is; every other form
+            // shown fits on screen.
+            assert!(fits || bar == tries[4], "{width}: {bar}");
+            // And the longest that fits is the one shown.
+            let longest = tries.iter().find(|t| fit::width(t) <= width as usize).unwrap_or(&tries[4]);
+            assert_eq!(&bar, longest, "{width}");
+        }
+        // Counted in characters, the worded form would be taken to fit
+        // here; it is six columns wider than that.
+        let worded = &tries[3];
+        assert_eq!(fit::width(worded), worded.chars().count() + 6);
+        app.set_window(Rect::new(0, 0, worded.chars().count() as u16 + 2, 30));
+        assert_eq!(app.fitted(&tries), tries[4], "the worded form does not fit: bare keys");
+
+        // What is cut to fit is cut by columns too, and never through a letter.
+        assert_eq!(cut_end("設定ファイルを直す", 9), "設定ファ…");
+        let notice = "設定ファイルが壊れています. 壊れています. Then press r.";
+        for room in 15..fit::width(notice) {
+            let shown = keep_end(notice, room);
+            assert!(fit::width(&shown) <= room, "{room}: {shown}");
+            assert!(shown.ends_with("Then press r."), "{room}: {shown}");
+        }
+        // The typing cursor is where the text ends on screen.
+        app.on_key(press(KeyCode::F(12)));
+        app.on_key(press(KeyCode::Char('n')));
+        for c in "設定".chars() {
+            app.on_key(press(KeyCode::Char(c)));
+        }
+        assert_eq!(app.bar_cursor(), Some(fit::width(AGENT_PROMPT) + 4));
     }
 
     #[test]

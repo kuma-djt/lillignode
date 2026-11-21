@@ -638,9 +638,11 @@ impl<B: AgentBackend> Workspace<B> {
     pub fn start_problem(&self, command: &str, args: &[String], kind: AgentKind) -> Option<String> {
         if kind.keeps_conversations() {
             if let Some(arg) = args.iter().find(|a| names_a_conversation(a)) {
+                // The option's name, without a value joined to it: the
+                // sentence is short enough to fit a narrow window whole.
+                let arg = arg.split_once('=').map_or(arg.as_str(), |(name, _)| name);
                 return Some(format!(
-                    "Take out {arg}: Lillignode gives Claude Code its conversation itself. Or start it as a \
-                     plain program"
+                    "Take out {arg}: Lillignode sets the conversation itself. Or start it as a plain program"
                 ));
             }
         }
@@ -942,12 +944,20 @@ impl<B: AgentBackend> Workspace<B> {
     /// may ring: the bell rings once for each such change, and an agent that
     /// changes over and over is held to a few (`Track::take_bell`).
     pub fn take_began_needing_you(&mut self) -> bool {
+        !self.take_began_needing_you_each().is_empty()
+    }
+
+    /// The same, naming each agent that did: its key, and its name and
+    /// folder.
+    pub fn take_began_needing_you_each(&mut self) -> Vec<(AgentKey, String)> {
         let now = Instant::now();
-        let mut any = false;
+        let mut began = Vec::new();
         for entry in self.entries.iter_mut().filter(|e| e.is_running()) {
-            any |= entry.track.take_bell(now);
+            if entry.track.take_bell(now) {
+                began.push((entry.key(), entry.label()));
+            }
         }
-        any
+        began
     }
 
     /// Call regularly. True if any status or cost changed and should be
@@ -1232,12 +1242,11 @@ mod tests {
         for given in ["--resume", "--session-id", "--resume=abc", "-r", "--continue", "-c"] {
             let args = vec![given.to_string()];
             let why = ws.start_problem("claude", &args, AgentKind::ClaudeCode).unwrap();
+            // A value joined to the option is not said back.
+            let named = given.split('=').next().unwrap();
             assert_eq!(
                 why,
-                format!(
-                    "Take out {given}: Lillignode gives Claude Code its conversation itself. Or start it as \
-                     a plain program"
-                )
+                format!("Take out {named}: Lillignode sets the conversation itself. Or start it as a plain program")
             );
             let refused = ws.start_new("claude", args.clone(), AgentKind::ClaudeCode, root("a"));
             assert!(matches!(refused, Err(StartError::Refused(_))), "{given}");
