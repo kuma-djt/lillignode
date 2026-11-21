@@ -9,8 +9,8 @@
   const contact = el("contact");
   const blocking = el("blocking");
   const blockingList = el("blocking-list");
-  const seatsList = el("seats");
-  const noSeats = el("no-seats");
+  const agentsList = el("agents");
+  const noAgents = el("no-agents");
   const terminal = el("terminal");
   const terminalNote = el("terminal-note");
   const announce = el("announce");
@@ -18,7 +18,7 @@
   // Say aloud only what has changed: who is waiting, and whether there is
   // contact. The counts that tick each second are not said.
   function say() {
-    const waiting = state ? state.seats.filter((s) => s.running && s.needs_you).map((s) => s.label) : [];
+    const waiting = state ? state.agents.filter((s) => s.running && s.needs_you).map((s) => s.label) : [];
     const words =
       (lostAt !== null ? "Lost contact with Lillignode. " : "") +
       (waiting.length ? "Needs you: " + waiting.join(", ") + "." : "");
@@ -40,8 +40,8 @@
   let heardAt = null;      // when it was heard, by this page's clock
   let lostAt = null;       // when contact was lost, if it is
   let everHeard = false;
-  let chosen = null;       // the seat the reader chose; null follows the agent in front
-  let asked = undefined;   // the seat the open stream was asked for
+  let chosen = null;       // the agent the reader chose; null follows the agent in front
+  let asked = undefined;   // the agent the open stream was asked for
   let run = null;
   let lastEvent = 0;
   let restartedAt = null;
@@ -52,8 +52,9 @@
 
   // The 16 colours a terminal names, in the order terminals number them.
   const NAMED = [
-    "#1b2733", "#d9655f", "#7fbf7a", "#d9b25f", "#6c9bd9", "#b98ad9", "#4fb3a5", "#d8d2c4",
-    "#5d6b78", "#f08a84", "#a3dd9d", "#f0cf85", "#93b8ee", "#d3abee", "#7fd6c9", "#f2ead9",
+    // The yellows lean to yellow, away from the orange that means needs you.
+    "#1b2733", "#d9655f", "#7fbf7a", "#d9c85f", "#6c9bd9", "#b98ad9", "#4fb3a5", "#d8d2c4",
+    "#5d6b78", "#f08a84", "#a3dd9d", "#f0e085", "#93b8ee", "#d3abee", "#7fd6c9", "#f2ead9",
   ];
   const STEPS = [0, 95, 135, 175, 215, 255];
   const hex = (n) => n.toString(16).padStart(2, "0");
@@ -95,26 +96,26 @@
 
   function shownKey() {
     if (!state) return null;
-    if (chosen !== null && state.seats.some((s) => s.key === chosen)) return chosen;
-    const front = state.seats.find((s) => s.front);
-    return front ? front.key : state.seats.length ? state.seats[0].key : null;
+    if (chosen !== null && state.agents.some((s) => s.key === chosen)) return chosen;
+    const front = state.agents.find((s) => s.front);
+    return front ? front.key : state.agents.length ? state.agents[0].key : null;
   }
 
   // What a row says after the name: the state, and how old it is.
-  function stateWords(seat) {
-    if (!seat.running) return [seat.words, ""];
-    if (seat.needs_you) {
-      const waited = since(seat.needs_you_since);
+  function stateWords(agent) {
+    if (!agent.running) return [agent.words, ""];
+    if (agent.needs_you) {
+      const waited = since(agent.needs_you_since);
       return ["Needs you", waited === null ? "" : ", waiting " + ago(waited)];
     }
-    const age = since(seat.reported_at);
-    return [seat.words, age === null ? "" : ", " + ago(age) + " ago"];
+    const age = since(agent.reported_at);
+    return [agent.words, age === null ? "" : ", " + ago(age) + " ago"];
   }
 
-  function seatClass(seat) {
-    if (!seat.running) return "gone";
-    if (seat.needs_you) return "needs-you";
-    return seat.state === "working" ? "working" : "";
+  function agentClass(agent) {
+    if (!agent.running) return "gone";
+    if (agent.needs_you) return "needs-you";
+    return agent.state === "working" ? "working" : "";
   }
 
   function text(tag, cls, words) {
@@ -124,49 +125,49 @@
     return node;
   }
 
-  function drawSeats() {
+  function drawAgents() {
     const shown = shownKey();
-    noSeats.hidden = !state || state.seats.length > 0;
-    const rows = state ? state.seats : [];
+    noAgents.hidden = !state || state.agents.length > 0;
+    const rows = state ? state.agents : [];
     // Rows are kept and changed in place, so a row keeps the keyboard's
     // place while its words change.
-    while (seatsList.children.length > rows.length) seatsList.lastChild.remove();
-    rows.forEach((seat, i) => {
-      let li = seatsList.children[i];
+    while (agentsList.children.length > rows.length) agentsList.lastChild.remove();
+    rows.forEach((agent, i) => {
+      let li = agentsList.children[i];
       if (!li) {
         li = document.createElement("li");
         const button = document.createElement("button");
         button.type = "button";
-        const name = text("span", "seat-name", "");
-        name.append(text("span", "seat-title", ""), text("span", "seat-folder", ""));
-        const line = text("span", "seat-state", "");
+        const name = text("span", "agent-name", "");
+        name.append(text("span", "agent-title", ""), text("span", "agent-folder", ""));
+        const line = text("span", "agent-state", "");
         line.append(text("span", "word", ""), text("span", "age", ""));
         button.append(name, line);
         button.addEventListener("click", () => choose(Number(li.dataset.key)));
         li.append(button);
-        seatsList.append(li);
+        agentsList.append(li);
       }
-      li.dataset.key = String(seat.key);
-      li.className = seatClass(seat);
+      li.dataset.key = String(agent.key);
+      li.className = agentClass(agent);
       const button = li.firstChild;
-      button.setAttribute("aria-pressed", seat.key === shown ? "true" : "false");
-      button.querySelector(".seat-title").textContent = seat.name;
-      button.querySelector(".seat-folder").textContent = seat.folder ? "  " + seat.folder : "";
-      const [word, age] = stateWords(seat);
+      button.setAttribute("aria-pressed", agent.key === shown ? "true" : "false");
+      button.querySelector(".agent-title").textContent = agent.name;
+      button.querySelector(".agent-folder").textContent = agent.folder ? "  " + agent.folder : "";
+      const [word, age] = stateWords(agent);
       button.querySelector(".word").textContent = word;
       button.querySelector(".age").textContent = age;
     });
   }
 
   function drawBlocking() {
-    const waiting = state ? state.seats.filter((s) => s.running && s.needs_you) : [];
+    const waiting = state ? state.agents.filter((s) => s.running && s.needs_you) : [];
     blocking.hidden = waiting.length === 0;
     blockingTitle.textContent = lostAt === null ? "Blocking now" : "Blocking when last heard";
     blockingList.replaceChildren(
-      ...waiting.map((seat) => {
-        const waited = since(seat.needs_you_since);
-        const what = seat.needs ? " needs you: " + seat.needs + "." : " needs you.";
-        return text("li", "", seat.label + what + (waited === null ? "" : " Waiting " + ago(waited) + "."));
+      ...waiting.map((agent) => {
+        const waited = since(agent.needs_you_since);
+        const what = agent.needs ? " needs you: " + agent.needs + "." : " needs you.";
+        return text("li", "", agent.label + what + (waited === null ? "" : " Waiting " + ago(waited) + "."));
       }),
     );
     document.title = waiting.length ? "(" + waiting.length + " need you) Lillignode" : "Lillignode";
@@ -174,18 +175,18 @@
 
   function drawTerminal() {
     const shown = shownKey();
-    const seat = state && state.seats.find((s) => s.key === shown);
+    const agent = state && state.agents.find((s) => s.key === shown);
     const screen = state && state.screen && state.screen.key === shown ? state.screen : null;
-    terminalName.textContent = seat ? seat.label : "";
-    if (!seat) {
-      terminalNote.textContent = state && state.seats.length ? "Choose a thread to see its terminal." : "";
+    terminalName.textContent = agent ? agent.label : "";
+    if (!agent) {
+      terminalNote.textContent = state && state.agents.length ? "Choose an agent to see its terminal." : "";
       terminalNote.hidden = false;
       terminal.replaceChildren();
       drawn = null;
       return;
     }
     const notes = [];
-    if (seat.program_note) notes.push(seat.program_note);
+    if (agent.program_note) notes.push(agent.program_note);
     if (!screen) notes.push("Waiting for its screen.");
     else if (screen.scrolled_back) {
       notes.push("Someone is reading this agent's history in Lillignode. This is what they see, not its live screen.");
@@ -259,7 +260,7 @@
   function draw() {
     drawContact();
     drawBlocking();
-    drawSeats();
+    drawAgents();
     drawTerminal();
     say();
   }
@@ -321,7 +322,7 @@
   function listen() {
     if (stream) stream.close();
     asked = shownKey();
-    const query = "?after=" + lastEvent + (run === null ? "" : "&run=" + run) + (asked === null ? "" : "&seat=" + asked);
+    const query = "?after=" + lastEvent + (run === null ? "" : "&run=" + run) + (asked === null ? "" : "&agent=" + asked);
     // Beside the page, under its word.
     const mine = new EventSource("stream" + query);
     stream = mine;

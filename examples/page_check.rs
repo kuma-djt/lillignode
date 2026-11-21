@@ -181,8 +181,8 @@ fn started(sb: &Sandbox, port: u16) -> (Session, Page) {
     (s, page)
 }
 
-fn seat<'a>(state: &'a serde_json::Value, name: &str) -> &'a serde_json::Value {
-    state["seats"].as_array().and_then(|seats| seats.iter().find(|s| s["name"] == name)).unwrap_or_else(
+fn agent<'a>(state: &'a serde_json::Value, name: &str) -> &'a serde_json::Value {
+    state["agents"].as_array().and_then(|agents| agents.iter().find(|s| s["name"] == name)).unwrap_or_else(
         || {
             println!("  FAIL  the page lists an agent named {name}\n        {state}");
             std::process::exit(1);
@@ -262,8 +262,8 @@ fn main() {
     s.expect("the status report says the address again, whole", &format!("The page: {}", page.url()));
     s.keys(ESC);
     let first = state(&page, "");
-    let reporter = seat(&first["state"], "reporter");
-    let shell = seat(&first["state"], if cfg!(windows) { "cmd" } else { "sh" });
+    let reporter = agent(&first["state"], "reporter");
+    let shell = agent(&first["state"], if cfg!(windows) { "cmd" } else { "sh" });
     check("an agent that reported is shown as it said", reporter["words"] == "Idle", &reporter.to_string());
     check("with when it last reported", reporter["reported_at"].is_u64(), &reporter.to_string());
     check("and which agent is in front", reporter["front"] == true, &reporter.to_string());
@@ -276,9 +276,9 @@ fn main() {
     let key = reporter["key"].as_u64().unwrap();
 
     println!("C. A forged status reaches the page within a second");
-    let stream = listen(&page, &format!("?after=0&seat={key}"));
+    let stream = listen(&page, &format!("?after=0&agent={key}"));
     let is = |name: &'static str, slug: &'static str| {
-        move |state: &serde_json::Value| seat(state, name)["state"] == slug
+        move |state: &serde_json::Value| agent(state, name)["state"] == slug
     };
     check(
         "the stream begins with the state",
@@ -297,7 +297,7 @@ fn main() {
     s.writer.write_all(b"p").unwrap();
     s.writer.flush().unwrap();
     let took = heard(&stream, second, |state| {
-        let r = seat(state, "reporter");
+        let r = agent(state, "reporter");
         let said = state["events"].as_array().is_some_and(|events| {
             events.iter().any(|e| e["what"] == "began-needing-you" && e["agent"] == r["key"])
         });
@@ -310,8 +310,8 @@ fn main() {
     );
     println!("        ({} ms)", took.unwrap().as_millis());
     s.expect("the terminal says the same", "NEEDS YOU");
-    let waiting = state(&page, &format!("?seat={key}"));
-    let since = seat(&waiting["state"], "reporter")["needs_you_since"].as_u64().unwrap();
+    let waiting = state(&page, &format!("?agent={key}"));
+    let since = agent(&waiting["state"], "reporter")["needs_you_since"].as_u64().unwrap();
     check("the wait is counted from then", waiting["at"].as_u64().unwrap() >= since, &waiting.to_string());
     let screen = waiting["state"]["screen"]["lines"].to_string();
     check("the agent's screen is there as text", screen.contains("SENT p"), &screen);
@@ -319,14 +319,14 @@ fn main() {
     s.writer.write_all(b"d").unwrap();
     s.writer.flush().unwrap();
     let took = heard(&stream, second, |state| {
-        let r = seat(state, "reporter");
+        let r = agent(state, "reporter");
         r["state"] == "done" && r["needs_you"] == false && r["needs_you_since"].is_null()
     });
     check("Done, and it no longer needs you, within a second", took.is_some(), "");
     s.pump_for(Duration::from_millis(300));
     s.writer.write_all(b"u").unwrap();
     s.writer.flush().unwrap();
-    let took = heard(&stream, second, |state| seat(state, "reporter")["words"] == "Unknown: not understood");
+    let took = heard(&stream, second, |state| agent(state, "reporter")["words"] == "Unknown: not understood");
     check("a status that is not understood is Unknown, with that reason", took.is_some(), "");
     s.pump_for(Duration::from_millis(300));
 
@@ -336,7 +336,7 @@ fn main() {
         let answer = without(path);
         check(
             &format!("without the word, {path} gets nothing"),
-            answer.starts_with("HTTP/1.1 404") && !answer.contains("seats") && !answer.contains("<html"),
+            answer.starts_with("HTTP/1.1 404") && !answer.contains("agents") && !answer.contains("<html"),
             &answer,
         );
     }
@@ -370,7 +370,7 @@ fn main() {
     let again = page_on_screen(&mut s, port);
     check("the page has a new word", again.word != page.word, &again.word);
     let old = get(&page, "/state").unwrap_or_default();
-    check("the old address gets nothing", old.starts_with("HTTP/1.1 404") && !old.contains("seats"), &old);
+    check("the old address gets nothing", old.starts_with("HTTP/1.1 404") && !old.contains("agents"), &old);
     let stream = listen(&again, "?after=0");
     check("the stream begins", heard(&stream, Duration::from_secs(3), |_| true).is_some(), "");
     drop(s.quit("quit", true));

@@ -198,7 +198,7 @@ fn read_request(stream: &TcpStream, port: u16) -> Result<Request, Refusal> {
     Ok(Request { path: path.to_string(), query: query.to_string() })
 }
 
-/// The value of `name` in a query such as `after=3&seat=2`, as a number.
+/// The value of `name` in a query such as `after=3&agent=2`, as a number.
 fn number(query: &str, name: &str) -> Option<u64> {
     query.split('&').filter_map(|pair| pair.split_once('=')).find(|(n, _)| *n == name)?.1.parse().ok()
 }
@@ -257,12 +257,12 @@ fn answer(stream: &TcpStream, reader: &Reader, port: u16, word: &str) -> std::io
         "state" => {
             // A screen is copied only while a reader shows it: say so, and
             // give the engine a moment to publish a copy that has it.
-            let seat = number(&request.query, "seat");
-            let _showing = seat.map(|seat| reader.show(seat));
-            let has_screen = |p: &Published| p.screens.iter().any(|(key, _)| Some(key.number()) == seat);
+            let agent = number(&request.query, "agent");
+            let _showing = agent.map(|agent| reader.show(agent));
+            let has_screen = |p: &Published| p.screens.iter().any(|(key, _)| Some(key.number()) == agent);
             let mut latest = reader.latest();
             let limit = Instant::now() + Duration::from_millis(500);
-            while let (Some((count, published)), true) = (&latest, seat.is_some()) {
+            while let (Some((count, published)), true) = (&latest, agent.is_some()) {
                 if has_screen(published) || Instant::now() >= limit {
                     break;
                 }
@@ -272,7 +272,7 @@ fn answer(stream: &TcpStream, reader: &Reader, port: u16, word: &str) -> std::io
                     Read::Ended => break,
                 }
             }
-            state_once(stream, latest.map(|(_, published)| published), seat, &request.query)
+            state_once(stream, latest.map(|(_, published)| published), agent, &request.query)
         }
         "stream" => stream_states(stream, reader, &request.query),
         _ => refuse(stream, "404 Not Found", "There is nothing here."),
@@ -291,7 +291,7 @@ fn after_in(query: &str, published: &Published) -> u64 {
 fn state_once(
     stream: &TcpStream,
     published: Option<Arc<Published>>,
-    seat: Option<u64>,
+    agent: Option<u64>,
     query: &str,
 ) -> std::io::Result<()> {
     {
@@ -300,7 +300,7 @@ fn state_once(
                 let after = after_in(query, &published);
                 let body = json!({
                     "at": millis(published.state.taken_at),
-                    "state": state_json(&published, seat, after),
+                    "state": state_json(&published, agent, after),
                 });
                 send(stream, "200 OK", "application/json", &body.to_string())
             }
@@ -311,11 +311,11 @@ fn state_once(
 
 /// Send each new state as it is published, for as long as the browser
 /// listens. At least once a second something is sent, so a page can tell
-/// silence from a quiet moment. One agent's screen is sent: `seat`.
+/// silence from a quiet moment. One agent's screen is sent: `agent`.
 fn stream_states(mut stream: &TcpStream, reader: &Reader, query: &str) -> std::io::Result<()> {
-    let seat = number(query, "seat");
+    let agent = number(query, "agent");
     // For as long as this page listens, its agent's screen is copied.
-    let _showing = seat.map(|seat| reader.show(seat));
+    let _showing = agent.map(|agent| reader.show(agent));
     let mut after = None;
     stream.write_all(format!("{}\r\n", head("200 OK", "text/event-stream")).as_bytes())?;
     let (mut count, mut sent) = (0, String::new());
@@ -325,7 +325,7 @@ fn stream_states(mut stream: &TcpStream, reader: &Reader, query: &str) -> std::i
                 count = newer;
                 let at = millis(published.state.taken_at);
                 let from = after.unwrap_or_else(|| after_in(query, &published));
-                let mut state = state_json(&published, seat, from);
+                let mut state = state_json(&published, agent, from);
                 after = Some(from.max(published.state.as_of));
                 // Events are sent once. Apart from them, has anything
                 // changed since the last state sent?
@@ -359,15 +359,15 @@ fn millis(time: SystemTime) -> u64 {
     time.duration_since(SystemTime::UNIX_EPOCH).map_or(0, |since| since.as_millis() as u64)
 }
 
-/// The state as the page reads it: every agent, the screen of `seat`, and
+/// The state as the page reads it: every agent, the screen of `agent`, and
 /// the events numbered after `after`.
-fn state_json(published: &Published, seat: Option<u64>, after: u64) -> Value {
+fn state_json(published: &Published, agent: Option<u64>, after: u64) -> Value {
     let state = &published.state;
-    let seats: Vec<Value> = state.agents.iter().map(|a| seat_json(a, state.front == Some(a.key))).collect();
+    let agents: Vec<Value> = state.agents.iter().map(|a| agent_json(a, state.front == Some(a.key))).collect();
     let screen = published
         .screens
         .iter()
-        .find(|(key, _)| Some(key.number()) == seat)
+        .find(|(key, _)| Some(key.number()) == agent)
         .map(|(key, screen)| screen_json(key.number(), screen));
     let events: Vec<Value> = published
         .events
@@ -378,7 +378,7 @@ fn state_json(published: &Published, seat: Option<u64>, after: u64) -> Value {
     json!({
         "run": state.run.to_string(),
         "as_of": state.as_of,
-        "seats": seats,
+        "agents": agents,
         "screen": screen,
         "events": events,
         // Events after `after` that are no longer kept.
@@ -389,7 +389,7 @@ fn state_json(published: &Published, seat: Option<u64>, after: u64) -> Value {
 /// One agent as the page reads it. The words for its status are the
 /// engine's, the same as the terminal shows; ages are worked out by the
 /// page from the two times.
-fn seat_json(agent: &AgentCopy, front: bool) -> Value {
+fn agent_json(agent: &AgentCopy, front: bool) -> Value {
     let slug = match &agent.status {
         Some(AgentStatus::Starting) => "starting",
         Some(AgentStatus::Working | AgentStatus::WorkingQuiet(_)) => "working",
@@ -574,7 +574,7 @@ mod tests {
         }
         // With it, all of it.
         assert!(raw(&format!("/{word}/")).contains("<title>Lillignode</title>"));
-        assert!(raw(&format!("/{word}/state")).contains("\"seats\""));
+        assert!(raw(&format!("/{word}/state")).contains("\"agents\""));
         // The word without the slash after it is sent on to it.
         let moved = raw(&format!("/{word}"));
         assert!(moved.starts_with("HTTP/1.1 308"), "{moved}");
@@ -613,11 +613,39 @@ mod tests {
         assert!(!page.to_ascii_lowercase().contains("access-control-allow"), "no other site may read it");
         assert!(get(address, "/page.js").contains("EventSource"));
         assert!(get(address, "/page.css").contains("#14202B"));
+        // Orange means an agent needs you, and nothing else: every rule
+        // that uses it is the strip's or the row's of an agent that needs
+        // you. The old copper is gone.
+        assert!(CSS.contains("--orange: #E39A55;"));
+        for gone in ["copper", "C17B3E", "c17b3e"] {
+            assert!(!CSS.contains(gone) && !JS.contains(gone), "{gone}");
+        }
+        for rule in CSS.split('}') {
+            let Some((selector, body)) = rule.split_once('{') else { continue };
+            if body.contains("var(--orange)") {
+                let selector = selector.rsplit("*/").next().unwrap().trim();
+                assert!(
+                    selector == "#blocking" || selector.starts_with("#agents li.needs-you "),
+                    "orange used for {selector:?}"
+                );
+            }
+        }
+        assert!(CSS.contains("h1 { font-size: 18px; color: var(--cream);"), "the header's word is cream");
         assert!(get(address, "/elsewhere").starts_with("HTTP/1.1 404"));
         // The page's own script is the only script, and it writes what an
         // agent wrote as text, never as markup.
         assert!(!JS.contains("innerHTML") && !JS.contains("insertAdjacentHTML") && !JS.contains("eval("));
         assert!(!HTML.contains("<script>"), "no script in the page itself: the policy forbids it");
+        // The user's words: the rows are agents, as everywhere else in
+        // Lillignode; the one other heading is the Board.
+        assert!(HTML.contains(r#"<h2 id="agents-title">Agents</h2>"#), "{HTML}");
+        assert!(HTML.contains(r#"<h2 id="board-title">Board</h2>"#), "{HTML}");
+        for (name, text) in [("page.html", HTML), ("page.js", JS), ("page.css", CSS)] {
+            let lower = text.to_lowercase();
+            for word in ["thread", "seat"] {
+                assert!(!lower.contains(word), "{name} says {word}");
+            }
+        }
     }
 
     #[test]
@@ -635,7 +663,7 @@ mod tests {
         // A name some web site pointed at this machine.
         let answer = with("GET /state HTTP/1.1", &format!("Host: evil.example:{port}\r\n"));
         assert!(answer.starts_with("HTTP/1.1 403"), "{answer}");
-        assert!(!answer.contains("seats"), "{answer}");
+        assert!(!answer.contains("agents"), "{answer}");
         assert!(with("GET /state HTTP/1.1", "").starts_with("HTTP/1.1 403"), "no Host at all");
         // Another site's page asking from the browser.
         let cross = format!("{host}Origin: https://evil.example\r\n");

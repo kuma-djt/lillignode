@@ -1,13 +1,14 @@
-/* Lillignode's page. Four colours: a navy ground, cream text, copper for
-   what Lillignode itself points at, teal for an agent that is working.
-   Colour is never the only signal: every state is also said in words. */
+/* Lillignode's page. Four colours: a navy ground, cream text, teal for an
+   agent that is working, and orange for an agent that needs you. Orange is
+   used for that and nothing else: the strip and the row. Colour is never
+   the only signal: every state is also said in words. */
 :root {
   --navy: #14202B;
   --navy-deep: #0E1820;
   --navy-raised: #1C2C3A;
   --cream: #F2EAD9;
   --cream-quiet: #B9B2A3;
-  --copper: #C17B3E;
+  --orange: #E39A55;
   --teal: #4FB3A5;
   --rule: #2B3E4F;
 }
@@ -25,7 +26,7 @@ html, body {
 body { display: flex; flex-direction: column; }
 
 h1, h2 { margin: 0; font-weight: 600; }
-h1 { font-size: 18px; color: var(--copper); letter-spacing: 0.02em; }
+h1 { font-size: 18px; color: var(--cream); letter-spacing: 0.02em; }
 h2 {
   font-size: 12px;
   letter-spacing: 0.12em;
@@ -47,7 +48,7 @@ header {
 }
 #readonly { color: var(--cream-quiet); font-size: 13px; }
 #contact { margin-left: auto; font-size: 14px; }
-#contact.late { color: var(--copper); font-weight: 600; }
+#contact.late { color: var(--cream); font-weight: 700; }
 /* Lost contact: the loudest thing on the page, in the page's own colours
    turned over. */
 #contact.lost, .lost {
@@ -61,7 +62,7 @@ header {
 }
 
 #blocking {
-  background: var(--copper);
+  background: var(--orange);
   color: var(--navy-deep);
   padding: 8px 16px 10px;
 }
@@ -79,11 +80,11 @@ main {
   grid-template-columns: minmax(230px, 300px) minmax(0, 1fr) minmax(180px, 260px);
 }
 main > section { min-height: 0; overflow: auto; }
-#threads, #middle { border-right: 1px solid var(--rule); }
+#agents-column, #middle { border-right: 1px solid var(--rule); }
 
-#seats li { border-top: 1px solid var(--rule); }
-#seats li:last-child { border-bottom: 1px solid var(--rule); }
-#seats button {
+#agents li { border-top: 1px solid var(--rule); }
+#agents li:last-child { border-bottom: 1px solid var(--rule); }
+#agents button {
   display: block;
   width: 100%;
   text-align: left;
@@ -95,17 +96,18 @@ main > section { min-height: 0; overflow: auto; }
   padding: 9px 12px 10px;
   cursor: pointer;
 }
-#seats button:hover { background: var(--navy-raised); }
-#seats button:focus-visible, #terminal:focus-visible { outline: 2px solid var(--copper); outline-offset: -2px; }
-#seats button[aria-pressed="true"] { background: var(--navy-raised); border-left-color: var(--copper); }
-.seat-name { display: block; font-weight: 600; }
-.seat-folder { color: var(--cream-quiet); font-weight: 400; }
-.seat-state { display: block; font-size: 14px; color: var(--cream-quiet); }
-.seat-state .word { color: var(--cream); }
-li.working .seat-state .word { color: var(--teal); font-weight: 600; }
-li.needs-you .seat-state .word { color: var(--copper); font-weight: 700; }
-li.needs-you button { border-left-color: var(--copper); }
-li.gone .seat-name { color: var(--cream-quiet); }
+#agents button:hover { background: var(--navy-raised); }
+#agents button:focus-visible, #terminal:focus-visible { outline: 2px solid var(--cream); outline-offset: -2px; }
+#agents button[aria-pressed="true"] { background: var(--navy-raised); border-left-color: var(--cream); }
+.agent-name { display: block; font-weight: 600; }
+.agent-folder { color: var(--cream-quiet); font-weight: 400; }
+.agent-state { display: block; font-size: 14px; color: var(--cream-quiet); }
+.agent-state .word { color: var(--cream); }
+li.working .agent-state .word { color: var(--teal); font-weight: 600; }
+#agents li.needs-you .agent-state .word { color: var(--orange); font-weight: 700; }
+/* Chosen or not, the row of an agent that needs you keeps its orange edge. */
+#agents li.needs-you button { border-left-color: var(--orange); }
+li.gone .agent-name { color: var(--cream-quiet); }
 
 #middle { display: flex; flex-direction: column; }
 #terminal-note { flex: none; }
@@ -129,7 +131,7 @@ body.stale main { opacity: 0.55; }
 
 @media (max-width: 760px) {
   main { display: block; overflow: auto; }
-  #threads, #middle { border-right: 0; border-bottom: 1px solid var(--rule); }
+  #agents-column, #middle { border-right: 0; border-bottom: 1px solid var(--rule); }
   #terminal { margin: 0 8px 12px; }
   #contact { margin-left: 0; }
 }
