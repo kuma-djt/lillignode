@@ -21,6 +21,12 @@
 //! straight into it and never touches a real workspace. Set
 //! LILLIGNODE_TIMING=<file> as well to get Lillignode's own per-key timings.
 //!
+//! PROBE_PAGE=1: Lillignode's settings switch its page on. The probe reads
+//! the page's address from the screen and, before typing, opens the page's
+//! stream on the agent it types into, as a browser showing that agent
+//! would, and holds it open for the whole run. So the keystroke times are
+//! those with the page open.
+//!
 //! Rules this probe keeps (CONTRIBUTING.md):
 //! - It is for the stand-in, not for a real agent. It sets CLAUDE_CONFIG_DIR
 //!   to a throwaway folder for whatever it starts, so nothing it runs can
@@ -29,9 +35,12 @@
 //!   by default the stand-in's greeting). Any other screen stops it.
 //! - It never presses Enter.
 
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::TcpStream;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -101,6 +110,44 @@ impl Probe {
             }
         }
     }
+}
+
+/// The page's address as the screen shows it: port and word.
+fn page_on_screen(screen: &str) -> Option<(u16, String)> {
+    let start = "http://127.0.0.1:";
+    let rest = &screen[screen.find(start)? + start.len()..];
+    let (port, rest) = rest.split_once('/')?;
+    let word: String = rest.chars().take_while(char::is_ascii_alphanumeric).collect();
+    Some((port.parse().ok()?, word))
+}
+
+/// Open the page's stream on the first agent, as a browser showing it
+/// would, and keep reading it on a thread. Returns how many bytes it has
+/// read so far, as it goes.
+fn hold_page(port: u16, word: &str) -> Result<Arc<AtomicUsize>, String> {
+    let get = |path: &str| -> Result<TcpStream, String> {
+        let mut s = TcpStream::connect(("127.0.0.1", port)).map_err(|e| e.to_string())?;
+        s.write_all(format!("GET /{word}/{path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n").as_bytes())
+            .map_err(|e| e.to_string())?;
+        Ok(s)
+    };
+    let mut state = String::new();
+    get("state")?.read_to_string(&mut state).map_err(|e| e.to_string())?;
+    let body: serde_json::Value = serde_json::from_str(state.split_once("\r\n\r\n").map_or("", |(_, b)| b))
+        .map_err(|e| e.to_string())?;
+    let agent = body["state"]["agents"][0]["key"].as_u64().ok_or("no agent on the page")?;
+    let stream = get(&format!("stream?agent={agent}"))?;
+    let read = Arc::new(AtomicUsize::new(0));
+    let counted = read.clone();
+    thread::spawn(move || {
+        let mut lines = BufReader::new(stream);
+        let mut line = String::new();
+        while lines.read_line(&mut line).is_ok_and(|n| n > 0) {
+            counted.fetch_add(line.len(), Ordering::Relaxed);
+            line.clear();
+        }
+    });
+    Ok(read)
 }
 
 fn main() {
@@ -206,6 +253,29 @@ fn main() {
     if std::env::var("PROBE_ONLY_START").is_ok() {
         return;
     }
+    let page = if std::env::var("PROBE_PAGE").is_ok() {
+        let Some((port, word)) = page_on_screen(&p.term.screen().contents().replace('\n', "")) else {
+            say("page: STOPPED. No page address on screen; nothing was typed.".into());
+            return;
+        };
+        match hold_page(port, &word) {
+            Ok(read) => {
+                // Let the page's copies of the agent's screen begin.
+                p.settle(Duration::from_millis(1000), Duration::from_secs(2));
+                say(format!(
+                    "page: open on the agent typed into, {} bytes read so far",
+                    read.load(Ordering::Relaxed)
+                ));
+                Some(read)
+            }
+            Err(why) => {
+                say(format!("page: STOPPED. Could not open it ({why}); nothing was typed."));
+                return;
+            }
+        }
+    } else {
+        None
+    };
 
     // 2. Keystroke echo. One character at a time, timed from the write to the
     // arrival of the output that makes it visible on screen.
@@ -240,6 +310,9 @@ fn main() {
             pct(0.95),
             times[times.len() - 1]
         ));
+    }
+    if let Some(read) = &page {
+        say(format!("page: still open after typing, {} bytes read in all", read.load(Ordering::Relaxed)));
     }
     dump(&p, "1-typed-120x36");
     p.writer.write_all(&vec![0x7f; text.len()]).unwrap();
