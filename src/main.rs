@@ -52,9 +52,11 @@ file. It is experimental and off unless you ask. Lillignode then reads Claude
 Code's own record of each conversation on this machine, and changes nothing.
 
 To see your agents in a browser on this machine, add \"page\": true to that
-file. It is off unless you ask. The page is at http://127.0.0.1:7501/ (set
-\"page_port\" for another port), is read only, and while it is on it shows
-every agent's name, status and screen to any program on this machine.
+file. It is off unless you ask. Its address is http://127.0.0.1:7501/ (set
+\"page_port\" for another port) and a word that is new each time Lillignode
+starts; Lillignode shows the whole address when it starts and in its status
+report. The page is read only. Anyone with the address can see every agent's
+name, status and screen.
 
 Each agent uses its own account. Lillignode does not ask for your keys and
 sends nothing anywhere.",
@@ -88,7 +90,7 @@ fn main() -> ExitCode {
                     println!("settings:  {}", dir.join(config::FILE).display());
                     if config.page {
                         println!(
-                            "page:      http://127.0.0.1:{}/ while Lillignode is open",
+                            "page:      http://127.0.0.1:{}/ and a word new each start; Lillignode shows it",
                             config.page_port
                         );
                     }
@@ -179,7 +181,7 @@ fn main() -> ExitCode {
     let publisher = app.config.page.then(snapshot::channel).and_then(|(publisher, reader)| {
         let started = page::serve(reader, app.config.page_port);
         let listening = started.is_ok();
-        app.page_started(started.map(page::url));
+        app.page_started(started.as_ref().map(page::Served::url).map_err(String::clone));
         listening.then_some(publisher)
     });
     let mut published_at: Option<Instant> = None;

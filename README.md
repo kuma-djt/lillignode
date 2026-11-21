@@ -132,12 +132,12 @@ Put `"cost": true` in the settings file and Lillignode shows, under each Claude 
 
 ## The page (read only, off by default)
 
-Put `"page": true` in the settings file and Lillignode also serves a page for a browser on this machine, at `http://127.0.0.1:7501/` (`"page_port"` sets another port). Lillignode says the address when it starts, and `lillignode --where` prints it.
+Put `"page": true` in the settings file and Lillignode also serves a page for a browser on this machine. Its address is `http://127.0.0.1:7501/` (`"page_port"` sets another port) followed by a random word, new each time Lillignode starts, such as `http://127.0.0.1:7501/b9iq5c8f72cy7ev3/`. Lillignode shows the whole address when it starts, and again at the foot of the status report (menu key, then `s`).
 
 - **What it shows.** One row for each agent with its status and how long ago it reported it ("Working, 2 s ago", "Needs you, waiting 4 min", "Unknown: no report"); the terminal of the agent you choose, live; and, above everything, a strip titled "Blocking now" naming each agent that needs you and how long it has waited. A third column, "Board", says it is not connected yet: nothing is behind it.
 - **It is read only.** The page can ask Lillignode for nothing and type nothing. Choosing an agent on the page changes only what the page shows.
-- **It says how fresh it is.** The header says when the page last heard from Lillignode, and says so plainly when it has lost contact; what is on the page then is marked as old.
-- **Who can read it.** It listens on this machine only, never on the network. While it is on, any program on this machine can read every agent's name, folder, status and screen from it; a page on another web site cannot. It is the one way an agent's screen leaves Lillignode's own window, which is why it is off unless you ask.
+- **It says how fresh it is.** The header says when the page last heard from Lillignode, and says so plainly when it has lost contact; what is on the page then is marked as old. After Lillignode is started again the old page cannot follow, because the address has changed: it says so, and you open the new one.
+- **Who can read it.** It listens on this machine only, never on the network, and answers only at its address with the word: anything else gets nothing of the page. Anyone with the address can read every agent's name, folder, status and screen; a page on another web site cannot. It is the one way an agent's screen leaves Lillignode's own window, which is why it is off unless you ask.
 - **Not yet checked by a person.** Checked by script, with stand-in agents, in a browser with no window. The agent's terminal on the page is its text and colours as the agent sent them; it is not an exact copy of the terminal window, and history cannot be read there.
 
 ## Settings
@@ -260,7 +260,7 @@ These are known and not yet fixed. Please do not report them as security problem
 - It saves which agents are open, their folders, and their conversation ids. It never saves what an agent printed.
 - Only if you switch cost on, it reads Claude Code's own record of each conversation it started, read-only, and keeps only the token counts and the model name.
 - It does not change Claude Code's settings.
-- Only if you switch the page on, it listens on this machine (127.0.0.1) and shows agents' status and screens to a browser here. It opens no port otherwise.
+- Only if you switch the page on, it listens on this machine (127.0.0.1) and shows agents' status and screens to a browser here that has its address. It opens no port otherwise.
 
 ## Checking your changes
 

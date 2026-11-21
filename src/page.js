@@ -45,6 +45,9 @@
   let run = null;
   let lastEvent = 0;
   let restartedAt = null;
+  // Set once Lillignode is found answering under another word: each start
+  // has its own, so this page's address will never work again.
+  let movedOn = false;
   let drawn = null;        // the screen now drawn in the terminal
 
   // The 16 colours a terminal names, in the order terminals number them.
@@ -223,6 +226,13 @@
 
   function drawContact() {
     document.body.classList.toggle("stale", lostAt !== null);
+    if (movedOn) {
+      contact.className = "lost";
+      contact.textContent =
+        "Lillignode was started again, with a new address for its page. This page cannot follow it and will not " +
+        "change again. Open the address Lillignode shows now: its menu key, then s.";
+      return;
+    }
     if (lostAt !== null) {
       contact.className = "lost";
       contact.textContent = everHeard
@@ -289,14 +299,31 @@
     stream = null;
     if (lostAt === null) lostAt = new Date();
     draw();
-    setTimeout(listen, RETRY_MS);
+    setTimeout(lookAgain, RETRY_MS);
+  }
+
+  // Ask once, plainly, before listening again: a refusal that is
+  // Lillignode's own means it is running under a new word.
+  function lookAgain() {
+    fetch("state", { cache: "no-store" })
+      .then((answer) => (answer.status === 404 ? answer.text() : null))
+      .then((said) => {
+        if (said !== null && said.includes("Lillignode shows its page's address")) {
+          movedOn = true;
+          draw();
+          return;
+        }
+        listen();
+      })
+      .catch(() => lost());
   }
 
   function listen() {
     if (stream) stream.close();
     asked = shownKey();
     const query = "?after=" + lastEvent + (run === null ? "" : "&run=" + run) + (asked === null ? "" : "&seat=" + asked);
-    const mine = new EventSource("/stream" + query);
+    // Beside the page, under its word.
+    const mine = new EventSource("stream" + query);
     stream = mine;
     mine.addEventListener("state", (e) => {
       if (stream === mine) heard(JSON.parse(e.data));

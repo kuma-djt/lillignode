@@ -9,14 +9,17 @@
 //! switched it on. It is the first place an agent's screen leaves the
 //! terminal window, so every request is checked before it is answered:
 //!
+//! - only with the word in its address: a random word, new each time
+//!   Lillignode starts, that only the person shown it knows. Without it a
+//!   request gets nothing of the page and no data;
 //! - only `GET`;
 //! - only when the browser says it is talking to this address (`Host`), so
 //!   a web site that points a name of its own at this machine is refused;
 //! - never for another site's page (`Origin`, `Sec-Fetch-Site`), and no
 //!   answer says another site may read it.
 //!
-//! What it cannot keep out: any program running on this machine as any
-//! user can read it while it is on.
+//! What the word cannot keep out: a program that can read the screen
+//! Lillignode is drawn on, or the browser's history.
 //!
 //! It tells the engine one thing: which agents' screens open pages are
 //! showing (`Reader::show`), so that only those are copied.
@@ -62,11 +65,51 @@ const JS: &str = include_str!("page.js");
 const POLICY: &str = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; \
                       base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
-/// Start answering on this machine at `port` (0: any free port). Returns
-/// the address, or why it could not be started; then nothing is listening.
-pub fn serve(reader: Reader, port: u16) -> Result<SocketAddr, String> {
+/// The letters a word is made of: no 0, 1, l or o, which are easily
+/// taken for each other.
+const LETTERS: &[u8; 32] = b"abcdefghijkmnpqrstuvwxyz23456789";
+
+/// How many letters a word has. Five random bits each: 80 in all.
+const WORD_LETTERS: usize = 16;
+
+/// A new random word for the page's address.
+fn new_word() -> String {
+    // A version 4 id is random but for its version (byte 6) and variant
+    // (byte 8): these ten bytes are random throughout.
+    let id = uuid::Uuid::new_v4();
+    let b = id.as_bytes();
+    let random: Vec<u8> = b[..6].iter().chain(&b[9..13]).copied().collect();
+    let bits = random.iter().fold(0u128, |all, byte| all << 8 | u128::from(*byte));
+    (0..WORD_LETTERS).map(|i| LETTERS[(bits >> (5 * i) & 31) as usize] as char).collect()
+}
+
+/// True when `given` is the word, compared so that how long it takes says
+/// nothing about how much of it was right.
+fn is_word(given: &str, word: &str) -> bool {
+    given.len() == word.len() && given.bytes().zip(word.bytes()).fold(0u8, |d, (a, b)| d | (a ^ b)) == 0
+}
+
+/// A page being served: where it listens, and the word in its address.
+pub struct Served {
+    pub address: SocketAddr,
+    word: String,
+}
+
+impl Served {
+    /// The address to give a person, word and all.
+    pub fn url(&self) -> String {
+        format!("http://127.0.0.1:{}/{}/", self.address.port(), self.word)
+    }
+}
+
+/// Start answering on this machine at `port` (0: any free port), under a
+/// new word. Returns where, or why it could not be started; then nothing
+/// is listening.
+pub fn serve(reader: Reader, port: u16) -> Result<Served, String> {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, port)).map_err(|e| e.to_string())?;
     let address = listener.local_addr().map_err(|e| e.to_string())?;
+    let word = new_word();
+    let served = Served { address, word: word.clone() };
     let open = Arc::new(AtomicUsize::new(0));
     let accept = move || {
         for stream in listener.incoming() {
@@ -81,10 +124,10 @@ pub fn serve(reader: Reader, port: u16) -> Result<SocketAddr, String> {
                 let _ = refuse(&stream, "503 Service Unavailable", "Too many pages are open. Close one.");
                 continue;
             }
-            let reader = reader.clone();
+            let (reader, word) = (reader.clone(), word.clone());
             let answer = move || {
                 let _place = place;
-                let _ = answer(&stream, &reader, address.port());
+                let _ = answer(&stream, &reader, address.port(), &word);
             };
             // If no thread can be started the place is given back with the
             // closure, and the connection closed.
@@ -92,12 +135,7 @@ pub fn serve(reader: Reader, port: u16) -> Result<SocketAddr, String> {
         }
     };
     std::thread::Builder::new().name("page".into()).spawn(accept).map_err(|e| e.to_string())?;
-    Ok(address)
-}
-
-/// The address to give a person, for a page served at `address`.
-pub fn url(address: SocketAddr) -> String {
-    format!("http://127.0.0.1:{}/", address.port())
+    Ok(served)
 }
 
 struct Request {
@@ -146,7 +184,7 @@ fn read_request(stream: &TcpStream, port: u16) -> Result<Request, Refusal> {
     }
     let here = [format!("127.0.0.1:{port}"), format!("localhost:{port}")];
     let elsewhere =
-        || ("403 Forbidden", format!("This page answers only at http://127.0.0.1:{port}/ on this machine."));
+        || ("403 Forbidden", format!("This page answers only at http://127.0.0.1:{port}/… on this machine."));
     if !host.is_some_and(|host| here.contains(&host)) {
         return Err(elsewhere());
     }
@@ -185,7 +223,12 @@ fn refuse(stream: &TcpStream, status: &str, why: &str) -> std::io::Result<()> {
     send(stream, status, "text/plain; charset=utf-8", why)
 }
 
-fn answer(stream: &TcpStream, reader: &Reader, port: u16) -> std::io::Result<()> {
+/// Said to a request without the word. Nothing of the page, and no data.
+const NOTHING: &str =
+    "Nothing here. Lillignode shows its page's address, word and all, when it starts and in its \
+                       status report.";
+
+fn answer(stream: &TcpStream, reader: &Reader, port: u16, word: &str) -> std::io::Result<()> {
     // A browser that stops reading or never finishes asking does not hold
     // a place for ever.
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
@@ -194,11 +237,24 @@ fn answer(stream: &TcpStream, reader: &Reader, port: u16) -> std::io::Result<()>
         Ok(request) => request,
         Err((status, why)) => return refuse(stream, status, &why),
     };
-    match request.path.as_str() {
-        "/" => send(stream, "200 OK", "text/html; charset=utf-8", HTML),
-        "/page.css" => send(stream, "200 OK", "text/css; charset=utf-8", CSS),
-        "/page.js" => send(stream, "200 OK", "text/javascript; charset=utf-8", JS),
-        "/state" => {
+    // Everything is under the word: /<word>/ and what is beside it.
+    let under = request.path.strip_prefix('/').unwrap_or("");
+    let (given, rest) = under.split_once('/').map_or((under, None), |(given, rest)| (given, Some(rest)));
+    if !is_word(given, word) {
+        return refuse(stream, "404 Not Found", NOTHING);
+    }
+    let Some(rest) = rest else {
+        // The word without the slash after it: the page's own files are
+        // found beside it, so the address must end with one.
+        let head = head("308 Permanent Redirect", "text/plain; charset=utf-8");
+        return (&*stream)
+            .write_all(format!("{head}Location: /{word}/\r\nContent-Length: 0\r\n\r\n").as_bytes());
+    };
+    match rest {
+        "" => send(stream, "200 OK", "text/html; charset=utf-8", HTML),
+        "page.css" => send(stream, "200 OK", "text/css; charset=utf-8", CSS),
+        "page.js" => send(stream, "200 OK", "text/javascript; charset=utf-8", JS),
+        "state" => {
             // A screen is copied only while a reader shows it: say so, and
             // give the engine a moment to publish a copy that has it.
             let seat = number(&request.query, "seat");
@@ -218,8 +274,8 @@ fn answer(stream: &TcpStream, reader: &Reader, port: u16) -> std::io::Result<()>
             }
             state_once(stream, latest.map(|(_, published)| published), seat, &request.query)
         }
-        "/stream" => stream_states(stream, reader, &request.query),
-        _ => refuse(stream, "404 Not Found", "There is nothing here. The page is at /."),
+        "stream" => stream_states(stream, reader, &request.query),
+        _ => refuse(stream, "404 Not Found", "There is nothing here."),
     }
 }
 
@@ -439,16 +495,31 @@ mod tests {
         }
     }
 
-    fn served() -> (Publisher, SocketAddr) {
-        let (publisher, reader) = channel();
-        let address = serve(reader, 0).expect("a free port on this machine");
-        (publisher, address)
+    /// A page being served, as a test reaches it: its address and word.
+    #[derive(Clone, Copy)]
+    struct At {
+        address: SocketAddr,
+        word: &'static str,
     }
 
-    /// Send `request` and read everything that comes back until the page
-    /// closes the connection.
-    fn ask(address: SocketAddr, request: &str) -> String {
-        let mut stream = TcpStream::connect(address).unwrap();
+    impl At {
+        fn port(self) -> u16 {
+            self.address.port()
+        }
+    }
+
+    fn served() -> (Publisher, At) {
+        let (publisher, reader) = channel();
+        let served = serve(reader, 0).expect("a free port on this machine");
+        let word: &'static str = Box::leak(served.word.clone().into_boxed_str());
+        assert_eq!(served.url(), format!("http://127.0.0.1:{}/{word}/", served.address.port()));
+        (publisher, At { address: served.address, word })
+    }
+
+    /// Send `request` as it is, and read everything that comes back until
+    /// the page closes the connection.
+    fn ask_raw(at: At, request: &str) -> String {
+        let mut stream = TcpStream::connect(at.address).unwrap();
         stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
         stream.write_all(request.as_bytes()).unwrap();
         let mut answer = String::new();
@@ -456,14 +527,84 @@ mod tests {
         answer
     }
 
-    fn get(address: SocketAddr, path: &str) -> String {
-        ask(address, &format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\n\r\n", address.port()))
+    /// The same, with the word put before the path the request names, as
+    /// the page's own requests have it.
+    fn ask(at: At, request: &str) -> String {
+        let (first, rest) = request.split_once("\r\n").unwrap_or((request, ""));
+        let first = match first.split_once(" /") {
+            Some((method, target)) => format!("{method} /{}/{target}", at.word),
+            None => first.to_string(),
+        };
+        ask_raw(at, &format!("{first}\r\n{rest}"))
+    }
+
+    fn get(at: At, path: &str) -> String {
+        ask(at, &format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\n\r\n", at.port()))
+    }
+
+    #[test]
+    fn without_the_word_a_request_gets_nothing_of_the_page_and_no_data() {
+        let (publisher, at) = served();
+        publisher.publish(published(1));
+        let raw = |path: &str| {
+            ask_raw(at, &format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\n\r\n", at.port()))
+        };
+        let word = at.word;
+        let mut wrong: Vec<u8> = word.bytes().collect();
+        wrong[15] = if wrong[15] == b'a' { b'b' } else { b'a' };
+        let wrong = String::from_utf8(wrong).unwrap();
+        for path in [
+            "/".to_string(),
+            "/state".into(),
+            "/stream".into(),
+            "/page.js".into(),
+            format!("/{wrong}/"),
+            format!("/{wrong}/state"),
+            format!("/{}/state", word.to_uppercase()),
+            format!("/{word}x/state"),
+            format!("/{}/state", &word[..15]),
+            format!("/x/{word}/state"),
+            "//state".into(),
+        ] {
+            let answer = raw(&path);
+            assert!(answer.starts_with("HTTP/1.1 404"), "{path}: {answer}");
+            let body = answer.split_once("\r\n\r\n").unwrap().1;
+            assert_eq!(body, NOTHING, "{path}: the same few words, whatever was asked");
+            assert!(!answer.contains(word), "{path}: the word is never said back");
+        }
+        // With it, all of it.
+        assert!(raw(&format!("/{word}/")).contains("<title>Lillignode</title>"));
+        assert!(raw(&format!("/{word}/state")).contains("\"seats\""));
+        // The word without the slash after it is sent on to it.
+        let moved = raw(&format!("/{word}"));
+        assert!(moved.starts_with("HTTP/1.1 308"), "{moved}");
+        assert!(moved.contains(&format!("Location: /{word}/\r\n")), "{moved}");
+    }
+
+    #[test]
+    fn the_word_is_new_each_start_and_made_of_letters_that_are_not_mistaken() {
+        let words: Vec<String> = (0..50).map(|_| new_word()).collect();
+        for word in &words {
+            assert_eq!(word.len(), WORD_LETTERS);
+            assert!(word.bytes().all(|b| LETTERS.contains(&b)), "{word}");
+            assert!(!word.contains(['0', '1', 'l', 'o']), "{word}");
+        }
+        let mut distinct = words.clone();
+        distinct.sort();
+        distinct.dedup();
+        assert_eq!(distinct.len(), words.len(), "no two alike");
+        let (_, one) = served();
+        let (_, two) = served();
+        assert_ne!(one.word, two.word, "each start its own");
+        // Compared whole: a word that is only its start, or longer, is not it.
+        assert!(is_word("abc", "abc"));
+        assert!(!is_word("ab", "abc") && !is_word("abcd", "abc") && !is_word("abd", "abc"));
     }
 
     #[test]
     fn it_listens_on_this_machine_only_and_serves_the_page_with_its_limits() {
         let (_publisher, address) = served();
-        assert!(address.ip().is_loopback(), "{address}");
+        assert!(address.address.ip().is_loopback(), "{}", address.address);
         let page = get(address, "/");
         assert!(page.starts_with("HTTP/1.1 200 OK"), "{page}");
         assert!(page.contains("<title>Lillignode</title>"));

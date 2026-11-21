@@ -259,6 +259,8 @@ pub struct App<B: AgentBackend> {
     /// Windows only: Microsoft's newer pseudo-terminal is not beside
     /// `lillignode.exe`, so Claude Code's status cannot get through.
     pub newer_pty_missing: bool,
+    /// The page's address, word and all, while it is being served.
+    page_address: Option<String>,
 }
 
 /// Said when the workspace could not be saved, with the reason.
@@ -468,6 +470,7 @@ impl<B: AgentBackend> App<B> {
             status_off_switch: std::env::var(status::OFF_SWITCH).ok(),
             unknown_notice_up: Vec::new(),
             newer_pty_missing: newer_pty_missing(),
+            page_address: None,
         };
         app.say_events();
         app
@@ -587,11 +590,17 @@ impl<B: AgentBackend> App<B> {
     /// and what it shows to whom, or why it is not there and what to do.
     /// Either way agents are not affected.
     pub fn page_started(&mut self, started: Result<String, String>) {
+        let menu = self.config.menu_keys.first().map(|k| k.label()).unwrap_or_default();
         let text = match started {
-            Ok(address) => format!(
-                "The page is on: {address}  It shows agents' names, status and screens to \
-                 anything on this machine. Off: take \"page\" out of the settings file."
-            ),
+            // Cut to fit, a notice keeps its last sentence: if the address
+            // is lost from it, how to see it again is not.
+            Ok(address) => {
+                self.page_address = Some(address.clone());
+                format!(
+                    "The page is on: {address}  Anyone with this address can see your agents. {menu} then \
+                     s shows it again."
+                )
+            }
             Err(why) => format!(
                 "The page was not started on port {} ({why}). Agents work as before. If another program \
                  has that port, set \"page_port\" in the settings file, or take \"page\" out.",
@@ -1988,8 +1997,26 @@ impl<B: AgentBackend> App<B> {
     /// What the status report panel says about the focused agent: what the
     /// sidebar shows and why, and the last report exactly as it arrived, so
     /// an Unknown can be traced to its cause.
+    /// Where the page is, for the foot of the status report: the one place
+    /// the address can be read again once its notice is gone.
+    fn page_lines(&self) -> String {
+        match &self.page_address {
+            Some(address) => format!(
+                "\nThe page: {address}\nAnyone with this address can see every agent's name, status and \
+                 screen while Lillignode is open. The next start gives it a new address.\n"
+            ),
+            None => String::new(),
+        }
+    }
+
     pub fn status_report_text(&self) -> String {
-        let Some(e) = self.engine.ws.focused() else { return "No agent is open.".to_string() };
+        let mut out = self.status_report_body();
+        out += &self.page_lines();
+        out
+    }
+
+    fn status_report_body(&self) -> String {
+        let Some(e) = self.engine.ws.focused() else { return "No agent is open.\n".to_string() };
         let t = &e.track;
         let heard = t.trace();
         // Who the agent was started as, if that is a program known to
@@ -4130,18 +4157,39 @@ Cost",
     fn the_page_being_on_or_not_is_said_once_with_where_it_is_or_what_to_do() {
         let room = 2 * usize::from(crate::ui::MIN_COLS);
         let mut app = app_with_claude_agents(1);
+        let word = "abcdefghijkmnpqr";
         app.notice = Some("Earlier notice.".into());
-        app.page_started(Ok("http://127.0.0.1:7501/".into()));
+        assert!(!app.status_report_text().contains("The page"), "nothing said of a page not started");
+        app.page_started(Ok(format!("http://127.0.0.1:7501/{word}/")));
         let said = app.notice.clone().unwrap();
-        assert!(said.starts_with("The page is on: http://127.0.0.1:7501/  It shows"), "{said}");
+        assert!(
+            said.starts_with(&format!(
+                "The page is on: http://127.0.0.1:7501/{word}/  Anyone with this address can see your agents."
+            )),
+            "{said}"
+        );
         assert!(said.ends_with("Earlier notice."), "what was up stays after it");
         // Alone, it fits the two notice rows of the narrowest window whole,
         // with the longest address there is.
         app.notice = None;
-        app.page_started(Ok("http://127.0.0.1:65535/".into()));
+        app.page_started(Ok(format!("http://127.0.0.1:65535/{word}/")));
         let said = app.notice.clone().unwrap();
         assert!(said.chars().count() <= room, "{} characters: {said}", said.chars().count());
-        assert!(said.ends_with("Off: take \"page\" out of the settings file."), "{said}");
+        assert!(said.ends_with("Ctrl+Q then s shows it again."), "{said}");
+        // Cut to fit beside other notices, it keeps how to see it again.
+        app.notice = Some(said.clone() + "  Another notice ends here.");
+        let fitted = app.notice_fitted(60).unwrap();
+        assert!(fitted.ends_with("Another notice ends here."), "{fitted}");
+        // The status report has the address whole, at its foot, with or
+        // without an agent open.
+        let report = app.status_report_text();
+        assert!(report.contains(&format!("\nThe page: http://127.0.0.1:65535/{word}/\n")), "{report}");
+        assert!(report.trim_end().ends_with("The next start gives it a new address."), "{report}");
+        let mut empty = app_with_claude_agents(0);
+        empty.page_started(Ok(format!("http://127.0.0.1:7501/{word}/")));
+        let report = empty.status_report_text();
+        assert!(report.starts_with("No agent is open.\n"), "{report}");
+        assert!(report.contains(&format!("The page: http://127.0.0.1:7501/{word}/")), "{report}");
 
         // Not started: the port, the system's reason, that agents are not
         // affected, and what to do, which is kept however long the reason.
