@@ -33,12 +33,12 @@ use crate::workspace::{AgentKey, Entry, Happened, NoPair, Pair, RestoreReport, W
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Event {
     /// An agent's program ended.
-    Exited { label: String, exit: Exit },
+    Exited { agent: AgentKey, label: String, exit: Exit },
     /// An agent could not continue its earlier conversation and was started
     /// again with a new one.
-    StartedNewConversation { label: String },
+    StartedNewConversation { agent: AgentKey, label: String },
     /// As above, but the fresh start failed too.
-    CouldNotContinue { label: String, why: String },
+    CouldNotContinue { agent: AgentKey, label: String, why: String },
     /// The workspace could not be saved after a change. What was saved
     /// before is left as it was; nothing in memory is lost.
     SaveFailed { why: String },
@@ -57,11 +57,11 @@ pub enum Event {
     StatusBack { kind: AgentKind },
     /// The cost of this agent was looked for and could not be read. Once in
     /// a run.
-    CostUnreadable { label: String },
+    CostUnreadable { agent: AgentKey, label: String },
     /// This agent's conversation has passed the user's cost warning, at
     /// this many tokens. Once for a conversation. A warning only: nothing
     /// was stopped.
-    PassedCostWarning { label: String, tokens: u64 },
+    PassedCostWarning { agent: AgentKey, label: String, tokens: u64 },
 }
 
 /// How many of the latest events are kept for a reader that asks late.
@@ -82,21 +82,24 @@ pub struct EventsAfter {
 
 impl Event {
     /// The event said plainly, with its number: a fixed word for what
-    /// happened, and the name and folder of the agent it happened to, if
-    /// to one. The agent's key is given only for an agent that began to
-    /// need you; the other events name their agent by its label alone.
+    /// happened, and the key, name and folder of the agent it happened to,
+    /// if to one.
     pub fn plain(&self, number: u64) -> EventCopy {
         let (what, agent, label) = match self {
-            Event::Exited { label, .. } => ("exited", None, Some(label)),
-            Event::StartedNewConversation { label } => ("started-new-conversation", None, Some(label)),
-            Event::CouldNotContinue { label, .. } => ("could-not-continue", None, Some(label)),
+            Event::Exited { agent, label, .. } => ("exited", Some(*agent), Some(label)),
+            Event::StartedNewConversation { agent, label } => {
+                ("started-new-conversation", Some(*agent), Some(label))
+            }
+            Event::CouldNotContinue { agent, label, .. } => ("could-not-continue", Some(*agent), Some(label)),
             Event::SaveFailed { .. } => ("save-failed", None, None),
             Event::SavedAgain => ("saved-again", None, None),
             Event::BeganNeedingYou { agent, label } => ("began-needing-you", Some(*agent), Some(label)),
             Event::StatusUnavailable { .. } => ("status-unavailable", None, None),
             Event::StatusBack { .. } => ("status-back", None, None),
-            Event::CostUnreadable { label } => ("cost-unreadable", None, Some(label)),
-            Event::PassedCostWarning { label, .. } => ("passed-cost-warning", None, Some(label)),
+            Event::CostUnreadable { agent, label } => ("cost-unreadable", Some(*agent), Some(label)),
+            Event::PassedCostWarning { agent, label, .. } => {
+                ("passed-cost-warning", Some(*agent), Some(label))
+            }
         };
         EventCopy { number, what, agent, label: label.cloned() }
     }
@@ -394,11 +397,11 @@ impl<B: AgentBackend> Engine<B> {
             });
             if let Some(entry) = failed {
                 self.cost_said = true;
-                said.push(Event::CostUnreadable { label: entry.label() });
+                said.push(Event::CostUnreadable { agent: entry.key(), label: entry.label() });
             }
         }
-        for (label, tokens) in self.ws.take_passed_cost_warning() {
-            said.push(Event::PassedCostWarning { label, tokens });
+        for (agent, label, tokens) in self.ws.take_passed_cost_warning() {
+            said.push(Event::PassedCostWarning { agent, label, tokens });
         }
         for event in said {
             self.say(event);
@@ -577,13 +580,13 @@ impl<B: AgentBackend> Engine<B> {
     pub fn handle(&mut self, event: AgentEvent) {
         let Some(happened) = self.ws.handle(event) else { return };
         let event = match happened {
-            Happened::Exited { label, exit } => Event::Exited { label, exit },
-            Happened::StartedNewConversation { label } => {
+            Happened::Exited { agent, label, exit } => Event::Exited { agent, label, exit },
+            Happened::StartedNewConversation { agent, label } => {
                 // The new conversation's id is kept.
                 self.changed();
-                Event::StartedNewConversation { label }
+                Event::StartedNewConversation { agent, label }
             }
-            Happened::CouldNotContinue { label, why } => Event::CouldNotContinue { label, why },
+            Happened::CouldNotContinue { agent, label, why } => Event::CouldNotContinue { agent, label, why },
         };
         self.say(event);
     }
@@ -1575,6 +1578,9 @@ mod tests {
         assert_eq!(published.events_let_go, 0);
         let plain: Vec<(u64, &str)> = published.events.iter().map(|ev| (ev.number, ev.what)).collect();
         assert_eq!(plain, [(1, "exited"), (2, "exited")]);
+        // Each names the agent it happened to by its key, not only in words.
+        assert_eq!(published.events[0].agent, Some(key(&e, 0)));
+        assert_eq!(published.events[1].agent, Some(key(&e, 1)));
         assert_eq!(published.events[0].label.as_deref(), Some(e.ws.entries()[0].label().as_str()));
         assert_eq!(published.screens.len(), 2, "a screen for each agent asked for");
         assert_eq!(published.screens[0].0, key(&e, 0));

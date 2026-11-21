@@ -366,16 +366,19 @@ pub struct RestoreReport {
 #[derive(Debug, PartialEq, Eq)]
 pub enum Happened {
     Exited {
+        agent: AgentKey,
         label: String,
         exit: Exit,
     },
     /// It could not continue its earlier conversation and was started again
     /// with a new one.
     StartedNewConversation {
+        agent: AgentKey,
         label: String,
     },
     /// As above, but the fresh start failed too.
     CouldNotContinue {
+        agent: AgentKey,
         label: String,
         why: String,
     },
@@ -464,13 +467,13 @@ impl<B: AgentBackend> Workspace<B> {
 
     /// Agents that have passed the warning since the last call, with the
     /// count each had reached. Each is named once for its conversation.
-    pub fn take_passed_cost_warning(&mut self) -> Vec<(String, u64)> {
+    pub fn take_passed_cost_warning(&mut self) -> Vec<(AgentKey, String, u64)> {
         let warn_at = self.cost_warning;
         let mut passed = Vec::new();
         for entry in self.entries.iter_mut().filter(|e| !e.cost_warned) {
             if let Some(count) = cost::over(&entry.cost(), warn_at) {
                 entry.cost_warned = true;
-                passed.push((entry.label(), count));
+                passed.push((entry.key(), entry.label(), count));
             }
         }
         passed
@@ -923,11 +926,11 @@ impl<B: AgentBackend> Workspace<B> {
                 let entry = &mut self.entries[index];
                 entry.id = None;
                 entry.status = Status::Exited(exit);
-                let label = entry.label();
+                let (agent, label) = (entry.key(), entry.label());
                 let resume_failed =
                     !exit.clean() && entry.resuming_since.take().is_some_and(|t| t.elapsed() < RESUME_WINDOW);
                 if !resume_failed {
-                    return Some(Happened::Exited { label, exit });
+                    return Some(Happened::Exited { agent, label, exit });
                 }
                 // The earlier conversation is not there to continue (for
                 // example, nothing was ever said in it). Start a new one
@@ -945,9 +948,9 @@ impl<B: AgentBackend> Workspace<B> {
                         entry.saved = saved;
                         entry.status = Status::Running;
                         entry.id = id;
-                        Some(Happened::StartedNewConversation { label })
+                        Some(Happened::StartedNewConversation { agent, label })
                     }
-                    Status::NotStarted(why) => Some(Happened::CouldNotContinue { label, why }),
+                    Status::NotStarted(why) => Some(Happened::CouldNotContinue { agent, label, why }),
                     Status::Exited(_) => unreachable!("try_start never reports an exit"),
                 }
             }
@@ -1351,7 +1354,11 @@ mod tests {
         ws.restore(saved(vec![agent("claude", "api")], Some(0)));
         // Claude Code prints "No conversation found" and exits with code 1.
         let happened = ws.handle(AgentEvent::Exited(AgentId(1), Exit { code: 1 }));
-        assert_eq!(happened, Some(Happened::StartedNewConversation { label: "Claude Code (api)".into() }));
+        let agent = ws.entries()[0].key();
+        assert_eq!(
+            happened,
+            Some(Happened::StartedNewConversation { agent, label: "Claude Code (api)".into() })
+        );
         assert_eq!(ws.focused().unwrap().status, Status::Running);
 
         let new_id = ws.to_saved().agents[0].conversation.clone().unwrap();
@@ -1393,7 +1400,11 @@ mod tests {
         let died = ws.handle(AgentEvent::Exited(AgentId(1), Exit { code: 3 }));
         assert_eq!(
             died,
-            Some(Happened::Exited { label: "Claude Code (api)".into(), exit: Exit { code: 3 } })
+            Some(Happened::Exited {
+                agent: ws.entries()[0].key(),
+                label: "Claude Code (api)".into(),
+                exit: Exit { code: 3 }
+            })
         );
         assert_eq!(ws.focused().unwrap().status, Status::Exited(Exit { code: 3 }));
         // Still in the workspace, so it comes back on the next launch.
@@ -1839,7 +1850,7 @@ mod tests {
         ws.tick(now + crate::cost::LOOK_EVERY);
         assert_eq!(ws.over_cost_warning(&ws.entries[0]), Some(2300));
         let passed = ws.take_passed_cost_warning();
-        assert_eq!(passed, vec![(ws.entries[0].label(), 2300)]);
+        assert_eq!(passed, vec![(ws.entries[0].key(), ws.entries[0].label(), 2300)], "with its key");
         assert!(ws.take_passed_cost_warning().is_empty(), "once");
         assert_eq!(ws.over_cost_warning(&ws.entries[0]), Some(2300), "the row stays marked");
         // A cost that is pending or unknown is never over: there is no
@@ -1950,7 +1961,10 @@ mod tests {
         // still Claude Code, and told the new id the way Claude Code is.
         assert_eq!(
             ws.handle(AgentEvent::Exited(AgentId(1), Exit { code: 1 })),
-            Some(Happened::StartedNewConversation { label: "Claude Code (api)".into() })
+            Some(Happened::StartedNewConversation {
+                agent: ws.entries()[0].key(),
+                label: "Claude Code (api)".into()
+            })
         );
         assert_eq!(kinds(&ws), both);
         let new_id = ws.focused().unwrap().saved.conversation.clone().unwrap();
@@ -2163,7 +2177,11 @@ mod tests {
         // continue, because it was never asked to continue.
         assert_eq!(
             ws.handle(AgentEvent::Exited(AgentId(1), Exit { code: 1 })),
-            Some(Happened::Exited { label: "Codex (web)".into(), exit: Exit { code: 1 } })
+            Some(Happened::Exited {
+                agent: ws.entries()[0].key(),
+                label: "Codex (web)".into(),
+                exit: Exit { code: 1 }
+            })
         );
         assert_eq!(ws.focused().unwrap().reported(), None);
         assert_eq!(ws.restart_focused(), Some(false));

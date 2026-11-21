@@ -517,7 +517,7 @@ impl<B: AgentBackend> App<B> {
                     }
                     continue;
                 }
-                Event::CostUnreadable { label } => {
+                Event::CostUnreadable { label, .. } => {
                     let menu = self.config.menu_keys.first().map(|k| k.label()).unwrap_or_default();
                     self.say_first(format!(
                         "Cost shows unknown for {label}: Lillignode could not read Claude Code's record of \
@@ -526,7 +526,7 @@ impl<B: AgentBackend> App<B> {
                     continue;
                 }
                 // Only told: no key is held, no agent stopped, no bell rung.
-                Event::PassedCostWarning { label, tokens } => {
+                Event::PassedCostWarning { label, tokens, .. } => {
                     let menu = self.config.menu_keys.first().map(|k| k.label()).unwrap_or_default();
                     let limit = self.engine.ws.cost_warning().map(cost::short).unwrap_or_default();
                     self.say_first(format!(
@@ -548,16 +548,14 @@ impl<B: AgentBackend> App<B> {
                     self.save_problem = None;
                     continue;
                 }
-                Event::Exited { label, exit } if exit.clean() => format!("{label} exited. {still_here}"),
-                Event::Exited { label, exit } => {
+                Event::Exited { label, exit, .. } if exit.clean() => format!("{label} exited. {still_here}"),
+                Event::Exited { agent, label, exit } => {
                     // Started as a kind its name does not suggest, it may
                     // have been given options it does not take.
                     let chosen = self
                         .engine
                         .ws
-                        .entries()
-                        .iter()
-                        .find(|e| e.label() == label)
+                        .by_key(agent)
                         .filter(|e| e.kind() != AgentKind::Program && !e.kind_by_name())
                         .map(|e| {
                             format!(
@@ -569,14 +567,14 @@ impl<B: AgentBackend> App<B> {
                         .unwrap_or_default();
                     format!("{label} stopped with an error (exit code {}). {still_here}{chosen}", exit.code)
                 }
-                Event::StartedNewConversation { label } => {
+                Event::StartedNewConversation { label, .. } => {
                     format!(
                         "{label} could not continue its earlier conversation (there may have been nothing \
                          in it yet), so it started a new conversation. If there was an earlier one, the \
                          agent's own resume command may still find it."
                     )
                 }
-                Event::CouldNotContinue { label, why } => format!(
+                Event::CouldNotContinue { label, why, .. } => format!(
                     "{label} could not continue its earlier conversation, and starting a new one failed: \
                      {why}. {still_here}"
                 ),
