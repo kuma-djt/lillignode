@@ -157,7 +157,9 @@ fn engine_files_hold_no_screen_or_keyboard_code() {
 /// What a reader's text does that it may not. Its tests may publish, to
 /// have something to read; they are not looked at.
 fn reader_trespasses(text: &str) -> Vec<String> {
-    let own = text.split("#[cfg(test)]\nmod tests").next().unwrap_or(text);
+    // A checkout on Windows may end its lines with a carriage return too.
+    let text = text.replace("\r\n", "\n");
+    let own = text.split("#[cfg(test)]\nmod tests").next().unwrap_or(&text);
     let mut found = trespasses(own);
     found.extend(
         NOT_FOR_A_READER.iter().filter(|name| own.contains(**name)).map(|name| format!("names {name}")),
