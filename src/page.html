@@ -10,7 +10,7 @@
 <body>
 <header>
   <h1>Lillignode</h1>
-  <p id="readonly">Read only. This page shows what Lillignode shows and sends nothing back.</p>
+  <p id="standing">Read only. This page shows what Lillignode shows and sends nothing back.</p>
   <p id="contact">Waiting to hear from Lillignode.</p>
 </header>
 
@@ -30,6 +30,20 @@
     <h2 id="terminal-title">Terminal<span id="terminal-name"></span></h2>
     <p id="terminal-note" class="quiet">Choose an agent to see its terminal.</p>
     <pre id="terminal" aria-label="The selected agent's terminal, read only" tabindex="0"></pre>
+    <!-- Shown only where Lillignode's settings let this page type to agents. -->
+    <div id="typing" hidden>
+      <label id="typing-to" for="typing-text">To</label>
+      <textarea id="typing-text" rows="3" spellcheck="false" autocomplete="off"></textarea>
+      <div id="typing-row">
+        <button type="button" id="typing-send" disabled>Send</button>
+        <p id="typing-said" role="status"></p>
+      </div>
+      <div id="typing-ask" hidden>
+        <p id="typing-question"></p>
+        <button type="button" id="typing-yes">Yes, send it</button>
+        <button type="button" id="typing-no">No</button>
+      </div>
+    </div>
   </section>
 
   <section id="board" aria-labelledby="board-title">

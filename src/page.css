@@ -46,7 +46,9 @@ header {
   padding: 10px 16px;
   border-bottom: 1px solid var(--rule);
 }
-#readonly { color: var(--cream-quiet); font-size: 13px; }
+#standing { color: var(--cream-quiet); font-size: 13px; }
+/* This page can type to agents: said plainly, where "Read only" was. */
+#standing.can-type { color: var(--cream); font-weight: 700; }
 #contact { margin-left: auto; font-size: 14px; }
 #contact.late { color: var(--cream); font-weight: 700; }
 /* Lost contact: the loudest thing on the page, in the page's own colours
@@ -124,6 +126,40 @@ li.gone .agent-name { color: var(--cream-quiet); }
   tab-size: 8;
 }
 #terminal:empty { display: none; }
+
+/* Typing to the agent shown. Only where Lillignode's settings allow it. */
+#typing { flex: none; margin: 0 16px 16px; }
+#typing[hidden], #typing-ask[hidden] { display: none; }
+#typing-to { display: block; font-weight: 600; padding-bottom: 4px; }
+#typing-text {
+  display: block;
+  width: 100%;
+  resize: vertical;
+  padding: 8px 10px;
+  background: var(--navy-deep);
+  color: var(--cream);
+  border: 1px solid var(--cream-quiet);
+  border-radius: 3px;
+  font: 14px/1.3 "Cascadia Mono", "Cascadia Code", Consolas, "DejaVu Sans Mono", Menlo, monospace;
+}
+#typing-text:focus-visible, #typing button:focus-visible { outline: 2px solid var(--cream); outline-offset: 1px; }
+#typing-row { display: flex; align-items: baseline; gap: 12px; padding-top: 8px; }
+#typing button {
+  flex: none;
+  background: var(--cream);
+  color: var(--navy);
+  border: 0;
+  border-radius: 3px;
+  font: inherit;
+  font-weight: 700;
+  padding: 6px 16px;
+  cursor: pointer;
+}
+#typing button:disabled { background: var(--rule); color: var(--cream-quiet); cursor: default; }
+#typing-said.refused { font-weight: 700; }
+#typing-ask { padding-top: 8px; }
+#typing-question { font-weight: 700; padding-bottom: 8px; }
+#typing-ask button { margin-right: 8px; }
 /* Read by a screen reader, not shown. */
 #announce { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 /* What is on the page is from before contact was lost. */
@@ -133,5 +169,6 @@ body.stale main { opacity: 0.55; }
   main { display: block; overflow: auto; }
   #agents-column, #middle { border-right: 0; border-bottom: 1px solid var(--rule); }
   #terminal { margin: 0 8px 12px; }
+  #typing { margin: 0 8px 12px; }
   #contact { margin-left: 0; }
 }

@@ -23,8 +23,12 @@
 //!
 //! `page`: true to serve a read-only page on this machine, for a browser:
 //! each agent's status and screen. Off unless set to true. It listens only
-//! on this machine (127.0.0.1), at `page_port` (7501 unless said). While it
-//! is on, any program on this machine can read it.
+//! on this machine (127.0.0.1), at `page_port` (7501 unless said), under a
+//! random word in its address. Anyone with the whole address can read it.
+//!
+//! `page_can_type`: true to let that page type to agents as well: a text
+//! box under the agent's terminal, sent as if typed, then Enter. Off unless
+//! set to true, whatever `page` is. Needs `page` to be true.
 //!
 //! A missing file means the defaults. A file that cannot be used also means
 //! the defaults, with a message saying what was wrong: a mistake in this
@@ -140,6 +144,9 @@ pub struct Config {
     pub page: bool,
     /// The port the page is served at.
     pub page_port: u16,
+    /// Let the page type to agents. Off unless the user asks, apart from
+    /// `page`: a page that is on is read only until this is too.
+    pub page_can_type: bool,
 }
 
 /// How the user pays, which decides whether a dollar figure means anything
@@ -169,6 +176,7 @@ impl Default for Config {
             colors: Colors::Auto,
             page: false,
             page_port: DEFAULT_PAGE_PORT,
+            page_can_type: false,
         }
     }
 }
@@ -205,6 +213,7 @@ struct File {
     colors: Option<String>,
     page: Option<bool>,
     page_port: Option<u32>,
+    page_can_type: Option<bool>,
 }
 
 fn parse(text: &str) -> Result<Config, String> {
@@ -249,6 +258,13 @@ fn parse(text: &str) -> Result<Config, String> {
         Some(port) => {
             return Err(format!("make \"page_port\" a number from 1024 to 65535; it is {port}"));
         }
+    };
+    config.page_can_type = match file.page_can_type {
+        // Said, so the user does not look for a box that is not there.
+        Some(true) if !config.page => {
+            return Err("add \"page\": true, or take out \"page_can_type\", which needs it".to_string());
+        }
+        can => can.unwrap_or(false),
     };
     let Some(specs) = file.menu_keys else { return Ok(config) };
     if specs.is_empty() {
@@ -347,6 +363,22 @@ mod tests {
             assert!(bad.starts_with("make \"page_port\" a number from 1024 to 65535"), "{bad}");
         }
         assert!(parse(r#"{"page": "yes"}"#).is_err());
+    }
+
+    #[test]
+    fn the_page_cannot_type_unless_asked_apart_from_being_on() {
+        assert!(!Config::default().page_can_type);
+        // On, it is still read only.
+        assert!(!parse(r#"{"page": true}"#).unwrap().page_can_type);
+        assert!(!parse(r#"{"page": true, "page_can_type": false}"#).unwrap().page_can_type);
+        assert!(parse(r#"{"page": true, "page_can_type": true}"#).unwrap().page_can_type);
+        // Asked for with no page: said, not passed over.
+        for text in [r#"{"page_can_type": true}"#, r#"{"page": false, "page_can_type": true}"#] {
+            let needs = parse(text).unwrap_err();
+            assert!(needs.starts_with("add \"page\": true, or take out \"page_can_type\""), "{needs}");
+        }
+        assert!(!parse(r#"{"page_can_type": false}"#).unwrap().page_can_type, "off needs nothing");
+        assert!(parse(r#"{"page": true, "page_can_type": "yes"}"#).is_err());
     }
 
     #[test]

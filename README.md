@@ -130,14 +130,27 @@ Put `"cost": true` in the settings file and Lillignode shows, under each Claude 
 - **A warning, if you want one.** Add `"cost_warning_tokens": 500000` (any count above zero) and a conversation that reaches it gets PAST WARNING in bold beside its figure, and one notice. That is all it does: nothing is stopped, held, or asked. The warning is for each conversation by itself, not for all of them added up, and it is given again each time Lillignode is started while the conversation is past it.
 - **Dollars** are an estimate from a price list built into the program, shown in the sidebar only if you put `"billing": "key"` in the settings file. Unlike the token count, the estimate includes cache reads, because they are billed. Plan limits are not shown.
 
-## The page (read only, off by default)
+## The page (off by default, and read only unless you say otherwise)
 
-Put `"page": true` in the settings file and Lillignode also serves a page for a browser on this machine. Its address is `http://127.0.0.1:7501/` (`"page_port"` sets another port) followed by a random word, new each time Lillignode starts, such as `http://127.0.0.1:7501/b9iq5c8f72cy7ev3/`. Lillignode shows the whole address when it starts, and again at the foot of the status report (menu key, then `s`).
+Put `"page": true` in the settings file and Lillignode also serves a page for a browser on this machine. Its address is `http://127.0.0.1:7501/` (`"page_port"` sets another port) followed by a random word, such as `http://127.0.0.1:7501/b9iq5c8f72cy7ev3/`. Lillignode shows the whole address when it starts, and again at the foot of the status report (menu key, then `s`).
+
+- **The address stays the same.** The word is made once and kept in a file only you can read (`page-word`, beside your workspace; `lillignode --where` says where), so you can bookmark the page, and a page left open comes back by itself after Lillignode is started again. The menu key, then `w`, makes a new word: the old address stops working at once, a page open on it says so, and Lillignode shows the new one.
 
 - **What it shows.** One row for each agent with its status and how long ago it reported it ("Working, 2 s ago", "Needs you, waiting 4 min", "Unknown: no report"); the terminal of the agent you choose, live; and, above everything, a strip titled "Blocking now" naming each agent that needs you and how long it has waited. A third column, "Board", says it is not connected yet: nothing is behind it.
-- **It is read only.** The page can ask Lillignode for nothing and type nothing. Choosing an agent on the page changes only what the page shows.
-- **It says how fresh it is.** The header says when the page last heard from Lillignode, and says so plainly when it has lost contact; what is on the page then is marked as old. After Lillignode is started again the old page cannot follow, because the address has changed: it says so, and you open the new one.
-- **Who can read it.** It listens on this machine only, never on the network, and answers only at its address with the word: anything else gets nothing of the page. Anyone with the address can read every agent's name, folder, status and screen; a page on another web site cannot. It is the one way an agent's screen leaves Lillignode's own window, which is why it is off unless you ask.
+- **It is read only.** The page can ask Lillignode for nothing and type nothing. Choosing an agent on the page changes only what the page shows. (Unless you switch typing on: see below.)
+- **It says how fresh it is.** The header says when the page last heard from Lillignode, and says so plainly when it has lost contact; what is on the page then is marked as old, and it keeps trying.
+- **Who can read it.** It listens on this machine only, never on the network, and answers only at its address with the word: anything else gets nothing of the page. Anyone with the address can read every agent's name, folder, status and screen; a page on another web site cannot. It is the one way an agent's screen leaves Lillignode's own window, which is why it is off unless you ask. The word is in your browser's history and in a file of yours, so a program running as you can find it. A page left open while Lillignode is closed keeps asking for its address: a program on this machine that took the port meanwhile would be told the word. If you think it has got out, the menu key, then `w`.
+
+### Typing to an agent from the page (off unless you ask, apart from the page)
+
+Add `"page_can_type": true` beside `"page": true` and the page gets a box under the agent's terminal, labelled "To" and the agent's name, and a Send button. Send passes the text to that agent as if you had typed it in Lillignode, then Enter.
+
+- **Anyone with the address can then type to your agents,** which for a coding agent can mean running commands as you. So with typing on, the address is not kept: the word is new each time Lillignode starts and is saved nowhere, the page cannot be bookmarked, and a page left open cannot follow a new start. The page answers only at `127.0.0.1`, not at `localhost`.
+- **It says so.** The page's header says it can type instead of "Read only"; Lillignode's start notice and status report say so; and each time the page sends, Lillignode's own window says "The page typed to" and the agent's name.
+- **Only to the agent named beside the box.** Once there is text in the box it is for that agent until you choose another; the page does not move it to whichever agent comes to the front.
+- **The same rules as a paste.** Control characters are taken out and said. Text of more than one line for an agent that does not take a paste as one block asks first, on the page, in the words Lillignode's own window uses. A stopped or closed agent refuses, in those words too. An empty box sends nothing, so Enter alone cannot be sent.
+- **Who can send.** Only the page itself: a request must come from the page's own address, carry a token the page is given with its data, and be made the way only the page's script makes it. A link, a form, or a page on another web site cannot. A program running as you that has learned the address can.
+- **Not yet checked by a person, and never with a real agent.** Whether a real agent takes Enter straight after a paste the way the stand-in does is not known.
 - **Not yet checked by a person.** Checked by script, with stand-in agents, in a browser with no window. The agent's terminal on the page is its text and colours as the agent sent them; it is not an exact copy of the terminal window, and history cannot be read there.
 
 ## Settings
@@ -160,9 +173,15 @@ The page, which is off unless you ask:
 { "page": true, "page_port": 7501 }
 ```
 
+And to let that page type to agents, which is off unless you ask even when the page is on:
+
+```json
+{ "page": true, "page_can_type": true }
+```
+
 If the colours come out wrong, add `"colors"` with `"full"`, `"256"`, `"16"` or `"none"`. Setting the `NO_COLOR` environment variable also switches colour off.
 
-All are optional, and a change takes effect the next time Lillignode is started. `billing` does nothing without `cost`, and `cost_warning_tokens` without it is reported as a mistake; so is `page_port` without `page`. A Lillignode older than the page does not know `"page"` and treats it as a mistake in the file.
+All are optional, and a change takes effect the next time Lillignode is started. `billing` does nothing without `cost`, and `cost_warning_tokens` without it is reported as a mistake; so is `page_port` or `page_can_type` without `page`. A Lillignode older than the page does not know `"page"` and treats it as a mistake in the file.
 
 **The file is strict.** One mistake in it and none of it is used: every setting is at its default until it is fixed. Lillignode never changes the file. It tells you when it starts, beginning with how to fix it ("To fix your settings file: ...") and naming the line and column where it can.
 
@@ -260,7 +279,7 @@ These are known and not yet fixed. Please do not report them as security problem
 - It saves which agents are open, their folders, and their conversation ids. It never saves what an agent printed.
 - Only if you switch cost on, it reads Claude Code's own record of each conversation it started, read-only, and keeps only the token counts and the model name.
 - It does not change Claude Code's settings.
-- Only if you switch the page on, it listens on this machine (127.0.0.1) and shows agents' status and screens to a browser here that has its address. It opens no port otherwise.
+- Only if you switch the page on, it listens on this machine (127.0.0.1) and shows agents' status and screens to a browser here that has its address. It opens no port otherwise. It then keeps one small file of its own, the word in that address. Only if you also switch typing on can anything be sent to an agent from the page.
 
 ## Checking your changes
 

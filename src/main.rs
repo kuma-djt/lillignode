@@ -21,6 +21,8 @@ enum Msg {
     /// A key, paste or resize, and when it was read.
     Input(Input, Instant),
     Agent(AgentEvent),
+    /// Text typed on the page for an agent.
+    Typed(page::Typed),
 }
 
 impl From<AgentEvent> for Msg {
@@ -53,10 +55,14 @@ Code's own record of each conversation on this machine, and changes nothing.
 
 To see your agents in a browser on this machine, add \"page\": true to that
 file. It is off unless you ask. Its address is http://127.0.0.1:7501/ (set
-\"page_port\" for another port) and a word that is new each time Lillignode
-starts; Lillignode shows the whole address when it starts and in its status
-report. The page is read only. Anyone with the address can see every agent's
-name, status and screen.
+\"page_port\" for another port) and a random word, the same from one start
+to the next; Lillignode shows the whole address when it starts and in its
+status report. The menu, then w, makes a new word. Anyone with the address
+can see every agent's name, status and screen.
+
+The page is read only unless you also add \"page_can_type\": true. Then it
+has a box to type to the agent it shows, and anyone with the address can
+type to your agents.
 
 Each agent uses its own account. Lillignode does not ask for your keys and
 sends nothing anywhere.",
@@ -90,9 +96,11 @@ fn main() -> ExitCode {
                     println!("settings:  {}", dir.join(config::FILE).display());
                     if config.page {
                         println!(
-                            "page:      http://127.0.0.1:{}/ and a word new each start; Lillignode shows it",
-                            config.page_port
+                            "page:      http://127.0.0.1:{}/ and a word; Lillignode shows it. {}",
+                            config.page_port,
+                            if config.page_can_type { "It can type to agents." } else { "Read only." }
                         );
+                        println!("page word: {}", dir.join(page::WORD_FILE).display());
                     }
                     if let Some(problem) = &config_problem {
                         println!("\n{problem}");
@@ -165,6 +173,8 @@ fn main() -> ExitCode {
 
     let (tx, rx) = mpsc::channel::<Msg>();
     let backend = LocalAgents::new(tx.clone());
+    // Where the page's word is kept: beside the workspace.
+    let page_folder = state_dir.as_ref().ok().cloned();
     let mut app =
         App::launch(backend, ui::agent_size(window, false), state_dir, launch_dir, config, config_problem);
     app.set_window(window);
@@ -177,12 +187,25 @@ fn main() -> ExitCode {
     }
     app.colors = lillignode::look::depth(app.config.colors, |name| std::env::var(name).ok(), cfg!(windows));
     // The page: only when the user has asked for it. It is handed the
-    // reading half and nothing else; this loop publishes to the other.
+    // reading half; this loop publishes to the other. Only when the user
+    // has also asked that it may type is it handed anything else: a way to
+    // put what was typed on this loop's own queue, behind the keyboard.
     let publisher = app.config.page.then(snapshot::channel).and_then(|(publisher, reader)| {
-        let started = page::serve(reader, app.config.page_port);
-        let listening = started.is_ok();
-        app.page_started(started.as_ref().map(page::Served::url).map_err(String::clone));
-        listening.then_some(publisher)
+        let typing = app.config.page_can_type.then(|| {
+            let tx = tx.clone();
+            let pass: page::Typing = std::sync::Arc::new(move |typed| tx.send(Msg::Typed(typed)).is_ok());
+            pass
+        });
+        match page::serve(reader, app.config.page_port, page_folder.as_deref(), typing) {
+            Ok(served) => {
+                app.page_serving(served);
+                Some(publisher)
+            }
+            Err(why) => {
+                app.page_started(Err(why));
+                None
+            }
+        }
     });
     let mut published_at: Option<Instant> = None;
     let started = Instant::now();
@@ -252,6 +275,12 @@ fn main() -> ExitCode {
                     handed_over_us = read_at.elapsed().as_micros();
                 }
                 Msg::Input(Input::Paste(text), _) => app.on_paste(text),
+                Msg::Typed(typed) => {
+                    let (outcome, words) =
+                        app.typed_from_page(&typed.run, typed.agent, &typed.text, typed.agreed);
+                    // A page that has stopped waiting is told nothing.
+                    let _ = typed.answer.send(page::TypedAnswer { outcome, words });
+                }
                 Msg::Input(Input::Resize { cols, rows }, _) => {
                     app.set_window(ratatui::layout::Rect::new(0, 0, cols, rows));
                 }

@@ -15,14 +15,15 @@ use crate::agent::{AgentBackend, AgentEvent, Size, StartError};
 use crate::config::{Billing, Config};
 use crate::cost::{self, Cost, Usage, Waiting, WhyNot};
 use crate::engine::{
-    About, Answered, Engine, Event, Outcome, PasteOutcome, QuestionId, Refused, Room, RoomChange, Sent,
-    SentAs, Unfinished, ViewOutcome, Viewed,
+    About, Answered, Engine, Event, Outcome, PageTyped, PasteOutcome, QuestionId, Refused, Room, RoomChange,
+    Sent, SentAs, Unfinished, ViewOutcome, Viewed,
 };
 use crate::fit;
 use crate::input::Pasted;
 use crate::keys;
 use crate::kind::AgentKind;
 use crate::look::Depth;
+use crate::page::{self, TypedOutcome};
 use crate::state::{self, LoadOutcome};
 use crate::status::{self, AgentStatus, Reading};
 use crate::terminal::HISTORY_ROWS;
@@ -261,6 +262,13 @@ pub struct App<B: AgentBackend> {
     pub newer_pty_missing: bool,
     /// The page's address, word and all, while it is being served.
     page_address: Option<String>,
+    /// The page being served: held to give it a new address when asked.
+    page: Option<page::Served>,
+    /// The page was handed the way to type to agents.
+    page_types: bool,
+    /// Why the page's address will not be the same next start, if it will
+    /// not.
+    page_word_not_kept: Option<String>,
 }
 
 /// Said when the workspace could not be saved, with the reason.
@@ -295,6 +303,26 @@ fn control_names(left_out: &[char]) -> String {
     } else {
         names
     }
+}
+
+/// Said when a paste, or text from the page, was nothing but control
+/// characters.
+fn only_controls_sentence(left_out: &[char]) -> String {
+    format!(
+        "Nothing was pasted: the text was only control characters ({}). Nothing was sent.",
+        control_names(left_out)
+    )
+}
+
+/// The question about text that would go to an agent line by line, and
+/// why it is asked. The terminal puts its keys between the two; the page
+/// has buttons.
+fn line_by_line_question(lines: usize, label: &str) -> (String, &'static str) {
+    (
+        format!("Paste {lines} lines into {label} one line at a time?"),
+        "It does not take a paste as one block, so each line would be entered as if you pressed Enter \
+         after it.",
+    )
 }
 
 /// Said after a paste was sent, with what was taken out of it and whether
@@ -471,6 +499,9 @@ impl<B: AgentBackend> App<B> {
             unknown_notice_up: Vec::new(),
             newer_pty_missing: newer_pty_missing(),
             page_address: None,
+            page: None,
+            page_types: false,
+            page_word_not_kept: None,
         };
         app.say_events();
         app
@@ -578,6 +609,14 @@ impl<B: AgentBackend> App<B> {
                     "{label} could not continue its earlier conversation, and starting a new one failed: \
                      {why}. {still_here}"
                 ),
+                // Said in the terminal each time, so nothing reaches an
+                // agent from the page unseen here.
+                Event::TypedFromPage { label, entered: true, .. } => {
+                    format!("The page typed to {label}, then Enter.")
+                }
+                Event::TypedFromPage { label, entered: false, .. } => {
+                    format!("The page typed to {label}. Enter was not sent after it: the agent stopped just then.")
+                }
             };
             self.notice = Some(text);
         }
@@ -595,10 +634,9 @@ impl<B: AgentBackend> App<B> {
             // after anything already said, not before it.
             Ok(address) => {
                 self.page_address = Some(address.clone());
-                format!(
-                    "The page is on: {address}  Anyone with this address can see your agents. {menu} then \
-                     s shows it again."
-                )
+                let can =
+                    if self.page_types { "see your agents and type to them" } else { "see your agents" };
+                format!("The page is on: {address}  Anyone with this address can {can}. {menu} then s shows it again.")
             }
             Err(why) => format!(
                 "The page was not started on port {} ({why}). Agents work as before. If another program \
@@ -610,6 +648,106 @@ impl<B: AgentBackend> App<B> {
             Some(earlier) => format!("{earlier}  {text}"),
             None => text,
         });
+    }
+
+    /// The page is being served. Says where, as `page_started` does, and
+    /// keeps it, so its address can be changed when asked.
+    pub fn page_serving(&mut self, served: page::Served) {
+        self.page_types = served.can_type;
+        self.page_word_not_kept = served.word_not_kept.clone();
+        let address = served.url();
+        self.page = Some(served);
+        self.page_started(Ok(address));
+        if let Some(why) = &self.page_word_not_kept {
+            self.say_first(format!(
+                "The page's address could not be kept ({why}), so it lasts only until Lillignode closes."
+            ));
+        }
+    }
+
+    /// Give the page a new address. The one before stops working at once.
+    fn new_page_address(&mut self) {
+        let menu = self.config.menu_keys.first().map(|k| k.label()).unwrap_or_default();
+        let Some(served) = self.page.as_mut() else {
+            self.refuse(
+                "The page is not on, so it has no address to change. Nothing was changed.".to_string(),
+            );
+            return;
+        };
+        self.page_word_not_kept = served.change_word();
+        let address = served.url();
+        self.page_address = Some(address.clone());
+        // The address goes first and the way to see it again last: cut to
+        // fit, a notice keeps its start and its last sentence.
+        let not_kept = match &self.page_word_not_kept {
+            Some(why) => format!(" It could not be kept ({why}), so the next start makes another."),
+            None => String::new(),
+        };
+        self.notice = Some(format!(
+            "New page address: {address}  The old one has stopped working, for open pages too.{not_kept} \
+             {menu} then s shows it again."
+        ));
+    }
+
+    /// Text typed on the page for the agent with this key number in this
+    /// run. It goes to the engine by the command a paste uses, and what
+    /// came of it is said in the terminal's own words, for the page to
+    /// show. Nothing is sent to any other agent.
+    pub fn typed_from_page(
+        &mut self,
+        run: &str,
+        agent: u64,
+        text: &str,
+        agreed: bool,
+    ) -> (TypedOutcome, String) {
+        let refused = |words: String| (TypedOutcome::Refused, words);
+        // Kept here as well as where the page is started: text reaches an
+        // agent only if the user asked for that in the settings file.
+        if !self.config.page_can_type {
+            return refused("This page is read only. Nothing was sent.".to_string());
+        }
+        // Agents' keys begin again with each run: a key from another run
+        // would name another agent.
+        if run != self.engine.run().to_string() {
+            return refused(
+                "Lillignode was started again since this page last heard from it. Nothing was sent. \
+                 Check which agent is selected, then send it again."
+                    .to_string(),
+            );
+        }
+        let Some(key) = self.engine.ws.entries().iter().map(Entry::key).find(|k| k.number() == agent) else {
+            return refused(self.refusal(Refused::NoSuchAgent, ""));
+        };
+        let label = self.engine.ws.by_key(key).map(Entry::label).unwrap_or_default();
+        // What a paste goes through: control characters out, line breaks
+        // made one kind. The line breaks at its end are Send's own Enter.
+        let Pasted { text, left_out } = Pasted::from(text);
+        let text = text.trim_end_matches('\n').to_string();
+        if text.is_empty() && left_out.is_empty() {
+            return refused("There is nothing to send: the box is empty. Nothing was sent.".to_string());
+        }
+        let answer = match self.engine.type_from_page(key, text, left_out, agreed) {
+            Ok(PageTyped::Sent { sent, entered }) => {
+                let how = if sent.how == SentAs::LineByLine { " line by line" } else { "" };
+                let enter = if entered {
+                    ", then Enter."
+                } else {
+                    ". Enter was not sent after it: the agent stopped just then."
+                };
+                let tabs = if sent.tabs { TABS_SAID } else { "" };
+                let left_out = left_out_sentence(&sent.left_out);
+                (TypedOutcome::Sent, format!("Sent to {}{how}{enter}{left_out}{tabs}", sent.label))
+            }
+            Ok(PageTyped::OnlyControls(left_out)) => refused(only_controls_sentence(&left_out)),
+            Ok(PageTyped::MustAgree { lines, label }) => {
+                let (question, why) = line_by_line_question(lines, &label);
+                (TypedOutcome::Ask, format!("{question} {why}"))
+            }
+            Err(why) => refused(self.refusal(why, &label)),
+        };
+        // The terminal says each send too.
+        self.say_events();
+        answer
     }
 
     /// Put before the notice already up, which stays after it.
@@ -775,10 +913,7 @@ impl<B: AgentBackend> App<B> {
             _ => None,
         };
         self.notice = Some(match outcome {
-            Some(PasteOutcome::OnlyControls(left_out)) => format!(
-                "Nothing was pasted: the text was only control characters ({}). Nothing was sent.",
-                control_names(&left_out)
-            ),
+            Some(PasteOutcome::OnlyControls(left_out)) => only_controls_sentence(&left_out),
             // A clean paste sent whole or on one line says nothing.
             Some(PasteOutcome::Sent(sent)) if sent.left_out.is_empty() && !sent.tabs => return,
             Some(PasteOutcome::Sent(sent)) => pasted_sentence(&sent),
@@ -827,6 +962,7 @@ impl<B: AgentBackend> App<B> {
                     self.refuse("There is no agent to show a status report for.".to_string());
                 }
             }
+            KeyCode::Char('w') => self.new_page_address(),
             KeyCode::Char('v') if self.engine.ws.pair().is_some() => self.act(Action::ShowOne),
             KeyCode::Char('v') => self.act(Action::ShowTwo),
             KeyCode::Char('q') => self.act(Action::Quit),
@@ -1499,11 +1635,8 @@ impl<B: AgentBackend> App<B> {
                 // The face shows the engine's question, never one of its own.
                 debug_assert_eq!(self.engine.question().map(|q| q.id), Some(*id));
                 let lines = self.engine.held_paste_lines().unwrap_or(0);
-                format!(
-                    "Paste {lines} lines into {} one line at a time? y / n   It does not take a paste as \
-                     one block, so each line would be entered as if you pressed Enter after it.",
-                    self.focused_label()
-                )
+                let (question, why) = line_by_line_question(lines, &self.focused_label());
+                format!("{question} y / n   {why}")
             }
         }
     }
@@ -2002,13 +2135,26 @@ impl<B: AgentBackend> App<B> {
     /// Where the page is, for the foot of the status report: the one place
     /// the address can be read again once its notice is gone.
     fn page_lines(&self) -> String {
-        match &self.page_address {
-            Some(address) => format!(
-                "\nThe page: {address}\nAnyone with this address can see every agent's name, status and \
-                 screen while Lillignode is open. The next start gives it a new address.\n"
-            ),
-            None => String::new(),
-        }
+        let Some(address) = &self.page_address else { return String::new() };
+        let menu = self.config.menu_keys.first().map(|k| k.label()).unwrap_or_default();
+        let types = if self.page_types {
+            " They can also type to any agent from it: \"page_can_type\" is on in your settings file."
+        } else {
+            ""
+        };
+        let lasts = match &self.page_word_not_kept {
+            // Kept nowhere on purpose: an address that has leaked must not
+            // be enough to type to an agent later.
+            None if self.page_types => {
+                "While it can type, the address is new each time Lillignode starts.".to_string()
+            }
+            None => "The address stays the same from one start to the next.".to_string(),
+            Some(why) => format!("The address could not be kept ({why}), so the next start makes another."),
+        };
+        format!(
+            "\nThe page: {address}\nAnyone with this address can see every agent's name, status and screen \
+             while Lillignode is open.{types} {lasts} For a new address now: {menu}, then w.\n"
+        )
     }
 
     pub fn status_report_text(&self) -> String {
@@ -4200,7 +4346,14 @@ Cost",
         // without an agent open.
         let report = app.status_report_text();
         assert!(report.contains(&format!("\nThe page: http://127.0.0.1:65535/{word}/\n")), "{report}");
-        assert!(report.trim_end().ends_with("The next start gives it a new address."), "{report}");
+        assert!(
+            report.trim_end().ends_with(
+                "screen while Lillignode is open. The address stays the same from one start to the next. \
+                 For a new address now: Ctrl+Q, then w."
+            ),
+            "{report}"
+        );
+        assert!(!report.contains("type"), "a page that is read only is not said to type: {report}");
         let mut empty = app_with_claude_agents(0);
         empty.page_started(Ok(format!("http://127.0.0.1:7501/{word}/")));
         let report = empty.status_report_text();
@@ -4220,6 +4373,228 @@ Cost",
         let fitted = app.notice_fitted(room).unwrap();
         assert!(fitted.chars().count() <= room, "{fitted}");
         assert!(fitted.ends_with("or take \"page\" out."), "{fitted}");
+    }
+
+    #[test]
+    fn a_page_that_can_type_is_said_to_wherever_its_address_is_shown() {
+        let room = 2 * usize::from(crate::ui::MIN_COLS);
+        let mut app = app_with_claude_agents(1);
+        let word = "abcdefghijkmnpqr";
+        app.page_types = true;
+        app.notice = None;
+        app.page_started(Ok(format!("http://127.0.0.1:65535/{word}/")));
+        let said = app.notice.clone().unwrap();
+        assert_eq!(
+            said,
+            format!(
+                "The page is on: http://127.0.0.1:65535/{word}/  Anyone with this address can see your \
+                 agents and type to them. Ctrl+Q then s shows it again."
+            )
+        );
+        // Whole, in the two notice rows of the narrowest window, with the
+        // longest address there is.
+        assert!(said.chars().count() <= room, "{} characters: {said}", said.chars().count());
+        let report = app.status_report_text();
+        assert!(
+            report.contains(
+                "They can also type to any agent from it: \"page_can_type\" is on in your settings file. \
+                 While it can type, the address is new each time Lillignode starts. For a new address now: \
+                 Ctrl+Q, then w."
+            ),
+            "{report}"
+        );
+    }
+
+    /// A page being served for a test, on any free port, its word kept in
+    /// a folder of the test's own.
+    fn page_in(name: &str) -> (page::Served, std::path::PathBuf) {
+        let folder = std::env::temp_dir().join(format!("lillignode-app-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&folder);
+        std::fs::create_dir_all(&folder).unwrap();
+        let (_publisher, reader) = crate::snapshot::channel();
+        (page::serve(reader, 0, Some(&folder), None).unwrap(), folder)
+    }
+
+    #[test]
+    fn w_in_the_menu_gives_the_page_a_new_address_and_says_so() {
+        let room = 2 * usize::from(crate::ui::MIN_COLS);
+        let menu = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL);
+        // No page: said, and nothing changed.
+        let mut app = app_with_claude_agents(1);
+        app.on_key(menu);
+        app.on_key(press(KeyCode::Char('w')));
+        assert_eq!(
+            app.notice.as_deref(),
+            Some("The page is not on, so it has no address to change. Nothing was changed.")
+        );
+
+        let (served, folder) = page_in("w");
+        let before = served.url();
+        app.page_serving(served);
+        assert!(app.notice.as_deref().unwrap().contains(&format!("The page is on: {before}")));
+        app.on_key(menu);
+        app.on_key(press(KeyCode::Char('w')));
+        let after = app.page_address.clone().unwrap();
+        assert_ne!(after, before);
+        assert_eq!(after.len(), before.len(), "the same address but for its word");
+        let said = app.notice.clone().unwrap();
+        assert_eq!(
+            said,
+            format!(
+                "New page address: {after}  The old one has stopped working, for open pages too. Ctrl+Q then \
+                 s shows it again."
+            )
+        );
+        // It fits the two notice rows whole even at the longest address:
+        // this one's port may be a digit or two shorter.
+        assert!(said.chars().count() + 2 <= room, "{said}");
+        assert!(matches!(app.mode, Mode::Normal), "back at the agent");
+        // The status report has the new one, and the file keeps it.
+        assert!(app.status_report_text().contains(&format!("The page: {after}\n")));
+        let kept = std::fs::read_to_string(folder.join(page::WORD_FILE)).unwrap();
+        assert!(after.ends_with(&format!("/{}/", kept.trim())), "{after} {kept}");
+
+        // It cannot be kept: the new address is still the one in use, and
+        // the notice says the next start will make another.
+        std::fs::remove_dir_all(&folder).unwrap();
+        std::fs::write(&folder, "a file where the folder was").unwrap();
+        app.on_key(menu);
+        app.on_key(press(KeyCode::Char('w')));
+        let third = app.page_address.clone().unwrap();
+        assert_ne!(third, after);
+        let said = app.notice.clone().unwrap();
+        assert!(
+            said.starts_with(&format!("New page address: {third}  The old one has stopped working")),
+            "{said}"
+        );
+        assert!(said.contains("It could not be kept ("), "{said}");
+        assert!(said.ends_with("so the next start makes another. Ctrl+Q then s shows it again."), "{said}");
+        assert!(app.status_report_text().contains("The address could not be kept ("));
+        let _ = std::fs::remove_file(&folder);
+    }
+
+    fn typing_app(agents: &[&str]) -> (App<Fake>, Rc<RefCell<Vec<String>>>, String) {
+        let backend = Fake::default();
+        let sent = backend.sent.clone();
+        let config = Config { page: true, page_can_type: true, ..Config::default() };
+        let mut app = App::launch(
+            backend,
+            Size { rows: 5, cols: 40 },
+            Err("tests save nothing".into()),
+            std::env::temp_dir(),
+            config,
+            None,
+        );
+        for name in agents {
+            app.engine.ws.start_as_named(name, std::env::temp_dir().join("work")).unwrap();
+        }
+        app.notice = None;
+        let run = app.engine.run().to_string();
+        (app, sent, run)
+    }
+
+    #[test]
+    fn text_from_the_page_goes_to_the_agent_named_then_enter_and_the_terminal_says_so() {
+        let (mut app, sent, run) = typing_app(&["first", "second"]);
+        let second = app.engine.ws.entries()[0].key().number();
+        // The other agent is in front; the text is for this one.
+        assert_eq!(app.engine.ws.focused().unwrap().label(), "second (work)");
+        let (outcome, words) = app.typed_from_page(&run, second, "run the tests\r\n", false);
+        assert_eq!((outcome, words.as_str()), (TypedOutcome::Sent, "Sent to first (work), then Enter."));
+        assert_eq!(*sent.borrow(), ["run the tests", "\r"], "as typed, then Enter");
+        assert_eq!(app.notice.as_deref(), Some("The page typed to first (work), then Enter."));
+        // What a paste has taken out of it is taken out here, and said.
+        sent.borrow_mut().clear();
+        let (outcome, words) = app.typed_from_page(&run, second, "a\tb\x1b[31m\x03", false);
+        assert_eq!(outcome, TypedOutcome::Sent);
+        assert_eq!(
+            words,
+            "Sent to first (work), then Enter. 2 control characters were left out (Esc, Ctrl+C). Its tabs \
+             were sent as spaces, so none was taken as a press of Tab."
+        );
+        assert_eq!(*sent.borrow(), ["a    b[31m", "\r"], "no escape reaches the agent");
+        // An agent that takes a paste whole: text that holds the mark that
+        // ends a paste cannot end it early, because its Escape is gone.
+        app.on_agent_event(AgentEvent::Output(AgentId(1), b"\x1b[?2004h".to_vec()));
+        sent.borrow_mut().clear();
+        let (outcome, _) = app.typed_from_page(&run, second, "safe\x1b[201~rm -rf x\nmore", false);
+        assert_eq!(outcome, TypedOutcome::Sent);
+        assert_eq!(*sent.borrow(), ["\x1b[200~safe[201~rm -rf x\rmore\x1b[201~", "\r"], "one paste, whole");
+    }
+
+    #[test]
+    fn several_lines_from_the_page_ask_first_in_the_terminals_words() {
+        let (mut app, sent, run) = typing_app(&["first"]);
+        let first = app.engine.ws.entries()[0].key().number();
+        let (outcome, words) = app.typed_from_page(&run, first, "one\ntwo\nthree\n\n", false);
+        assert_eq!(outcome, TypedOutcome::Ask);
+        assert!(sent.borrow().is_empty(), "nothing is sent before the reader agrees");
+        assert!(matches!(app.mode, Mode::Normal), "the terminal is not asked: the page asks its reader");
+        assert_eq!(app.notice, None);
+        // The same words the terminal asks with, but for its keys.
+        app.on_paste(Pasted::from("one\ntwo\nthree"));
+        let asked = app.bar();
+        app.on_key(press(KeyCode::Char('n')));
+        assert_eq!(asked.replace(" y / n  ", ""), words, "the terminal's own question");
+        assert!(words.starts_with("Paste 3 lines into first (work) one line at a time? It does not take"));
+        // Agreed: line by line, then Enter.
+        sent.borrow_mut().clear();
+        let (outcome, words) = app.typed_from_page(&run, first, "one\ntwo\nthree", true);
+        assert_eq!(
+            (outcome, words.as_str()),
+            (TypedOutcome::Sent, "Sent to first (work) line by line, then Enter.")
+        );
+        assert_eq!(*sent.borrow(), ["one\rtwo\rthree", "\r"]);
+    }
+
+    #[test]
+    fn text_from_the_page_is_refused_in_the_terminals_words_and_nothing_is_sent() {
+        let (mut app, sent, run) = typing_app(&["first", "second"]);
+        let (first, second) =
+            (app.engine.ws.entries()[0].key().number(), app.engine.ws.entries()[1].key().number());
+        let refused = |app: &mut App<Fake>, run: &str, agent: u64, text: &str| {
+            let (outcome, words) = app.typed_from_page(run, agent, text, true);
+            assert_eq!(outcome, TypedOutcome::Refused, "{words}");
+            words
+        };
+        // An agent that is not there.
+        assert_eq!(
+            refused(&mut app, &run, 999, "x"),
+            "That agent is no longer in your workspace. Nothing was changed."
+        );
+        // A key from another run of Lillignode names another agent.
+        let said = refused(&mut app, "12345", first, "x");
+        assert!(
+            said.starts_with("Lillignode was started again") && said.contains("Nothing was sent."),
+            "{said}"
+        );
+        // Nothing to send, and only control characters.
+        assert!(refused(&mut app, &run, first, "\n\n").starts_with("There is nothing to send"));
+        assert_eq!(
+            refused(&mut app, &run, first, "\x03"),
+            "Nothing was pasted: the text was only control characters (Ctrl+C). Nothing was sent."
+        );
+        // A question open in the terminal is answered first.
+        app.on_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL));
+        app.on_key(press(KeyCode::Char('x')));
+        assert!(matches!(app.mode, Mode::Confirm(_)));
+        assert_eq!(
+            refused(&mut app, &run, second, "x"),
+            "Answer the question on the bottom line first. Nothing was changed."
+        );
+        app.on_key(press(KeyCode::Char('n')));
+        // A stopped agent: the words a paste into it gets.
+        app.on_agent_event(AgentEvent::Exited(AgentId(2), crate::agent::Exit { code: 0 }));
+        assert_eq!(
+            refused(&mut app, &run, second, "x"),
+            "second (work) is not running, so nothing was sent to it."
+        );
+        assert!(sent.borrow().is_empty(), "to nobody: not to it, and not to the agent in front");
+        // Off in the settings: nothing, whatever is asked, even if a page
+        // were somehow handed the way in.
+        app.config.page_can_type = false;
+        assert_eq!(refused(&mut app, &run, first, "x"), "This page is read only. Nothing was sent.");
+        assert!(sent.borrow().is_empty());
     }
 
     /// Found by a review: an agent that could not continue its conversation

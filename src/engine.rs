@@ -62,6 +62,10 @@ pub enum Event {
     /// this many tokens. Once for a conversation. A warning only: nothing
     /// was stopped.
     PassedCostWarning { agent: AgentKey, label: String, tokens: u64 },
+    /// Text typed on the page was sent to this agent, and Enter after it
+    /// (`entered`; false only if the agent stopped between the two). Every
+    /// such send, each time.
+    TypedFromPage { agent: AgentKey, label: String, entered: bool },
 }
 
 /// How many of the latest events are kept for a reader that asks late.
@@ -100,6 +104,7 @@ impl Event {
             Event::PassedCostWarning { agent, label, .. } => {
                 ("passed-cost-warning", Some(*agent), Some(label))
             }
+            Event::TypedFromPage { agent, label, .. } => ("typed-from-page", Some(*agent), Some(label)),
         };
         EventCopy { number, what, agent, label: label.cloned() }
     }
@@ -217,6 +222,22 @@ pub enum PasteOutcome {
     /// whole: this question is open, and the paste is held until it is
     /// answered.
     Asked(Question),
+}
+
+/// What text typed on the page came to.
+#[must_use]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PageTyped {
+    /// It was sent as `sent` says. `entered`: Enter was sent after it;
+    /// false only if the agent stopped between the two.
+    Sent { sent: Sent, entered: bool },
+    /// Nothing was left once control characters were taken out: these.
+    /// Nothing was sent.
+    OnlyControls(Vec<char>),
+    /// It has this many lines and the agent does not take a paste whole,
+    /// so it would go line by line. Nothing was sent and nothing is held:
+    /// it is sent again once the page's reader has agreed.
+    MustAgree { lines: usize, label: String },
 }
 
 /// A question the engine has asked and is waiting for an answer to.
@@ -718,6 +739,51 @@ impl<B: AgentBackend> Engine<B> {
         }
         self.ws.send_to(agent, text.as_bytes());
         Ok(PasteOutcome::Sent(Sent { label, left_out, tabs, how: SentAs::Typed }))
+    }
+
+    /// Text typed on the page for an agent: sent by `paste` itself, under
+    /// its rules and with its refusals, then Enter. The page has no other
+    /// way in. Two things differ from a paste in the terminal:
+    ///
+    /// - the page asks its own reader before text goes line by line, so no
+    ///   question is left open here. Without `line_by_line` such text is not
+    ///   sent, and `MustAgree` says so; with it the reader has agreed;
+    /// - every send is an event that names the agent.
+    ///
+    /// `line_by_line` is the caller's word that its reader agreed: whoever
+    /// can call this can say so. The question protects the page's reader
+    /// from a surprise, not the agent from the page.
+    pub fn type_from_page(
+        &mut self,
+        agent: AgentKey,
+        text: String,
+        left_out: Vec<char>,
+        line_by_line: bool,
+    ) -> Result<PageTyped, Refused> {
+        let sent = match self.paste(agent, text, left_out)? {
+            PasteOutcome::OnlyControls(left_out) => return Ok(PageTyped::OnlyControls(left_out)),
+            PasteOutcome::Sent(sent) => sent,
+            // The question is answered before this returns: a yes only
+            // with the reader's agreement, and otherwise no.
+            PasteOutcome::Asked(question) => {
+                let lines = self.held_paste_lines().unwrap_or(0);
+                let label = self.ws.by_key(agent).map(Entry::label).unwrap_or_default();
+                match self.answer(question.id, line_by_line)? {
+                    Answered::Pasted(sent) => sent,
+                    Answered::Nothing => return Ok(PageTyped::MustAgree { lines, label }),
+                    _ => return Err(Refused::AgentStopped),
+                }
+            }
+        };
+        let entered = self.ws.send_to(agent, b"\r");
+        self.say(Event::TypedFromPage { agent, label: sent.label.clone(), entered });
+        Ok(PageTyped::Sent { sent, entered })
+    }
+
+    /// Tells this run of Lillignode from any other: agents' keys and event
+    /// numbers begin again with each run.
+    pub fn run(&self) -> u64 {
+        self.run
     }
 
     /// How many lines the held paste has, while the question about it is
@@ -1236,6 +1302,93 @@ mod tests {
         e.answer(q.id, true).unwrap();
         assert_eq!(e.paste(a, "x".into(), vec![]), Err(Refused::NoSuchAgent));
         assert!(got(&sent).is_empty());
+    }
+
+    fn typed_events(e: &Engine<Fake>) -> Vec<(u64, EventCopy)> {
+        let all = e.events_after(0).events;
+        all.iter()
+            .map(|(number, event)| (*number, event.plain(*number)))
+            .filter(|(_, plain)| plain.what == "typed-from-page")
+            .collect()
+    }
+
+    #[test]
+    fn text_from_the_page_goes_as_a_paste_does_then_enter_and_is_an_event_naming_the_agent() {
+        let (mut e, sent) = engine_and_sent(&["state=idle", "state=idle"]);
+        let (a, b) = (key(&e, 0), key(&e, 1));
+        // One line, to the second agent while the first is in front: typed,
+        // tabs as spaces, then Enter. Nothing goes to any other agent.
+        let Ok(PageTyped::Sent { sent: s, entered }) = e.type_from_page(b, "do\tthis".into(), vec![], false)
+        else {
+            panic!("sent")
+        };
+        assert_eq!((s.how, s.tabs, entered), (SentAs::Typed, true, true));
+        assert_eq!(got(&sent), [(2, "do    this".to_string()), (2, "\r".to_string())]);
+        let events = typed_events(&e);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].1.agent, Some(b), "the event names the agent it went to");
+        assert_eq!(events[0].1.label.as_deref(), Some(s.label.as_str()));
+        // An agent that takes pastes whole gets one marked paste, then Enter.
+        e.ws.handle(AgentEvent::Output(AgentId(1), b"\x1b[?2004h".to_vec()));
+        sent.borrow_mut().clear();
+        let Ok(PageTyped::Sent { sent: s, .. }) = e.type_from_page(a, "one\ntwo".into(), vec!['\x03'], false)
+        else {
+            panic!("sent")
+        };
+        assert_eq!((s.how, s.left_out.as_slice()), (SentAs::Whole, &['\x03'][..]));
+        assert_eq!(got(&sent), [(1, "\x1b[200~one\rtwo\x1b[201~".to_string()), (1, "\r".to_string())]);
+        assert_eq!(typed_events(&e).len(), 2, "every send is an event");
+        assert_eq!(e.question(), None);
+    }
+
+    #[test]
+    fn several_lines_from_the_page_are_not_sent_until_its_reader_has_agreed() {
+        let (mut e, sent) = engine_and_sent(&["state=idle"]);
+        let a = key(&e, 0);
+        let asked = e.type_from_page(a, "one\ntwo\nthree".into(), vec![], false);
+        let Ok(PageTyped::MustAgree { lines, label }) = asked else { panic!("must agree: {asked:?}") };
+        assert_eq!((lines, label.as_str()), (3, "a (work)"));
+        assert!(got(&sent).is_empty(), "nothing is sent before the reader agrees");
+        // Nothing is held and no question is left for the terminal to find.
+        assert_eq!((e.question(), e.held_paste_lines()), (None, None));
+        assert!(typed_events(&e).is_empty(), "nothing sent, nothing said");
+        assert_eq!(e.quit(), Ok(Outcome::Done), "nothing stands in the terminal's way");
+
+        let (mut e, sent) = engine_and_sent(&["state=idle"]);
+        let a = key(&e, 0);
+        let Ok(PageTyped::Sent { sent: s, entered: true }) =
+            e.type_from_page(a, "one\ntwo".into(), vec![], true)
+        else {
+            panic!("sent")
+        };
+        assert_eq!(s.how, SentAs::LineByLine);
+        assert_eq!(got(&sent), [(1, "one\rtwo".to_string()), (1, "\r".to_string())]);
+        assert_eq!((e.question(), typed_events(&e).len()), (None, 1));
+    }
+
+    #[test]
+    fn text_from_the_page_is_refused_as_a_paste_is_and_then_nothing_is_sent_or_said() {
+        let (mut e, sent) = engine_and_sent(&["state=working", "state=idle"]);
+        let (a, b) = (key(&e, 0), key(&e, 1));
+        // A question is open in the terminal: it is answered first.
+        let Ok(Outcome::Asked(q)) = e.quit() else { panic!("asked") };
+        assert_eq!(e.type_from_page(b, "x".into(), vec![], true), Err(Refused::QuestionOpen));
+        assert_eq!(e.question(), Some(q), "the terminal's question is untouched");
+        e.answer(q.id, false).unwrap();
+        // Only control characters.
+        assert_eq!(
+            e.type_from_page(b, String::new(), vec!['\x1b'], true),
+            Ok(PageTyped::OnlyControls(vec!['\x1b']))
+        );
+        // Stopped, then gone.
+        e.ws.handle(AgentEvent::Exited(AgentId(2), crate::agent::Exit { code: 0 }));
+        assert_eq!(e.type_from_page(b, "x".into(), vec![], true), Err(Refused::AgentStopped));
+        let Ok(Outcome::Asked(q)) = e.close(b) else { panic!("asked") };
+        e.answer(q.id, true).unwrap();
+        assert_eq!(e.type_from_page(b, "x".into(), vec![], true), Err(Refused::NoSuchAgent));
+        assert!(got(&sent).is_empty(), "not to it, and not to the agent that is still running");
+        assert!(typed_events(&e).is_empty());
+        let _ = a;
     }
 
     /// An empty folder of this test's own.

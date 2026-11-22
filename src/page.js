@@ -1,5 +1,7 @@
 // Lillignode's page. It listens to Lillignode on this machine and shows what
-// it hears. It sends nothing back: the only requests it makes are to read.
+// it hears. It sends nothing back, with one exception that Lillignode's
+// settings must allow: the Send button under the terminal, which passes on
+// the text in its box for the agent named beside it.
 //
 // Everything an agent wrote is put on the page as text, never as markup.
 "use strict";
@@ -29,6 +31,24 @@
   }
   const terminalName = el("terminal-name");
   const blockingTitle = el("blocking-title");
+  const standing = el("standing");
+  const typing = el("typing");
+  const typingTo = el("typing-to");
+  const typingText = el("typing-text");
+  const typingSend = el("typing-send");
+  const typingSaid = el("typing-said");
+  const typingAsk = el("typing-ask");
+  const typingQuestion = el("typing-question");
+
+  const READ_ONLY = "Read only. This page shows what Lillignode shows and sends nothing back.";
+  const CAN_TYPE =
+    "This page can type to your agents: what you send under the terminal goes to the agent named there, " +
+    "as if you had typed it in Lillignode.";
+  const NO_ANSWER =
+    "No answer from Lillignode, so it is not known whether this was sent. Look at the agent's terminal " +
+    "before sending it again.";
+  // Stands for an agent of an earlier run of Lillignode: no agent has it.
+  const GONE = Number.MAX_SAFE_INTEGER;
 
   // After this long without a word, the header says so. Lillignode sends
   // one at least every second.
@@ -45,9 +65,14 @@
   let run = null;
   let lastEvent = 0;
   let retry = null;        // the one pending look after contact was lost
-  // Set once Lillignode is found answering under another word: each start
-  // has its own, so this page's address will never work again.
+  // Set once Lillignode is found answering under another word: the word
+  // was replaced, so this page's address will never work again.
   let movedOn = false;
+  // The agent the text in the box was written for. The box never changes
+  // whom it is for by itself: only the reader choosing another agent does.
+  let draftFor = null;
+  let sending = false;
+  let asking = null;       // the send the reader is being asked about: its agent and text
   let drawn = null;        // the screen now drawn in the terminal
 
   // The 16 colours a terminal names, in the order terminals number them.
@@ -230,8 +255,8 @@
     if (movedOn) {
       contact.className = "lost";
       contact.textContent =
-        "Lillignode was started again, with a new address for its page. This page cannot follow it and will not " +
-        "change again. Open the address Lillignode shows now: its menu key, then s.";
+        "This page's address was replaced with a new one, so this page has stopped and will not change again. " +
+        "Open the address Lillignode shows now: its menu key, then s.";
       return;
     }
     if (lostAt !== null) {
@@ -256,16 +281,118 @@
     }
   }
 
+  // The agent a Send would go to: the one the text was written for, or,
+  // with the box empty, the one shown.
+  function target() {
+    return draftFor !== null ? draftFor : shownKey();
+  }
+
+  function drawTyping() {
+    const token = state ? state.typing : null;
+    standing.textContent = token ? CAN_TYPE : READ_ONLY;
+    standing.className = token ? "can-type" : "";
+    const key = target();
+    typing.hidden = !token || key === null;
+    if (typing.hidden) return;
+    const agent = state.agents.find((s) => s.key === key);
+    typingTo.textContent = agent ? "To " + agent.label : "To an agent that is no longer open in Lillignode";
+    typingText.disabled = sending || asking !== null;
+    typingSend.disabled =
+      sending || asking !== null || lostAt !== null || movedOn || typingText.value === "";
+    typingAsk.hidden = asking === null;
+  }
+
+  function said(outcome, words) {
+    typingSaid.className = outcome;
+    typingSaid.textContent = outcome === "ask" ? "" : words;
+    typingQuestion.textContent = outcome === "ask" ? words : "";
+  }
+
+  // Pass on the text for one agent. `agreed`: the reader was asked whether
+  // it may go line by line, and said yes. What Lillignode says came of it
+  // is shown as it was said.
+  function send(agent, text, agreed) {
+    if (!state || !state.typing || agent === null || text === "" || sending) return;
+    sending = true;
+    asking = null;
+    said("", "Sending.");
+    drawTyping();
+    fetch("send", {
+      method: "POST",
+      cache: "no-store",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token: state.typing, run: state.run, agent, text, agreed }),
+      signal: AbortSignal.timeout(10000),
+    })
+      .then((answer) => (answer.ok ? answer.json() : answer.text().then((words) => ({ outcome: "refused", words }))))
+      .then((heard) => {
+        sending = false;
+        if (heard.outcome === "ask") {
+          asking = { agent, text };
+        } else if (heard.outcome === "sent" && typingText.value === text) {
+          typingText.value = "";
+          draftFor = null;
+        }
+        said(heard.outcome, heard.words);
+        drawTyping();
+      })
+      .catch(() => {
+        sending = false;
+        said("refused", NO_ANSWER);
+        drawTyping();
+      });
+  }
+
+  typingText.addEventListener("input", () => {
+    if (typingText.value === "") {
+      draftFor = null;
+    } else if (draftFor === null) {
+      // From the first letter the text is for the agent shown now, and
+      // the page stops following the agent in front.
+      draftFor = shownKey();
+      chosen = draftFor;
+    }
+    drawTyping();
+  });
+  typingSend.addEventListener("click", () => {
+    // Text that got into the box without being typed there (dropped, or
+    // put back by the browser) is for the agent named beside it now, and
+    // stays for that one.
+    if (draftFor === null) {
+      draftFor = shownKey();
+      chosen = draftFor;
+    }
+    send(draftFor, typingText.value, false);
+  });
+  el("typing-yes").addEventListener("click", () => {
+    if (asking) send(asking.agent, asking.text, true);
+  });
+  el("typing-no").addEventListener("click", () => {
+    asking = null;
+    said("refused", "Nothing was sent.");
+    drawTyping();
+  });
+
   function draw() {
     drawContact();
     drawBlocking();
     drawAgents();
     drawTerminal();
+    drawTyping();
     say();
   }
 
   function choose(key) {
     chosen = key;
+    // The reader's own choice is the one thing that changes whom the text
+    // in the box is for; the label beside it says so.
+    if (draftFor !== null) draftFor = key;
+    // A question about text for another agent is not left standing under
+    // this one's name: it is asked again, of this one, on the next Send.
+    if (asking !== null && asking.agent !== key) {
+      asking = null;
+      said("refused", "Nothing was sent.");
+    }
     draw();
     // The stream carries one agent's screen: ask for this one's. While
     // contact is lost the look already pending will ask for it.
@@ -278,8 +405,16 @@
     lostAt = null;
     if (message.state) {
       const next = message.state;
-      // Each run of Lillignode has its own address, so the run never
-      // changes under an open page.
+      // Lillignode was started again: its address is the same, but agents'
+      // keys and event numbers have begun again. Nothing chosen before
+      // names the same agent now, so nothing is carried over: text in the
+      // box is kept, for no agent, until the reader chooses one.
+      if (run !== null && next.run !== run) {
+        lastEvent = 0;
+        chosen = null;
+        asking = null;
+        if (draftFor !== null) draftFor = GONE;
+      }
       run = next.run;
       for (const event of next.events) lastEvent = Math.max(lastEvent, event.n);
       state = next;
@@ -300,8 +435,9 @@
     retry = setTimeout(lookAgain, RETRY_MS);
   }
 
-  // Ask once, plainly, before listening again: a refusal that is
-  // Lillignode's own means it is running under a new word.
+  // Ask once, plainly, before listening again. Lillignode started again
+  // answers under the same word, and the page carries on; a refusal that
+  // is Lillignode's own means the word was replaced.
   function lookAgain() {
     retry = null;
     fetch("state", { cache: "no-store", signal: AbortSignal.timeout(5000) })

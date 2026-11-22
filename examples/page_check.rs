@@ -1,6 +1,6 @@
 //! Development tool, not part of the product.
 //!
-//! Checks the read-only page against the real `lillignode` program, in a
+//! Checks the page against the real `lillignode` program, in a
 //! terminal the check owns, with stand-in agents. No window, no browser,
 //! no real agent, no real settings (see `owned/mod.rs`).
 //!
@@ -10,7 +10,11 @@
 //! checks the answers: a status line a stand-in forges reaches the page
 //! within a second; an agent that needs you is said to, with since when;
 //! a request that is not a plain read from this machine's own address is
-//! refused; and when Lillignode is stopped outright the stream ends.
+//! refused; when Lillignode is stopped outright the stream ends; started
+//! again, the page is at the same address, until the menu's `w` gives it a
+//! new one. Then, with typing switched on in the settings: what the page's
+//! Send would send reaches the agent it names and no other, asks first
+//! where a paste would, and is refused for anyone but the page itself.
 //!
 //! What the page then draws is a browser's business. For a check that
 //! drives a browser, run this with `--serve`: it starts Lillignode with two
@@ -20,12 +24,21 @@
 //!                   reports a status for each: w working, p needs you,
 //!                   d done, i idle, u not understood)
 //!   kill            stop Lillignode outright, as a crash would
-//!   start           start Lillignode again, after kill; prints its new
+//!   start           start Lillignode again, after kill; prints its
 //!                   address
+//!   word            the menu's `w`: a new address; prints it
+//!   front           bring the next agent to the front
+//!   end             end the program of the agent in front (Ctrl+D)
+//!   shows <text>    whether Lillignode's screen shows this text within
+//!                   three seconds: prints `DONE shows yes` or `no`
 //!   quit            quit Lillignode through its menu, and end
 //!
-//! The page's address holds a word that is new each start. The check reads
-//! it from Lillignode's screen, as a person would.
+//! With `--serve --type` the settings also let the page type, and a third
+//! agent, `plain`, is started first: a stand-in that says what it was sent
+//! and does not take a paste as one block.
+//!
+//! The page's address holds a word. The check reads it from Lillignode's
+//! screen, as a person would.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -166,6 +179,63 @@ fn settings(sb: &Sandbox, text: &str) {
     std::fs::write(sb.state.join("config.json"), text).unwrap();
 }
 
+/// The headers the page's own Send carries.
+fn own(port: u16) -> String {
+    format!("Origin: http://127.0.0.1:{port}\r\nSec-Fetch-Site: same-origin\r\nContent-Type: application/json\r\n")
+}
+
+/// A `POST` to the page's `send`, with these headers and this body: the
+/// whole answer.
+fn post(page: &Page, headers: &str, body: &str) -> String {
+    let (port, length) = (page.port, body.len());
+    ask(
+        page,
+        &format!("POST /send HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n{headers}Content-Length: {length}\r\n\r\n{body}"),
+    )
+    .unwrap_or_default()
+}
+
+/// What the page needs to send: its token and the run, from its data.
+struct Typing {
+    token: String,
+    run: String,
+}
+
+/// Send as the page's own button would. Returns what came of it and the
+/// words said back.
+fn send(page: &Page, typing: &Typing, agent: u64, text: &str, agreed: bool) -> (String, String) {
+    let body = serde_json::json!({
+        "token": typing.token, "run": typing.run, "agent": agent, "text": text, "agreed": agreed,
+    });
+    let answer = post(page, &own(page.port), &body.to_string());
+    let said: serde_json::Value =
+        serde_json::from_str(answer.split_once("\r\n\r\n").map_or("", |(_, body)| body)).unwrap_or_default();
+    match (said["outcome"].as_str(), said["words"].as_str()) {
+        (Some(outcome), Some(words)) => (outcome.to_string(), words.to_string()),
+        _ => {
+            println!("  FAIL  the page says what became of a send\n        {answer}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// An agent's screen as the page has it, as text.
+fn screen_of(page: &Page, key: u64) -> String {
+    state(page, &format!("?agent={key}"))["state"]["screen"]["lines"].to_string()
+}
+
+/// Wait until the page's copy of an agent's screen holds `text`.
+fn screen_shows(page: &Page, key: u64, text: &str) -> bool {
+    let began = Instant::now();
+    while began.elapsed() < Duration::from_secs(3) {
+        if screen_of(page, key).contains(text) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    false
+}
+
 /// Lillignode with the page on, a reporting stand-in in front and a shell
 /// behind it.
 fn started(sb: &Sandbox, port: u16) -> (Session, Page) {
@@ -190,8 +260,19 @@ fn agent<'a>(state: &'a serde_json::Value, name: &str) -> &'a serde_json::Value 
     )
 }
 
-fn serve(sb: &Sandbox, port: u16) {
-    let (mut s, page) = started(sb, port);
+fn serve(sb: &Sandbox, port: u16, can_type: bool) {
+    let (mut s, page) = if can_type {
+        settings(sb, &format!("{{\"page\": true, \"page_port\": {port}, \"page_can_type\": true}}"));
+        let mut s = Session::start(sb);
+        let page = page_on_screen(&mut s, port);
+        s.new_agent("plain");
+        s.expect("a stand-in that says what it is sent starts", "STANDIN READY echo-plain");
+        s.new_agent("reporter");
+        s.expect("a reporting stand-in starts", "STANDIN READY status");
+        (s, page)
+    } else {
+        started(sb, port)
+    };
     println!("READY {}", page.url());
     let (tx, rx) = mpsc::channel::<String>();
     std::thread::spawn(move || {
@@ -218,6 +299,30 @@ fn serve(sb: &Sandbox, port: u16) {
                 let page = page_on_screen(&mut s, port);
                 println!("DONE start {}", page.url());
             }
+            ("word", _) => {
+                s.raw(CTRL_Q);
+                s.keys(b"w");
+                s.expect("w gives the page a new address", "New page address:");
+                let page = page_on_screen(&mut s, port);
+                println!("DONE word {}", page.url());
+            }
+            ("front", _) => {
+                s.raw(CTRL_Q);
+                s.keys(b"\t");
+                s.keys(ESC);
+                println!("DONE front");
+            }
+            ("end", _) => {
+                s.raw(&[4]);
+                println!("DONE end");
+            }
+            ("shows", text) => {
+                let began = Instant::now();
+                while !s.flat().contains(text) && began.elapsed() < Duration::from_secs(3) {
+                    s.pump(Duration::from_millis(50));
+                }
+                println!("DONE shows {}", if s.flat().contains(text) { "yes" } else { "no" });
+            }
             ("quit", _) => {
                 if s.exit.is_none() {
                     drop(s.quit("quit", true));
@@ -233,9 +338,11 @@ fn serve(sb: &Sandbox, port: u16) {
 fn main() {
     let (sb, standin) = sandbox("page-check");
     launcher(&sb.launchers, &standin, "reporter", "status");
+    launcher(&sb.launchers, &standin, "plain", "echo-plain");
+    launcher(&sb.launchers, &standin, "whole", "echo");
     let port = free_port();
     if std::env::args().any(|a| a == "--serve") {
-        serve(&sb, port);
+        serve(&sb, port, std::env::args().any(|a| a == "--type"));
         let _ = std::fs::remove_dir_all(&sb.root);
         return;
     }
@@ -344,6 +451,20 @@ fn main() {
     let host = format!("Host: 127.0.0.1:{port}\r\n");
     check("it takes nothing", refused(format!("POST /state HTTP/1.1\r\n{host}\r\n"), "HTTP/1.1 405"), "");
     check(
+        "it is given no token to send with",
+        first["state"]["typing"].is_null(),
+        &first["state"].to_string(),
+    );
+    let as_the_page_would = serde_json::json!({
+        "token": "", "run": first["state"]["run"], "agent": key, "text": "w", "agreed": true,
+    });
+    let answer = post(&page, &own(port), &as_the_page_would.to_string());
+    check(
+        "a send made just as the page would make one is refused",
+        answer.starts_with("HTTP/1.1 405"),
+        &answer,
+    );
+    check(
         "a name pointed at this machine from elsewhere is refused",
         refused(format!("GET /state HTTP/1.1\r\nHost: elsewhere.example:{port}\r\n\r\n"), "HTTP/1.1 403"),
         "",
@@ -364,17 +485,231 @@ fn main() {
     check("the stream ends within a second, so the page knows", ended(&stream, second), "the stream went on");
     check("and nothing answers at the address", get(&page, "/state").is_none(), "something answered");
 
-    println!("F. Started again, then quit in the ordinary way");
+    println!("F. Started again: the same address, until a new one is asked for");
     // The workspace left by the run that was stopped comes back.
     let mut s = Session::start(&sb);
     let again = page_on_screen(&mut s, port);
-    check("the page has a new word", again.word != page.word, &again.word);
-    let old = get(&page, "/state").unwrap_or_default();
-    check("the old address gets nothing", old.starts_with("HTTP/1.1 404") && !old.contains("agents"), &old);
+    check("the page is at the address it had", again.word == page.word, &again.word);
+    let back = state(&page, "");
+    check(
+        "the address answers again, and says it is another run",
+        back["state"]["run"].is_string() && back["state"]["run"] != first["state"]["run"],
+        &back["state"]["run"].to_string(),
+    );
+    let word_file = sb.state.join("page-word");
+    let kept = std::fs::read_to_string(&word_file).unwrap_or_default();
+    check(
+        "the word is kept beside the workspace",
+        kept.trim() == page.word,
+        &word_file.display().to_string(),
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&word_file).unwrap().permissions().mode() & 0o777;
+        check("in a file only this user can read", mode == 0o600, &format!("{mode:o}"));
+    }
     let stream = listen(&again, "?after=0");
     check("the stream begins", heard(&stream, Duration::from_secs(3), |_| true).is_some(), "");
+    s.raw(CTRL_Q);
+    s.keys(b"w");
+    s.expect("w in the menu makes a new address and says so", "New page address:");
+    s.expect("and what became of the old one", "The old one has stopped working, for open pages too.");
+    let new = page_on_screen(&mut s, port);
+    check("the word is another", new.word != page.word, &new.word);
+    let old = get(&page, "/state").unwrap_or_default();
+    check("the old address gets nothing", old.starts_with("HTTP/1.1 404") && !old.contains("agents"), &old);
+    check("a page open on the old address is let go", ended(&stream, Duration::from_secs(3)), "it went on");
+    check("the new address has it all", state(&new, "")["state"]["agents"].is_array(), "");
+    s.raw(CTRL_Q);
+    s.keys(b"s");
+    s.expect("the status report has the new address", &format!("The page: {}", new.url()));
+    s.keys(ESC);
     drop(s.quit("quit", true));
-    check("the stream ends", ended(&stream, Duration::from_secs(2)), "the stream went on");
+    let mut s = Session::start(&sb);
+    let third = page_on_screen(&mut s, port);
+    check("the new address is the one the next start uses", third.word == new.word, &third.word);
+    drop(s.quit("quit", true));
+
+    println!("G. Typing from the page, when the settings allow it");
+    settings(&sb, &format!("{{\"page\": true, \"page_port\": {port}, \"page_can_type\": true}}"));
+    let mut s = Session::start(&sb);
+    let page = page_on_screen(&mut s, port);
+    s.expect("the notice says the page can type", "can see your agents and type to them.");
+    check("while it can type, its word is not the kept one", page.word != third.word, &page.word);
+    let kept = std::fs::read_to_string(sb.state.join("page-word")).unwrap_or_default();
+    check("and is kept nowhere: the file still holds the other", kept.trim() == third.word, kept.trim());
+    let named = format!(
+        "GET /state HTTP/1.1
+Host: localhost:{port}
+
+"
+    );
+    check(
+        "and it answers only at the address Lillignode shows",
+        ask(&page, &named).is_some_and(|a| a.starts_with("HTTP/1.1 403")),
+        "",
+    );
+    s.new_agent("whole");
+    s.expect("a stand-in that takes a paste whole starts", "STANDIN READY echo");
+    s.new_agent("plain");
+    s.expect("and one that does not, in front", "STANDIN READY echo-plain");
+    let now = state(&page, "");
+    let typing = Typing {
+        token: now["state"]["typing"].as_str().unwrap_or_default().to_string(),
+        run: now["state"]["run"].as_str().unwrap_or_default().to_string(),
+    };
+    check(
+        "the page is given a token with its data",
+        typing.token.len() >= 32,
+        &now["state"]["typing"].to_string(),
+    );
+    let (whole, plain) = (agent(&now["state"], "whole"), agent(&now["state"], "plain"));
+    let (whole_key, plain_key) = (whole["key"].as_u64().unwrap(), plain["key"].as_u64().unwrap());
+    let (whole_label, plain_label) = (whole["label"].as_str().unwrap(), plain["label"].as_str().unwrap());
+    check("the agent in front is the other one", plain["front"] == true && whole["front"] == false, "");
+
+    let (outcome, words) = send(&page, &typing, whole_key, "for the one behind", false);
+    check(
+        "text for an agent that is not in front is sent to it, and said so",
+        outcome == "sent" && words == format!("Sent to {whole_label}, then Enter."),
+        &words,
+    );
+    check(
+        "it arrives as one paste, then Enter",
+        screen_shows(&page, whole_key, "PASTE 1 lines: for the one behind")
+            && screen_shows(&page, whole_key, "ENTER"),
+        &screen_of(&page, whole_key),
+    );
+    check(
+        "nothing of it went to the agent in front",
+        !screen_of(&page, plain_key).contains("behind") && !screen_of(&page, plain_key).contains("ENTER"),
+        &screen_of(&page, plain_key),
+    );
+    s.expect(
+        "the terminal says the page typed, and to whom",
+        &format!("The page typed to {whole_label}, then Enter."),
+    );
+    let after = state(&page, "");
+    let said = after["state"]["events"].as_array().is_some_and(|events| {
+        events.iter().any(|e| e["what"] == "typed-from-page" && e["agent"] == whole_key)
+    });
+    check("the send is an event that names the agent", said, &after["state"]["events"].to_string());
+
+    let (outcome, words) = send(&page, &typing, plain_key, "hello plain", false);
+    check(
+        "one line goes as typed",
+        outcome == "sent" && words == format!("Sent to {plain_label}, then Enter."),
+        &words,
+    );
+    s.expect("with Enter after it", "STATUS enters=1 pastes=0 typed=");
+
+    let (outcome, words) = send(&page, &typing, plain_key, "one\ntwo", false);
+    check(
+        "more than one line asks first, in the terminal's words",
+        outcome == "ask"
+            && words
+                == format!(
+                    "Paste 2 lines into {plain_label} one line at a time? It does not take a paste as one block, \
+                     so each line would be entered as if you pressed Enter after it."
+                ),
+        &words,
+    );
+    s.pump_for(Duration::from_millis(500));
+    check(
+        "and nothing was sent",
+        !s.flat().contains("enters=2") && !s.flat().contains("typed=one"),
+        &s.flat(),
+    );
+    check("nor is the terminal asked anything", !s.flat().contains("? y / n"), &s.flat());
+    let (outcome, words) = send(&page, &typing, plain_key, "one\ntwo", true);
+    check(
+        "agreed to, it goes line by line",
+        outcome == "sent" && words == format!("Sent to {plain_label} line by line, then Enter."),
+        &words,
+    );
+    s.expect("each line entered", "STATUS enters=3 pastes=0 typed=");
+    let (outcome, _) = send(&page, &typing, whole_key, "three\nlines\nwhole", false);
+    check("an agent that takes a paste whole is not asked about", outcome == "sent", "");
+    check(
+        "and gets it as one",
+        screen_shows(&page, whole_key, "PASTE 3 lines:"),
+        &screen_of(&page, whole_key),
+    );
+
+    let body = |token: &str, agent: u64| {
+        serde_json::json!({ "token": token, "run": typing.run, "agent": agent, "text": "intruder", "agreed": true })
+            .to_string()
+    };
+    let good = body(&typing.token, plain_key);
+    let json = "Content-Type: application/json\r\n";
+    let refusals = [
+        (
+            "without the page's token",
+            own(port),
+            body("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", plain_key),
+            "HTTP/1.1 403",
+        ),
+        ("that does not say where it comes from", json.to_string(), good.clone(), "HTTP/1.1 403"),
+        (
+            "from another web site",
+            format!("Origin: https://elsewhere.example\r\nSec-Fetch-Site: cross-site\r\n{json}"),
+            good.clone(),
+            "HTTP/1.1 403",
+        ),
+        (
+            "from a form",
+            format!("Origin: http://127.0.0.1:{port}\r\nContent-Type: application/x-www-form-urlencoded\r\n"),
+            good.clone(),
+            "HTTP/1.1 415",
+        ),
+    ];
+    for (what, headers, body, status) in refusals {
+        let answer = post(&page, &headers, &body);
+        check(&format!("a send {what} is refused"), answer.starts_with(status), &answer);
+    }
+    let link = get(
+        &page,
+        &format!(
+            "/send?token={}&run={}&agent={plain_key}&text=intruder&agreed=true",
+            typing.token, typing.run
+        ),
+    );
+    check("a plain link sends nothing", link.unwrap_or_default().starts_with("HTTP/1.1 404"), "");
+    let nowhere = Page { port, word: String::new() };
+    let answer = post(&nowhere, &own(port), &good);
+    check("without the word, a send gets nothing", answer.starts_with("HTTP/1.1 404"), &answer);
+    let (outcome, words) = send(&page, &typing, 999_999, "intruder", true);
+    check(
+        "an agent that is not there refuses, in the terminal's words",
+        outcome == "refused" && words == "That agent is no longer in your workspace. Nothing was changed.",
+        &words,
+    );
+    let other_run = Typing { token: typing.token.clone(), run: "1".into() };
+    let (outcome, words) = send(&page, &other_run, plain_key, "intruder", true);
+    check(
+        "a key from another run of Lillignode refuses",
+        outcome == "refused" && words.contains("Nothing was sent."),
+        &words,
+    );
+    s.pump_for(Duration::from_millis(500));
+    check(
+        "none of that reached an agent",
+        !s.flat().contains("intruder") && !s.flat().contains("enters=4"),
+        &s.flat(),
+    );
+    check("either of them", !screen_of(&page, whole_key).contains("intruder"), &screen_of(&page, whole_key));
+
+    // The agent in front ends: Ctrl+D ends the stand-in.
+    s.raw(&[4]);
+    s.expect("the agent in front has ended", "exited.");
+    let (outcome, words) = send(&page, &typing, plain_key, "anyone there", false);
+    check(
+        "a stopped agent refuses, in the terminal's words",
+        outcome == "refused" && words == format!("{plain_label} is not running, so nothing was sent to it."),
+        &words,
+    );
+    drop(s.quit("quit", true));
 
     let _ = std::fs::remove_dir_all(&sb.root);
     println!("\nAll checks passed.");
