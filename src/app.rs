@@ -796,7 +796,7 @@ impl<B: AgentBackend> App<B> {
                 if matches!(key.code, KeyCode::Char(_) | KeyCode::Enter) {
                     let menu = self.config.menu_keys.first().map(|k| k.label()).unwrap_or_default();
                     self.notice = Some(format!(
-                        "{} has stopped, so what you typed was not sent. {menu} then r starts
+                        "{} has stopped, so what you typed was not sent. {menu} then r starts \
                          it again, or {menu} then x removes it.",
                         self.focused_label()
                     ));
@@ -4949,7 +4949,13 @@ Cost",
         assert!(!app.engine.closing(), "nothing quit");
         assert!(matches!(app.mode, Mode::Normal), "no question was opened");
         let notice = app.notice.clone().unwrap();
-        assert!(notice.contains("has stopped, so what you typed was not sent."), "{notice}");
+        // One line: no line break and no run of spaces inside it.
+        assert_eq!(
+            notice,
+            "Claude Code (a) has stopped, so what you typed was not sent. Ctrl+Q then r starts it again, \
+             or Ctrl+Q then x removes it."
+                .replace("Claude Code (a)", &app.focused_label())
+        );
         assert!(app.bar().starts_with("Ctrl+Q or F12: menu, then r start again"), "{}", app.bar());
 
         // Removing it is asked, even though it has stopped.
