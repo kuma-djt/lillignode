@@ -197,7 +197,10 @@ fn write_private(folder: &Path, path: &Path, word: &str) -> std::io::Result<()> 
         std::fs::create_dir(&staging)?;
         only_this_user(&staging, true)?;
         if !only_this_users(&staging) {
-            return Err(std::io::Error::other("its folder could not be made this user's alone"));
+            return Err(std::io::Error::other(format!(
+                "its folder could not be made this user's alone: Windows lists {}",
+                who_may_use(&staging).unwrap_or_else(|| "nothing readable".into())
+            )));
         }
         let inside = staging.join(WORD_FILE);
         let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&inside)?;
@@ -206,7 +209,10 @@ fn write_private(folder: &Path, path: &Path, word: &str) -> std::io::Result<()> 
         drop(file);
         only_this_user(&inside, false)?;
         if !only_this_users(&inside) {
-            return Err(std::io::Error::other("the file could not be made this user's alone"));
+            return Err(std::io::Error::other(format!(
+                "the file could not be made this user's alone: Windows lists {}",
+                who_may_use(&inside).unwrap_or_else(|| "nothing readable".into())
+            )));
         }
         std::fs::rename(&inside, path)
     })();
@@ -252,15 +258,12 @@ fn only_this_user(path: &Path, hands_down: bool) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Windows: true if the list of who may use `path` has one entry, this
-/// user's, and takes nothing from the folder above. Anything else, or not
-/// being able to tell, is false.
+/// Windows: the list of who may use `path`, as the system writes it out
+/// in its own plain form, the same in every language: for a file that is
+/// one user's alone, `P(A;;FA;;;S-1-5-21-…)`. None if it could not be read.
 #[cfg(windows)]
-fn only_this_users(path: &Path) -> bool {
+fn who_may_use(path: &Path) -> Option<String> {
     static NEXT: AtomicUsize = AtomicUsize::new(0);
-    let Ok(id) = this_user() else { return false };
-    // The system writes the list out in its own plain form: read there, it
-    // is the same in every language.
     let list = std::env::temp_dir().join(format!(
         "lillignode-who-{}-{}",
         std::process::id(),
@@ -269,18 +272,31 @@ fn only_this_users(path: &Path) -> bool {
     let saved = system_tool("icacls.exe", &[path.into(), "/save".into(), list.clone().into()]);
     let bytes = std::fs::read(&list).unwrap_or_default();
     let _ = std::fs::remove_file(&list);
-    if saved.is_err() {
-        return false;
-    }
+    saved.ok()?;
     let units: Vec<u16> = bytes.as_chunks::<2>().0.iter().map(|pair| u16::from_le_bytes(*pair)).collect();
     let text = String::from_utf16_lossy(&units);
-    // "D:P..." is a list that takes nothing from above; one "(...)" is one
-    // entry; "A;...;FA;;;<id>" allows that id everything.
-    let Some(list) = text.split("D:").nth(1) else { return false };
+    // The file's name, then on the next line "D:" and the list. A part
+    // that begins "S:" may follow: it is about records kept, not about who
+    // may use the file.
+    let line = text.lines().find(|line| line.starts_with("D:"))?;
+    let list = line["D:".len()..].split("S:").next().unwrap_or("");
+    Some(list.trim_end_matches('\u{0}').trim().to_string())
+}
+
+/// Windows: true if the list of who may use `path` has one entry, this
+/// user's, and takes nothing from the folder above. Anything else, or not
+/// being able to tell, is false.
+#[cfg(windows)]
+fn only_this_users(path: &Path) -> bool {
+    let (Ok(id), Some(list)) = (this_user(), who_may_use(path)) else { return false };
+    // "P…" takes nothing from above; one "(…)" is one entry; "(A;…" allows;
+    // and it ends with whom. The system writes the machine's first account,
+    // whose id ends in 500, by a short name of its own, "LA".
+    let whom = |who: &str| list.ends_with(&format!(";;;{who})"));
     list.starts_with('P')
         && list.matches('(').count() == 1
         && list.contains("(A;")
-        && list.trim_end().trim_end_matches('\u{0}').trim_end().ends_with(&format!(";;;{id})"))
+        && (whom(id) || (id.ends_with("-500") && whom("LA")))
 }
 
 /// Keep `word` in `folder` for the next start, in a file only this user
@@ -1496,6 +1512,8 @@ mod tests {
     fn the_word_is_made_once_kept_where_only_this_user_can_read_it_and_used_at_every_start() {
         let folder = scratch("kept");
         let (first, served) = served_in(&folder);
+        #[cfg(windows)]
+        assert_eq!(served.word_not_kept, None, "the folder's own list: {:?}", who_may_use(&folder));
         assert_eq!(served.word_not_kept, None);
         let word = word_now(&served.word);
         assert_eq!(std::fs::read_to_string(folder.join(WORD_FILE)).unwrap().trim(), word);
@@ -1519,7 +1537,8 @@ mod tests {
             assert_eq!(listed.matches(":(").count(), 1, "{listed}");
             assert!(!listed.contains("(I)"), "{listed}");
             // And the one entry is this user's.
-            assert!(only_this_users(&folder.join(WORD_FILE)));
+            let list = who_may_use(&folder.join(WORD_FILE));
+            assert!(only_this_users(&folder.join(WORD_FILE)), "{list:?}");
             assert!(!only_this_users(&folder), "a folder like any other is not: the check can say no");
         }
         // Lillignode closes and is started again: the same address, so a
