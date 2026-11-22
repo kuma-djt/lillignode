@@ -1,6 +1,6 @@
 [package]
 name = "lillignode"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 description = "Run several AI coding agents in one terminal window, each in its own folder, and see what each is doing."
 license = "AGPL-3.0-only"
