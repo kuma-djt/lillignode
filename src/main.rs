@@ -171,11 +171,13 @@ fn main() -> ExitCode {
     let mut output_since_key = false;
 
     let mut draw_error = None;
+    let mut painter = ui::Painter::default();
     while !app.quit {
         app.clock = started.elapsed().as_secs();
-        if let Err(e) = terminal.draw(|frame| {
+        // Nothing is written when the screen would be the same: see `Painter`.
+        if let Err(e) = painter.paint(&mut terminal, |frame| {
             app.too_small = ui::areas(frame.area()).is_none();
-            ui::draw(frame, &app);
+            ui::render(frame, &app)
         }) {
             draw_error = Some(e);
             break;
