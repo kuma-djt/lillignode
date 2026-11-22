@@ -26,7 +26,7 @@
 //!   kill            stop Lillignode outright, as a crash would
 //!   start           start Lillignode again, after kill; prints its
 //!                   address
-//!   word            the menu's `w`: a new address; prints it
+//!   word            the menu's `w`, then y: a new address; prints it
 //!   front           bring the next agent to the front
 //!   end             end the program of the agent in front (Ctrl+D)
 //!   shows <text>    whether Lillignode's screen shows this text within
@@ -302,6 +302,8 @@ fn serve(sb: &Sandbox, port: u16, can_type: bool) {
             ("word", _) => {
                 s.raw(CTRL_Q);
                 s.keys(b"w");
+                s.expect("w asks first", "Give the page a new address? y / n");
+                s.keys(b"y");
                 s.expect("w gives the page a new address", "New page address:");
                 let page = page_on_screen(&mut s, port);
                 println!("DONE word {}", page.url());
@@ -513,7 +515,15 @@ fn main() {
     check("the stream begins", heard(&stream, Duration::from_secs(3), |_| true).is_some(), "");
     s.raw(CTRL_Q);
     s.keys(b"w");
-    s.expect("w in the menu makes a new address and says so", "New page address:");
+    s.expect("w in the menu asks first", "Give the page a new address? y / n");
+    s.keys(b"n");
+    s.expect("no leaves it as it was", "The page's address was left as it was.");
+    check("and the address still answers", state(&page, "")["state"]["agents"].is_array(), "");
+    s.raw(CTRL_Q);
+    s.keys(b"w");
+    s.expect("asked again", "Give the page a new address? y / n");
+    s.keys(b"y");
+    s.expect("yes makes a new address and says so", "New page address:");
     s.expect("and what became of the old one", "The old one has stopped working, for open pages too.");
     let new = page_on_screen(&mut s, port);
     check("the word is another", new.word != page.word, &new.word);
@@ -699,6 +709,32 @@ Host: localhost:{port}
         &s.flat(),
     );
     check("either of them", !screen_of(&page, whole_key).contains("intruder"), &screen_of(&page, whole_key));
+
+    // Enter alone, from its own button, to the agent behind.
+    let body = serde_json::json!({
+        "token": typing.token, "run": typing.run, "agent": whole_key, "text": "", "agreed": false, "enter": true,
+    });
+    let answer = post(&page, &own(port), &body.to_string());
+    check(
+        "Enter alone reaches the agent named, and is said so",
+        answer.contains(&format!("\"words\":\"Pressed Enter in {whole_label}.\"")),
+        &answer,
+    );
+    check(
+        "as Enter and nothing else",
+        screen_shows(&page, whole_key, "enters=3 pastes=2 typed="),
+        &screen_of(&page, whole_key),
+    );
+    s.expect(
+        "the terminal says the page pressed Enter, and where",
+        &format!("The page pressed Enter in {whole_label}."),
+    );
+    let after = state(&page, "");
+    let said = after["state"]["events"].as_array().is_some_and(|events| {
+        events.iter().any(|e| e["what"] == "enter-from-page" && e["agent"] == whole_key)
+    });
+    check("the press is an event that names the agent", said, &after["state"]["events"].to_string());
+    check("nothing of it reached the agent in front", !s.flat().contains("enters=4"), &s.flat());
 
     // The agent in front ends: Ctrl+D ends the stand-in.
     s.raw(&[4]);

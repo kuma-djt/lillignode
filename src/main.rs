@@ -276,8 +276,11 @@ fn main() -> ExitCode {
                 }
                 Msg::Input(Input::Paste(text), _) => app.on_paste(text),
                 Msg::Typed(typed) => {
-                    let (outcome, words) =
-                        app.typed_from_page(&typed.run, typed.agent, &typed.text, typed.agreed);
+                    let (outcome, words) = if typed.enter {
+                        app.enter_from_page(&typed.run, typed.agent)
+                    } else {
+                        app.typed_from_page(&typed.run, typed.agent, &typed.text, typed.agreed)
+                    };
                     // A page that has stopped waiting is told nothing.
                     let _ = typed.answer.send(page::TypedAnswer { outcome, words });
                 }

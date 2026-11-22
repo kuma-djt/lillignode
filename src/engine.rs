@@ -66,6 +66,9 @@ pub enum Event {
     /// (`entered`; false only if the agent stopped between the two). Every
     /// such send, each time.
     TypedFromPage { agent: AgentKey, label: String, entered: bool },
+    /// The page pressed Enter in this agent, and nothing else. Every such
+    /// press, each time.
+    EnterFromPage { agent: AgentKey, label: String },
 }
 
 /// How many of the latest events are kept for a reader that asks late.
@@ -105,6 +108,7 @@ impl Event {
                 ("passed-cost-warning", Some(*agent), Some(label))
             }
             Event::TypedFromPage { agent, label, .. } => ("typed-from-page", Some(*agent), Some(label)),
+            Event::EnterFromPage { agent, label } => ("enter-from-page", Some(*agent), Some(label)),
         };
         EventCopy { number, what, agent, label: label.cloned() }
     }
@@ -780,6 +784,26 @@ impl<B: AgentBackend> Engine<B> {
         Ok(PageTyped::Sent { sent, entered })
     }
 
+    /// Enter, and nothing else, pressed in an agent from the page: to
+    /// answer a prompt the agent is waiting at. Refused as text from the
+    /// page is: a gone or stopped agent, or a question open. Every press is
+    /// an event that names the agent. Returns the agent's label.
+    pub fn enter_from_page(&mut self, agent: AgentKey) -> Result<String, Refused> {
+        let entry = self.ws.by_key(agent).ok_or(Refused::NoSuchAgent)?;
+        if !entry.is_running() {
+            return Err(Refused::AgentStopped);
+        }
+        if self.question.is_some() {
+            return Err(Refused::QuestionOpen);
+        }
+        let label = entry.label();
+        if !self.ws.send_to(agent, b"\r") {
+            return Err(Refused::AgentStopped);
+        }
+        self.say(Event::EnterFromPage { agent, label: label.clone() });
+        Ok(label)
+    }
+
     /// Tells this run of Lillignode from any other: agents' keys and event
     /// numbers begin again with each run.
     pub fn run(&self) -> u64 {
@@ -1339,6 +1363,32 @@ mod tests {
         assert_eq!(got(&sent), [(1, "\x1b[200~one\rtwo\x1b[201~".to_string()), (1, "\r".to_string())]);
         assert_eq!(typed_events(&e).len(), 2, "every send is an event");
         assert_eq!(e.question(), None);
+    }
+
+    #[test]
+    fn enter_from_the_page_is_enter_alone_to_the_agent_named_and_an_event() {
+        let (mut e, sent) = engine_and_sent(&["state=idle", "state=idle"]);
+        let (a, b) = (key(&e, 0), key(&e, 1));
+        assert_eq!(e.enter_from_page(b), Ok("b (work)".to_string()));
+        assert_eq!(got(&sent), [(2, "\r".to_string())], "Enter, to it alone");
+        let events = e.events_after(0).events;
+        let said: Vec<EventCopy> =
+            events.iter().map(|(n, ev)| ev.plain(*n)).filter(|p| p.what == "enter-from-page").collect();
+        assert_eq!(said.len(), 1);
+        assert_eq!(said[0].agent, Some(b));
+        // Refused as text is, and then nothing is sent or said.
+        let Ok(Outcome::Asked(q)) = e.close(a) else { panic!("asked") };
+        assert_eq!(e.enter_from_page(b), Err(Refused::QuestionOpen));
+        e.answer(q.id, false).unwrap();
+        e.ws.handle(AgentEvent::Exited(AgentId(2), crate::agent::Exit { code: 0 }));
+        assert_eq!(e.enter_from_page(b), Err(Refused::AgentStopped));
+        let Ok(Outcome::Asked(q)) = e.close(b) else { panic!("asked") };
+        e.answer(q.id, true).unwrap();
+        assert_eq!(e.enter_from_page(b), Err(Refused::NoSuchAgent));
+        assert_eq!(got(&sent).len(), 1, "nothing more was sent");
+        let presses =
+            e.events_after(0).events.iter().filter(|(n, ev)| ev.plain(*n).what == "enter-from-page").count();
+        assert_eq!(presses, 1);
     }
 
     #[test]

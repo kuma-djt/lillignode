@@ -156,6 +156,9 @@ li.gone .agent-name { color: var(--cream-quiet); }
   cursor: pointer;
 }
 #typing button:disabled { background: var(--rule); color: var(--cream-quiet); cursor: default; }
+/* Enter alone: there, but not the button the eye goes to first. */
+#typing button.quiet-button { background: none; color: var(--cream); border: 1px solid var(--cream-quiet); }
+#typing button.quiet-button:disabled { color: var(--cream-quiet); border-color: var(--rule); }
 #typing-said.refused { font-weight: 700; }
 #typing-ask { padding-top: 8px; }
 #typing-question { font-weight: 700; padding-bottom: 8px; }

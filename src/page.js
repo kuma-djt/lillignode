@@ -36,6 +36,7 @@
   const typingTo = el("typing-to");
   const typingText = el("typing-text");
   const typingSend = el("typing-send");
+  const typingEnter = el("typing-enter");
   const typingSaid = el("typing-said");
   const typingAsk = el("typing-ask");
   const typingQuestion = el("typing-question");
@@ -296,7 +297,10 @@
     if (typing.hidden) return;
     const agent = state.agents.find((s) => s.key === key);
     typingTo.textContent = agent ? "To " + agent.label : "To an agent that is no longer open in Lillignode";
-    typingText.disabled = sending || asking !== null;
+    typingEnter.textContent = agent ? "Press Enter in " + agent.label : "Press Enter";
+    typingEnter.disabled = sending || asking !== null || lostAt !== null || movedOn || !agent;
+    // Read only, not disabled, while sending or asking: it keeps the keyboard.
+    typingText.readOnly = sending || asking !== null;
     typingSend.disabled =
       sending || asking !== null || lostAt !== null || movedOn || typingText.value === "";
     typingAsk.hidden = asking === null;
@@ -309,10 +313,10 @@
   }
 
   // Pass on the text for one agent. `agreed`: the reader was asked whether
-  // it may go line by line, and said yes. What Lillignode says came of it
-  // is shown as it was said.
-  function send(agent, text, agreed) {
-    if (!state || !state.typing || agent === null || text === "" || sending) return;
+  // it may go line by line, and said yes. `enter`: Enter alone, with no
+  // text. What Lillignode says came of it is shown as it was said.
+  function send(agent, text, agreed, enter = false) {
+    if (!state || !state.typing || agent === null || (text === "") !== enter || sending) return;
     sending = true;
     asking = null;
     said("", "Sending.");
@@ -321,7 +325,7 @@
       method: "POST",
       cache: "no-store",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ token: state.typing, run: state.run, agent, text, agreed }),
+      body: JSON.stringify({ token: state.typing, run: state.run, agent, text, agreed, enter }),
       signal: AbortSignal.timeout(10000),
     })
       .then((answer) => (answer.ok ? answer.json() : answer.text().then((words) => ({ outcome: "refused", words }))))
@@ -329,7 +333,7 @@
         sending = false;
         if (heard.outcome === "ask") {
           asking = { agent, text };
-        } else if (heard.outcome === "sent" && typingText.value === text) {
+        } else if (heard.outcome === "sent" && !enter && typingText.value === text) {
           typingText.value = "";
           draftFor = null;
         }
@@ -353,6 +357,23 @@
       chosen = draftFor;
     }
     drawTyping();
+  });
+  // Ctrl+Enter (or Cmd+Enter) sends; Enter alone makes a new line.
+  typingText.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && (e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey) {
+      e.preventDefault();
+      if (!typingSend.disabled) typingSend.click();
+    }
+  });
+  // Enter alone, in the agent named on the button. Never focused for the
+  // reader: nothing moves the keyboard to it.
+  typingEnter.addEventListener("click", () => {
+    const key = target();
+    if (key === null || typingEnter.disabled) return;
+    // A click leaves the keyboard on the button, where a stray Enter would
+    // press it again: it goes back to the box.
+    typingText.focus();
+    send(key, "", false, true);
   });
   typingSend.addEventListener("click", () => {
     // Text that got into the box without being typed there (dropped, or

@@ -80,6 +80,8 @@ pub struct Typed {
     pub text: String,
     /// The reader was asked whether it may go line by line, and said yes.
     pub agreed: bool,
+    /// Enter alone, from the page's own button for it. `text` is empty.
+    pub enter: bool,
     /// Where to say what became of it.
     pub answer: mpsc::Sender<TypedAnswer>,
 }
@@ -773,6 +775,9 @@ struct SendBody {
     agent: u64,
     text: String,
     agreed: bool,
+    /// The button that presses Enter alone. Left out by an older page: no.
+    #[serde(default)]
+    enter: bool,
 }
 
 /// Said to a Send whose token is not this start's. The page gets the token
@@ -794,7 +799,18 @@ fn take_typed(stream: &TcpStream, body: &[u8], typing: &Typing, token: &str) -> 
         return refuse(stream, "403 Forbidden", STALE);
     }
     let (answer, heard) = mpsc::channel();
-    let typed = Typed { run: sent.run, agent: sent.agent, text: sent.text, agreed: sent.agreed, answer };
+    // Enter alone carries no text: one that does is not the page's own.
+    if sent.enter && !sent.text.is_empty() {
+        return refuse(stream, "400 Bad Request", "The request could not be read.");
+    }
+    let typed = Typed {
+        run: sent.run,
+        agent: sent.agent,
+        text: sent.text,
+        agreed: sent.agreed,
+        enter: sent.enter,
+        answer,
+    };
     if !typing(typed) {
         return refuse(stream, "503 Service Unavailable", "Lillignode is closing. Nothing was sent.");
     }
@@ -1245,8 +1261,8 @@ mod tests {
             // Passed on as it came: the page chose nothing about it.
             let typed = arrived.try_recv().expect("passed on");
             assert_eq!(
-                (typed.run.as_str(), typed.agent, typed.text.as_str(), typed.agreed),
-                ("7", 2, "do this\nthen that", false)
+                (typed.run.as_str(), typed.agent, typed.text.as_str(), typed.agreed, typed.enter),
+                ("7", 2, "do this\nthen that", false, false)
             );
             assert!(arrived.try_recv().is_err(), "once");
         }
@@ -1333,6 +1349,11 @@ mod tests {
         }
         // No link sends: a read of the same address passes nothing on,
         // whatever follows it.
+        // Enter alone with text is not the page's own.
+        let both =
+            json!({ "token": token, "run": "7", "agent": 2, "text": "x", "agreed": false, "enter": true });
+        assert!(post(at, &own(at), &both.to_string()).starts_with("HTTP/1.1 400"));
+        assert!(arrived.try_recv().is_err(), "Enter with text: passed on");
         let link = format!("/send?token={token}&run=7&agent=2&text=x&agreed=true");
         assert!(get(at, &link).starts_with("HTTP/1.1 404"));
         // Nor any other way of asking.

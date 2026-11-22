@@ -209,6 +209,9 @@ pub enum Confirm {
     /// Stop showing the waiting parts of the agent in front. Asked from
     /// its status report.
     Parts,
+    /// Give the page a new address: the one it has stops working at once.
+    /// The face's own question: the engine holds nothing of the page.
+    NewAddress,
 }
 
 pub struct App<B: AgentBackend> {
@@ -614,6 +617,7 @@ impl<B: AgentBackend> App<B> {
                 Event::TypedFromPage { label, entered: true, .. } => {
                     format!("The page typed to {label}, then Enter.")
                 }
+                Event::EnterFromPage { label, .. } => format!("The page pressed Enter in {label}."),
                 Event::TypedFromPage { label, entered: false, .. } => {
                     format!("The page typed to {label}. Enter was not sent after it: the agent stopped just then.")
                 }
@@ -750,6 +754,34 @@ impl<B: AgentBackend> App<B> {
         answer
     }
 
+    /// Enter alone, pressed on the page in the agent with this key number
+    /// in this run: to answer a prompt it is waiting at. Refused in the
+    /// terminal's words, as text from the page is.
+    pub fn enter_from_page(&mut self, run: &str, agent: u64) -> (TypedOutcome, String) {
+        let refused = |words: String| (TypedOutcome::Refused, words);
+        if !self.config.page_can_type {
+            return refused("This page is read only. Nothing was sent.".to_string());
+        }
+        if run != self.engine.run().to_string() {
+            return refused(
+                "Lillignode was started again since this page last heard from it. Nothing was sent. \
+                 Check which agent is selected, then press it again."
+                    .to_string(),
+            );
+        }
+        let Some(key) = self.engine.ws.entries().iter().map(Entry::key).find(|k| k.number() == agent) else {
+            return refused(self.refusal(Refused::NoSuchAgent, ""));
+        };
+        let label = self.engine.ws.by_key(key).map(Entry::label).unwrap_or_default();
+        let answer = match self.engine.enter_from_page(key) {
+            Ok(label) => (TypedOutcome::Sent, format!("Pressed Enter in {label}.")),
+            Err(why) => refused(self.refusal(why, &label)),
+        };
+        // The terminal says each press too.
+        self.say_events();
+        answer
+    }
+
     /// Put before the notice already up, which stays after it.
     fn say_first(&mut self, text: String) {
         self.notice = Some(match self.notice.take() {
@@ -864,6 +896,10 @@ impl<B: AgentBackend> App<B> {
                             ),
                         });
                     }
+                    Confirm::NewAddress if yes => self.new_page_address(),
+                    Confirm::NewAddress => {
+                        self.notice = Some("The page's address was left as it was.".to_string());
+                    }
                     Confirm::View(id) => match self.engine.answer(id, yes) {
                         Ok(Answered::Viewed(viewed)) => self.viewed(viewed),
                         Ok(Answered::ViewRefused(why)) => self.refuse(self.view_refusal(why)),
@@ -962,6 +998,8 @@ impl<B: AgentBackend> App<B> {
                     self.refuse("There is no agent to show a status report for.".to_string());
                 }
             }
+            // A bookmark and every open page stop working: asked first.
+            KeyCode::Char('w') if self.page.is_some() => self.mode = Mode::Confirm(Confirm::NewAddress),
             KeyCode::Char('w') => self.new_page_address(),
             KeyCode::Char('v') if self.engine.ws.pair().is_some() => self.act(Action::ShowOne),
             KeyCode::Char('v') => self.act(Action::ShowTwo),
@@ -1598,6 +1636,10 @@ impl<B: AgentBackend> App<B> {
                 debug_assert_eq!(self.engine.question().map(|q| q.id), Some(*id));
                 self.quit_question()
             }
+            Mode::Confirm(Confirm::NewAddress) => "Give the page a new address? y / n   The address it has \
+                                                   now stops working at once, for bookmarks and open pages \
+                                                   too."
+                .to_string(),
             Mode::Confirm(Confirm::Parts) => {
                 let waiting = self.engine.ws.focused().map(|e| e.track.waiting_parts()).unwrap_or_default();
                 let which = match waiting.as_slice() {
@@ -4432,8 +4474,31 @@ Cost",
         let before = served.url();
         app.page_serving(served);
         assert!(app.notice.as_deref().unwrap().contains(&format!("The page is on: {before}")));
-        app.on_key(menu);
-        app.on_key(press(KeyCode::Char('w')));
+        // Asked first, keys first; anything but y leaves it as it was.
+        for no in [press(KeyCode::Char('n')), press(KeyCode::Esc), press(KeyCode::Enter)] {
+            app.on_key(menu);
+            app.on_key(press(KeyCode::Char('w')));
+            assert!(matches!(app.mode, Mode::Confirm(Confirm::NewAddress)));
+            assert!(
+                app.bar().starts_with(
+                    "Give the page a new address? y / n   The address it has now stops working at once"
+                ),
+                "{}",
+                app.bar()
+            );
+            app.on_key(no);
+            assert!(matches!(app.mode, Mode::Normal));
+            assert_eq!(app.page_address.as_deref(), Some(before.as_str()), "left as it was");
+            assert_eq!(app.notice.as_deref(), Some("The page's address was left as it was."));
+        }
+        let kept = std::fs::read_to_string(folder.join(page::WORD_FILE)).unwrap();
+        assert!(before.ends_with(&format!("/{}/", kept.trim())), "the file too");
+        let yes = |app: &mut App<Fake>| {
+            app.on_key(menu);
+            app.on_key(press(KeyCode::Char('w')));
+            app.on_key(press(KeyCode::Char('y')));
+        };
+        yes(&mut app);
         let after = app.page_address.clone().unwrap();
         assert_ne!(after, before);
         assert_eq!(after.len(), before.len(), "the same address but for its word");
@@ -4458,8 +4523,7 @@ Cost",
         // the notice says the next start will make another.
         std::fs::remove_dir_all(&folder).unwrap();
         std::fs::write(&folder, "a file where the folder was").unwrap();
-        app.on_key(menu);
-        app.on_key(press(KeyCode::Char('w')));
+        yes(&mut app);
         let third = app.page_address.clone().unwrap();
         assert_ne!(third, after);
         let said = app.notice.clone().unwrap();
@@ -4520,6 +4584,33 @@ Cost",
         let (outcome, _) = app.typed_from_page(&run, second, "safe\x1b[201~rm -rf x\nmore", false);
         assert_eq!(outcome, TypedOutcome::Sent);
         assert_eq!(*sent.borrow(), ["\x1b[200~safe[201~rm -rf x\rmore\x1b[201~", "\r"], "one paste, whole");
+    }
+
+    #[test]
+    fn enter_from_the_page_goes_to_the_agent_named_alone_and_the_terminal_says_so() {
+        let (mut app, sent, run) = typing_app(&["first", "second"]);
+        let first = app.engine.ws.entries()[0].key().number();
+        // The other agent is in front.
+        assert_eq!(app.engine.ws.focused().unwrap().label(), "second (work)");
+        let (outcome, words) = app.enter_from_page(&run, first);
+        assert_eq!((outcome, words.as_str()), (TypedOutcome::Sent, "Pressed Enter in first (work)."));
+        assert_eq!(*sent.borrow(), ["\r"], "Enter and nothing else");
+        assert_eq!(app.notice.as_deref(), Some("The page pressed Enter in first (work)."));
+        // Refused in the terminal's words.
+        assert_eq!(
+            app.enter_from_page(&run, 999).1,
+            "That agent is no longer in your workspace. Nothing was changed."
+        );
+        assert!(app.enter_from_page("12345", first).1.starts_with("Lillignode was started again"));
+        app.on_agent_event(AgentEvent::Exited(AgentId(1), crate::agent::Exit { code: 0 }));
+        assert_eq!(
+            app.enter_from_page(&run, first),
+            (TypedOutcome::Refused, "first (work) is not running, so nothing was sent to it.".to_string())
+        );
+        app.config.page_can_type = false;
+        let second = app.engine.ws.entries()[1].key().number();
+        assert_eq!(app.enter_from_page(&run, second).1, "This page is read only. Nothing was sent.");
+        assert_eq!(sent.borrow().len(), 1, "nothing more was sent");
     }
 
     #[test]
