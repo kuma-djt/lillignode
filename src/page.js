@@ -492,7 +492,65 @@
     };
   }
 
+  // The Board: read from Lillignode, which reads it from a file of the
+  // user's, every few seconds. What a card says is put on the page as text.
+  const BOARD_MS = 2000;
+  const boardNote = el("board-note");
+  const boardNotRead = el("board-not-read");
+  const KIND_WORDS = { decide: "Decide", fire: "Fire", question: "Question" };
+  let boardShown = "";
+
+  function drawBoard(board) {
+    const shown = JSON.stringify(board);
+    // The same Board: left alone, so text a reader has selected stays so.
+    if (shown === boardShown) return;
+    boardShown = shown;
+    boardNote.hidden = !(board.problem || board.empty);
+    boardNote.textContent = board.problem || (board.empty ? "Nothing on the Board." : "");
+    boardNote.className = board.problem ? "quiet problem" : "quiet";
+    const part = (id, cards, row) => {
+      el(id).hidden = cards.length === 0;
+      el(id + "-list").replaceChildren(...cards.map(row));
+    };
+    part("board-decide", board.decide, (card) => {
+      const li = document.createElement("li");
+      li.className = "card " + (card.kind in KIND_WORDS ? card.kind : "");
+      li.dataset.id = card.id;
+      li.append(text("span", "card-kind", (KIND_WORDS[card.kind] || "") + (card.tier === "next" ? ", next" : ", now")));
+      li.append(text("strong", "card-title", card.title));
+      if (card.recommendation) li.append(text("p", "card-recommendation", card.recommendation));
+      li.append(text("p", "card-raised", "Raised by " + card.raised_by));
+      return li;
+    });
+    part("board-yours", board.yours, (card) => {
+      const li = text("li", "", card.title);
+      li.dataset.id = card.id;
+      if (card.tier === "next") li.append(text("span", "tier", "  next"));
+      return li;
+    });
+    part("board-know", board.know, (card) => {
+      const li = text("li", "", card.title);
+      li.dataset.id = card.id;
+      li.append(text("span", "card-raised", card.raised_by));
+      return li;
+    });
+    boardNotRead.hidden = !board.not_read;
+    boardNotRead.textContent = board.not_read || "";
+  }
+
+  function readBoard() {
+    if (movedOn || lostAt !== null) return;
+    fetch("board", { cache: "no-store", signal: AbortSignal.timeout(5000) })
+      .then((answer) => (answer.ok ? answer.json() : null))
+      .then((heard) => {
+        if (heard && heard.board) drawBoard(heard.board);
+      })
+      .catch(() => {});
+  }
+
   setInterval(draw, 1000);
+  setInterval(readBoard, BOARD_MS);
   draw();
   listen();
+  readBoard();
 })();

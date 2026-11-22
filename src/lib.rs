@@ -1,6 +1,7 @@
 pub mod action;
 pub mod agent;
 pub mod app;
+pub mod board;
 pub mod config;
 pub mod cost;
 pub mod engine;

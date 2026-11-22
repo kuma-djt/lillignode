@@ -101,6 +101,7 @@ fn main() -> ExitCode {
                             if config.page_can_type { "It can type to agents." } else { "Read only." }
                         );
                         println!("page word: {}", dir.join(page::WORD_FILE).display());
+                        println!("board:     {}", dir.join(lillignode::board::FILE).display());
                     }
                     if let Some(problem) = &config_problem {
                         println!("\n{problem}");

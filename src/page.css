@@ -79,7 +79,7 @@ main {
   flex: 1;
   min-height: 0;
   display: grid;
-  grid-template-columns: minmax(230px, 300px) minmax(0, 1fr) minmax(180px, 260px);
+  grid-template-columns: minmax(230px, 300px) minmax(0, 1fr) minmax(260px, 360px);
 }
 main > section { min-height: 0; overflow: auto; }
 #agents-column, #middle { border-right: 1px solid var(--rule); }
@@ -163,6 +163,37 @@ li.gone .agent-name { color: var(--cream-quiet); }
 #typing-ask { padding-top: 8px; }
 #typing-question { font-weight: 700; padding-bottom: 8px; }
 #typing-ask button { margin-right: 8px; }
+/* The Board. No orange here: orange is for an agent that needs you. */
+#board h3 {
+  font-size: 12px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--cream-quiet);
+  font-weight: 600;
+  margin: 0;
+  padding: 10px 16px 6px;
+}
+#board section[hidden], #board p[hidden] { display: none; }
+#board-decide-list { padding: 0 12px; }
+.card {
+  background: var(--navy-raised);
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  padding: 10px 12px 12px;
+  margin-bottom: 10px;
+}
+.card-kind { font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--cream-quiet); }
+.card.fire .card-kind { color: var(--cream); font-weight: 700; }
+.card-title { display: block; font-size: 17px; font-weight: 600; margin: 4px 0 6px; }
+.card-recommendation { margin-bottom: 6px; }
+.card-recommendation::before { content: "Recommended: "; color: var(--cream-quiet); }
+.card-raised { font-size: 13px; color: var(--cream-quiet); }
+#board-yours-list li, #board-know-list li { padding: 6px 16px; border-top: 1px solid var(--rule); }
+#board-yours-list li:last-child, #board-know-list li:last-child { border-bottom: 1px solid var(--rule); }
+#board-yours-list .tier { color: var(--cream-quiet); font-size: 13px; }
+#board-know-list li { color: var(--cream-quiet); font-size: 14px; }
+#board-know-list .card-raised { display: block; font-size: 12px; }
+
 /* Read by a screen reader, not shown. */
 #announce { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 /* What is on the page is from before contact was lost. */

@@ -33,8 +33,9 @@ const ENGINE: &[&str] = &[
 /// Draws, reads keys, and words what the engine decided.
 const FACE: &[&str] = &["app", "fit", "input", "keys", "look", "main", "ui", "view"];
 
-/// Reads the engine's published copies and nothing else: the page.
-const READER: &[&str] = &["page"];
+/// Reads the engine's published copies and nothing else: the page, and
+/// the Board it reads from a file.
+const READER: &[&str] = &["board", "page"];
 
 /// What a reader may not name outside its tests: the engine and what it
 /// holds, the running agents, the saved workspace, the terminal face, and

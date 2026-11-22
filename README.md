@@ -134,24 +134,41 @@ Put `"cost": true` in the settings file and Lillignode shows, under each Claude 
 
 Put `"page": true` in the settings file and Lillignode also serves a page for a browser on this machine. Its address is `http://127.0.0.1:7501/` (`"page_port"` sets another port) followed by a random word, such as `http://127.0.0.1:7501/b9iq5c8f72cy7ev3/`. Lillignode shows the whole address when it starts, and again at the foot of the status report (menu key, then `s`).
 
-- **The address stays the same.** The word is made once and kept in a file only you can read (on Windows: you, and the system and its administrators, who can read any file) (`page-word`, beside your workspace; `lillignode --where` says where), so you can bookmark the page, and a page left open comes back by itself after Lillignode is started again. The menu key, then `w`, makes a new word: the old address stops working at once, a page open on it says so, and Lillignode shows the new one.
+- **The address stays the same.** The word is made once and kept in a file only you can read (on Windows: you, and the system and its administrators, who can read any file) (`page-word`, beside your workspace; `lillignode --where` says where), so you can bookmark the page, and a page left open comes back by itself after Lillignode is started again. The menu key, then `w`, asks, then makes a new word: the old address stops working at once, a page open on it says so, and Lillignode shows the new one.
 
-- **What it shows.** One row for each agent with its status and how long ago it reported it ("Working, 2 s ago", "Needs you, waiting 4 min", "Unknown: no report"); the terminal of the agent you choose, live; and, above everything, a strip titled "Blocking now" naming each agent that needs you and how long it has waited. A third column, "Board", says it is not connected yet: nothing is behind it.
+- **What it shows.** One row for each agent with its status and how long ago it reported it ("Working, 2 s ago", "Needs you, waiting 4 min", "Unknown: no report"); the terminal of the agent you choose, live; and, above everything, a strip titled "Blocking now" naming each agent that needs you and how long it has waited. A third column, the Board: see below.
 - **It is read only.** The page can ask Lillignode for nothing and type nothing. Choosing an agent on the page changes only what the page shows. (Unless you switch typing on: see below.)
 - **It says how fresh it is.** The header says when the page last heard from Lillignode, and says so plainly when it has lost contact; what is on the page then is marked as old, and it keeps trying.
 - **Who can read it.** It listens on this machine only, never on the network, and answers only at its address with the word: anything else gets nothing of the page. Anyone with the address can read every agent's name, folder, status and screen; a page on another web site cannot. It is the one way an agent's screen leaves Lillignode's own window, which is why it is off unless you ask. The word is in your browser's history and in a file of yours, so a program running as you can find it. A page left open while Lillignode is closed keeps asking for its address: a program on this machine that took the port meanwhile would be told the word. If you think it has got out, the menu key, then `w`.
 
 ### Typing to an agent from the page (off unless you ask, apart from the page)
 
-Add `"page_can_type": true` beside `"page": true` and the page gets a box under the agent's terminal, labelled "To" and the agent's name, and a Send button. Send passes the text to that agent as if you had typed it in Lillignode, then Enter.
+Add `"page_can_type": true` beside `"page": true` and the page gets a box under the agent's terminal, labelled "To" and the agent's name, and a Send button. Send (or Ctrl+Enter in the box) passes the text to that agent as if you had typed it in Lillignode, then Enter. Enter alone in the box makes a new line. A separate button, "Press Enter in" and the agent's name, presses Enter and nothing else, for a prompt the agent is waiting at; the keyboard is never put on it for you.
 
 - **Anyone with the address can then type to your agents,** which for a coding agent can mean running commands as you. So with typing on, the address is not kept: the word is new each time Lillignode starts and is saved nowhere, the page cannot be bookmarked, and a page left open cannot follow a new start. The page answers only at `127.0.0.1`, not at `localhost`.
 - **It says so.** The page's header says it can type instead of "Read only"; Lillignode's start notice and status report say so; and each time the page sends, Lillignode's own window says "The page typed to" and the agent's name.
 - **Only to the agent named beside the box.** Once there is text in the box it is for that agent until you choose another; the page does not move it to whichever agent comes to the front.
-- **The same rules as a paste.** Control characters are taken out and said. Text of more than one line for an agent that does not take a paste as one block asks first, on the page, in the words Lillignode's own window uses. A stopped or closed agent refuses, in those words too. An empty box sends nothing, so Enter alone cannot be sent.
+- **The same rules as a paste.** Control characters are taken out and said. Text of more than one line for an agent that does not take a paste as one block asks first, on the page, in the words Lillignode's own window uses. A stopped or closed agent refuses, in those words too. An empty box sends nothing: Enter alone goes only by its own button, and each press is said in Lillignode's window as a send is.
 - **Who can send.** Only the page itself: a request must come from the page's own address, carry a token the page is given with its data, and be made the way only the page's script makes it. A link, a form, or a page on another web site cannot. A program running as you that has learned the address can.
 - **Not yet checked by a person, and never with a real agent.** Whether a real agent takes Enter straight after a paste the way the stand-in does is not known.
 - **Not yet checked by a person.** Checked by script, with stand-in agents, in a browser with no window. The agent's terminal on the page is its text and colours as the agent sent them; it is not an exact copy of the terminal window, and history cannot be read there.
+
+
+### The Board
+
+The page's third column shows cards from a file you keep beside your workspace, `board.json` (`lillignode --where` says where). Nothing is fetched from anywhere else; without the file the Board says "Nothing on the Board."
+
+```json
+{ "cards": [ { "id": "c1", "owner": "Codex (web)", "kind": "decide", "tier": "now",
+               "title": "Move the settings page?", "recommendation": "Not yet.", "status": "open" } ] }
+```
+
+- A card needs `id`, `owner`, `kind` (`decide`, `fire`, `do`, `question` or `know`), `tier` (`now` or `next`), `title` and `status`. It may have `recommendation`, `risk`, `cost`, `blocks`, `why`, `options` and `silo`. Only cards whose status is `open` are shown.
+- **Decide:** `decide`, `fire` and `question` cards, now before next, each with its title, recommendation and who raised it (its owner). No buttons yet.
+- **Only you can do:** `do` cards whose owner is `"me"`, as a plain list. Someone else's `do` card is not shown.
+- **Good to know:** `know` cards, as a quiet list, the last in the file first.
+- The file is read again every two seconds. A file that cannot be read is said in one line; a card that cannot be read is left out and named.
+- Only what the Board shows leaves Lillignode: a card's risk, cost, options and the rest stay in the file.
 
 ## Settings
 

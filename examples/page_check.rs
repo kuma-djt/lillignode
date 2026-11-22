@@ -29,6 +29,9 @@
 //!   word            the menu's `w`, then y: a new address; prints it
 //!   front           bring the next agent to the front
 //!   end             end the program of the agent in front (Ctrl+D)
+//!   board <which>   put a Board file in the state folder: `standin` (the
+//!                   eight cards in board-standin.json), `broken`, or
+//!                   `none` to take it away
 //!   shows <text>    whether Lillignode's screen shows this text within
 //!                   three seconds: prints `DONE shows yes` or `no`
 //!   quit            quit Lillignode through its menu, and end
@@ -318,6 +321,17 @@ fn serve(sb: &Sandbox, port: u16, can_type: bool) {
                 s.raw(&[4]);
                 println!("DONE end");
             }
+            ("board", which) => {
+                let path = sb.state.join(lillignode::board::FILE);
+                match which.trim() {
+                    "standin" => std::fs::write(&path, include_str!("board-standin.json")).unwrap(),
+                    "broken" => std::fs::write(&path, "{ \"cards\": [ {").unwrap(),
+                    _ => {
+                        let _ = std::fs::remove_file(&path);
+                    }
+                }
+                println!("DONE board");
+            }
             ("shows", text) => {
                 let began = Instant::now();
                 while !s.flat().contains(text) && began.elapsed() < Duration::from_secs(3) {
@@ -365,7 +379,29 @@ fn main() {
     let (mut s, page) = started(&sb, port);
     let html = get(&page, "/").unwrap_or_default();
     check("the page is served", html.starts_with("HTTP/1.1 200") && html.contains("Blocking now"), &html);
-    check("with a column that says the board is not connected", html.contains("Not connected yet."), &html);
+    check("with a column for the Board", html.contains("<h2 id=\"board-title\">Board</h2>"), &html);
+    let board = get(&page, "/board").unwrap_or_default();
+    check(
+        "with no Board file, the Board is empty, and nothing is wrong",
+        board.contains("\"empty\":true") && board.contains("\"problem\":null"),
+        &board,
+    );
+    std::fs::write(sb.state.join("board.json"), include_str!("board-standin.json")).unwrap();
+    let board = get(&page, "/board").unwrap_or_default();
+    let body: serde_json::Value =
+        serde_json::from_str(board.split_once("\r\n\r\n").map_or("", |(_, b)| b)).unwrap_or_default();
+    let count = |part: &str| body["board"][part].as_array().map_or(0, Vec::len);
+    check(
+        "with the stand-in file: four to decide, two only you can do, two good to know",
+        (count("decide"), count("yours"), count("know")) == (4, 2, 2),
+        &board,
+    );
+    check(
+        "and nothing the page does not show leaves",
+        !board.contains("\"risk\"") && !board.contains("\"silo\""),
+        &board,
+    );
+    let _ = std::fs::remove_file(sb.state.join("board.json"));
     s.raw(CTRL_Q);
     s.keys(b"s");
     s.expect("the status report says the address again, whole", &format!("The page: {}", page.url()));

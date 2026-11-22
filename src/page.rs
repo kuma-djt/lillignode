@@ -49,6 +49,7 @@ use std::time::{Duration, Instant, SystemTime};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use crate::board;
 use crate::snapshot::{AgentCopy, Published, Read, Reader};
 use crate::status::AgentStatus;
 use crate::terminal::{Run, ScreenCopy, Tint};
@@ -414,6 +415,8 @@ struct Serving {
     port: u16,
     word: Arc<Mutex<String>>,
     typing: Option<(Typing, Arc<Mutex<String>>)>,
+    /// Where the Board's file is read: the folder Lillignode saves in.
+    folder: Option<PathBuf>,
 }
 
 impl Serving {
@@ -449,7 +452,13 @@ pub fn serve(
         can_type: typing.is_some(),
         token: typing.as_ref().map(|(_, token)| token.clone()),
     };
-    let serving = Arc::new(Serving { reader, port: address.port(), word, typing });
+    let serving = Arc::new(Serving {
+        reader,
+        port: address.port(),
+        word,
+        typing,
+        folder: folder.map(Path::to_path_buf),
+    });
     let open = Arc::new(AtomicUsize::new(0));
     let accept = move || {
         for stream in listener.incoming() {
@@ -761,6 +770,11 @@ fn answer(stream: &TcpStream, serving: &Serving) -> std::io::Result<()> {
             state_once(stream, latest.map(|(_, published)| published), agent, &request.query, token)
         }
         "stream" => stream_states(stream, serving, &word, &request.query),
+        // Read again at each request: the file is the user's to change.
+        "board" => {
+            let shown = json!({ "board": board::read(serving.folder.as_deref()).to_json() });
+            send(stream, "200 OK", "application/json", &shown.to_string())
+        }
         _ => refuse(stream, "404 Not Found", "There is nothing here."),
     }
 }
@@ -1395,6 +1409,41 @@ mod tests {
     }
 
     #[test]
+    fn the_board_is_read_from_its_file_under_the_word_and_nowhere_else() {
+        let folder = scratch("board");
+        let (_publisher, reader) = channel();
+        let page = serve(reader, 0, Some(&folder), None).unwrap();
+        let word: &'static str = Box::leak(word_now(&page.word).into_boxed_str());
+        let at = At { address: page.address, word };
+        let board = || {
+            let answer = get(at, "/board");
+            assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
+            let body: Value = serde_json::from_str(answer.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+            body["board"].clone()
+        };
+        // No file: empty, and nothing wrong.
+        assert_eq!((board()["empty"].as_bool(), board()["problem"].is_null()), (Some(true), true));
+        // The file is read again at each request.
+        std::fs::write(folder.join(board::FILE), include_str!("../examples/board-standin.json")).unwrap();
+        let shown = board();
+        assert_eq!(shown["decide"].as_array().unwrap().len(), 4, "{shown}");
+        assert_eq!(shown["yours"].as_array().unwrap().len(), 2, "{shown}");
+        assert_eq!(shown["know"].as_array().unwrap().len(), 2, "{shown}");
+        std::fs::write(folder.join(board::FILE), "{").unwrap();
+        assert!(board()["problem"]
+            .as_str()
+            .unwrap()
+            .starts_with("The Board's file, board.json, was not read"));
+        // Without the word: nothing, as for anything else.
+        let raw = ask_raw(at, &format!("GET /board HTTP/1.1\r\nHost: 127.0.0.1:{}\r\n\r\n", at.port()));
+        assert!(raw.starts_with("HTTP/1.1 404") && raw.ends_with(NOTHING), "{raw}");
+        drop(page);
+        // With no folder there is no file to read.
+        let (_publisher, at) = served();
+        assert!(get(at, "/board").contains("\"empty\":true"));
+    }
+
+    #[test]
     fn a_page_that_may_type_has_a_word_that_is_new_each_start_and_kept_nowhere() {
         let folder = scratch("typing-word");
         let start = |typing: bool| {
@@ -1735,6 +1784,11 @@ mod tests {
         // Lillignode; the one other heading is the Board.
         assert!(HTML.contains(r#"<h2 id="agents-title">Agents</h2>"#), "{HTML}");
         assert!(HTML.contains(r#"<h2 id="board-title">Board</h2>"#), "{HTML}");
+        // The Board's own headings.
+        for heading in ["Decide", "Only you can do", "Good to know"] {
+            assert!(HTML.contains(&format!(">{heading}</h3>")), "{heading}");
+        }
+        assert!(!HTML.contains("Not connected yet"), "the Board is connected to its file now");
         for (name, text) in [("page.html", HTML), ("page.js", JS), ("page.css", CSS)] {
             let lower = text.to_lowercase();
             for word in ["thread", "seat"] {
