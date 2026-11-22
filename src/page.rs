@@ -283,20 +283,30 @@ fn who_may_use(path: &Path) -> Option<String> {
     Some(list.trim_end_matches('\u{0}').trim().to_string())
 }
 
-/// Windows: true if the list of who may use `path` has one entry, this
-/// user's, and takes nothing from the folder above. Anything else, or not
-/// being able to tell, is false.
+/// Windows: true if `path` takes nothing from the folder above and the
+/// list of who may use it names nobody but this user, the system itself
+/// and the machine's administrators. Those two can read any file whatever
+/// its list says, so a list without them would keep out nobody more.
+/// Anything else, or not being able to tell, is false.
 #[cfg(windows)]
 fn only_this_users(path: &Path) -> bool {
     let (Ok(id), Some(list)) = (this_user(), who_may_use(path)) else { return false };
-    // "P…" takes nothing from above; one "(…)" is one entry; "(A;…" allows;
-    // and it ends with whom. The system writes the machine's first account,
-    // whose id ends in 500, by a short name of its own, "LA".
-    let whom = |who: &str| list.ends_with(&format!(";;;{who})"));
-    list.starts_with('P')
-        && list.matches('(').count() == 1
-        && list.contains("(A;")
-        && (whom(id) || (id.ends_with("-500") && whom("LA")))
+    // "P…" takes nothing from above. Then one "(A;…;…;;;who)" for each
+    // entry: "A" allows, and the last part is whom. The system writes
+    // itself as "SY", the administrators as "BA", and the machine's first
+    // account, whose id ends in 500, as "LA".
+    let Some((flags, entries)) = list.split_once('(') else { return false };
+    let mine = |who: &str| who == id || (who == "LA" && id.ends_with("-500"));
+    let mut this_user_is_named = false;
+    for entry in entries.trim_end_matches(')').split(")(") {
+        let parts: Vec<&str> = entry.split(';').collect();
+        let (Some(&"A"), Some(who)) = (parts.first(), parts.last()) else { return false };
+        this_user_is_named |= mine(who);
+        if !mine(who) && !["SY", "BA"].contains(who) {
+            return false;
+        }
+    }
+    flags.starts_with('P') && this_user_is_named
 }
 
 /// Keep `word` in `folder` for the next start, in a file only this user
@@ -1526,20 +1536,19 @@ mod tests {
         }
         #[cfg(windows)]
         {
-            // One entry in the file's list of who may use it, and none of
-            // it handed down from the folder.
-            let system = std::env::var_os("SystemRoot").map(PathBuf::from).unwrap();
-            let out = std::process::Command::new(system.join("System32").join("icacls.exe"))
-                .arg(folder.join(WORD_FILE))
-                .output()
-                .unwrap();
-            let listed = String::from_utf8_lossy(&out.stdout).into_owned();
-            assert_eq!(listed.matches(":(").count(), 1, "{listed}");
-            assert!(!listed.contains("(I)"), "{listed}");
-            // And the one entry is this user's.
+            // Nothing handed down from the folder, and nobody named but
+            // this user (and, on some machines, the system and its
+            // administrators, who can read any file).
             let list = who_may_use(&folder.join(WORD_FILE));
             assert!(only_this_users(&folder.join(WORD_FILE)), "{list:?}");
-            assert!(!only_this_users(&folder), "a folder like any other is not: the check can say no");
+            assert!(list.as_deref().is_some_and(|list| !list.contains("ID;")), "{list:?}");
+            // A file that everyone on the machine may read is not: the
+            // check can say no.
+            let open = folder.join("open-to-all");
+            std::fs::write(&open, "x").unwrap();
+            let everyone = std::ffi::OsString::from("*S-1-1-0:R");
+            system_tool("icacls.exe", &[open.clone().into(), "/grant".into(), everyone]).unwrap();
+            assert!(!only_this_users(&open), "{:?}", who_may_use(&open));
         }
         // Lillignode closes and is started again: the same address, so a
         // bookmark still works and an open page finds it again.
@@ -1583,6 +1592,8 @@ mod tests {
             let _ = std::fs::remove_file(&path);
             let open = "abcdefghijkmnpqr";
             std::fs::write(&path, open).unwrap();
+            let everyone = std::ffi::OsString::from("*S-1-1-0:R");
+            system_tool("icacls.exe", &[path.clone().into(), "/grant".into(), everyone]).unwrap();
             assert!(!only_this_users(&path));
             let (word, not_kept) = kept_word(Some(&folder));
             assert_ne!(word, open, "a word others could read is no longer a secret");
