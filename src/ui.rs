@@ -23,11 +23,13 @@
 //! once for each draw. An agent's own screen is the one thing read from the
 //! engine directly, because it is the emulator's.
 
+use ratatui::backend::Backend;
+use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph, Wrap};
-use ratatui::Frame;
+use ratatui::{Frame, Terminal};
 
 use crate::agent::{AgentBackend, Size};
 use crate::app::{App, BarPart, Mode};
@@ -668,6 +670,53 @@ fn bar_line(parts: &[(BarPart, String)], width: usize, p: Palette) -> Line<'stat
 }
 
 pub fn draw<B: AgentBackend>(frame: &mut Frame, app: &App<B>) {
+    if let Some(at) = render(frame, app) {
+        frame.set_cursor_position(at);
+    }
+}
+
+/// Puts a screen on the terminal only when it differs from the one already
+/// there.
+///
+/// Lillignode draws after everything that happens, and most of what happens
+/// changes nothing on screen: a key passed on to an agent, a second of
+/// quiet. Writing even the cursor's place again for those is not free. On
+/// Windows the terminal paints a frame for it, and what the agent says a
+/// millisecond later waits for the frame after, about 16 ms on every key.
+#[derive(Default)]
+pub struct Painter {
+    /// The cells and the cursor last put on the terminal.
+    shown: Option<(Buffer, Option<Position>)>,
+}
+
+impl Painter {
+    /// Draw with `render`, which returns where the cursor goes, if anywhere.
+    /// Says whether anything was written to the terminal.
+    pub fn paint<T: Backend>(
+        &mut self,
+        terminal: &mut Terminal<T>,
+        render: impl FnOnce(&mut Frame) -> Option<Position>,
+    ) -> Result<bool, T::Error> {
+        // A window that changed size is cleared here, as `Terminal::draw`
+        // would; its cells are then a different shape from those kept, so it
+        // is always painted.
+        terminal.autoresize()?;
+        let mut frame = terminal.get_frame();
+        let cursor = render(&mut frame);
+        let cells = terminal.current_buffer_mut();
+        if self.shown.as_ref().is_some_and(|(shown, at)| shown == cells && *at == cursor) {
+            // Left blank for the next draw, as it is after a painted one.
+            cells.reset();
+            return Ok(false);
+        }
+        self.shown = Some((cells.clone(), cursor));
+        terminal.apply_buffer_with_cursor(cursor)?;
+        Ok(true)
+    }
+}
+
+/// Draws everything but the cursor, and returns where the cursor goes.
+pub fn render<B: AgentBackend>(frame: &mut Frame, app: &App<B>) -> Option<Position> {
     let window = frame.area();
     let p = Palette(app.colors);
     // One copy of the engine's state for the whole draw.
@@ -689,7 +738,7 @@ pub fn draw<B: AgentBackend>(frame: &mut Frame, app: &App<B>) {
             app.bar()
         );
         frame.render_widget(Paragraph::new(text).wrap(Wrap { trim: true }), window);
-        return;
+        return None;
     };
 
     draw_sidebar(frame, a.sidebar, app, &state, p);
@@ -710,7 +759,7 @@ pub fn draw<B: AgentBackend>(frame: &mut Frame, app: &App<B>) {
     }
 
     if let Some(cursor) = cursor {
-        frame.set_cursor_position(Position::new(a.bar.x + (cursor - skip) as u16, a.bar.y));
+        return Some(Position::new(a.bar.x + (cursor - skip) as u16, a.bar.y));
     } else if matches!(app.mode, Mode::Normal) {
         if let Some(entry) = app.engine.ws.focused().filter(|e| e.is_running()) {
             let screen = entry.term.screen();
@@ -725,16 +774,114 @@ pub fn draw<B: AgentBackend>(frame: &mut Frame, app: &App<B>) {
                 };
                 let (row, col) = screen.cursor_position();
                 if row < at.height && col < at.width {
-                    frame.set_cursor_position(Position::new(at.x + col, at.y + row));
+                    return Some(Position::new(at.x + col, at.y + row));
                 }
             }
         }
     }
+    None
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A terminal whose every byte is kept, so a test can see what a draw
+    /// wrote.
+    #[derive(Clone, Default)]
+    struct Written(std::rc::Rc<std::cell::RefCell<Vec<u8>>>);
+
+    impl std::io::Write for Written {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.borrow_mut().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Written {
+        /// How many bytes were written since this was last asked.
+        fn take(&self) -> usize {
+            std::mem::take(&mut *self.0.borrow_mut()).len()
+        }
+    }
+
+    fn terminal_of(cols: u16, rows: u16) -> (Terminal<ratatui::backend::CrosstermBackend<Written>>, Written) {
+        let written = Written::default();
+        let options =
+            ratatui::TerminalOptions { viewport: ratatui::Viewport::Fixed(Rect::new(0, 0, cols, rows)) };
+        let terminal =
+            Terminal::with_options(ratatui::backend::CrosstermBackend::new(written.clone()), options)
+                .unwrap();
+        (terminal, written)
+    }
+
+    fn says(text: &'static str, cursor: Option<(u16, u16)>) -> impl FnOnce(&mut Frame) -> Option<Position> {
+        move |frame| {
+            frame.render_widget(Paragraph::new(text), frame.area());
+            cursor.map(Position::from)
+        }
+    }
+
+    #[test]
+    fn a_screen_that_has_not_changed_writes_nothing_to_the_terminal() {
+        let (mut terminal, written) = terminal_of(20, 3);
+        let mut painter = Painter::default();
+        assert!(painter.paint(&mut terminal, says("typing", Some((6, 0)))).unwrap());
+        assert!(written.take() > 0, "the first screen is written");
+        // The same again, as after a key passed on to an agent: not one
+        // byte, the cursor's place included. Each write here made the
+        // agent's answer wait for the terminal's next frame.
+        for _ in 0..3 {
+            assert!(!painter.paint(&mut terminal, says("typing", Some((6, 0)))).unwrap());
+            assert_eq!(written.take(), 0);
+        }
+    }
+
+    #[test]
+    fn a_changed_cell_or_a_moved_or_hidden_cursor_is_written() {
+        let (mut terminal, written) = terminal_of(20, 3);
+        let mut painter = Painter::default();
+        painter.paint(&mut terminal, says("typing", Some((6, 0)))).unwrap();
+        written.take();
+        assert!(painter.paint(&mut terminal, says("typing!", Some((6, 0)))).unwrap());
+        assert!(written.take() > 0, "a cell changed");
+        assert!(painter.paint(&mut terminal, says("typing!", Some((7, 0)))).unwrap());
+        assert!(written.take() > 0, "only the cursor moved");
+        assert!(painter.paint(&mut terminal, says("typing!", None)).unwrap());
+        assert!(written.take() > 0, "only the cursor was hidden");
+        assert!(!painter.paint(&mut terminal, says("typing!", None)).unwrap());
+        assert_eq!(written.take(), 0);
+    }
+
+    #[test]
+    fn a_draw_that_wrote_nothing_leaves_no_trace_in_the_next() {
+        use ratatui::backend::TestBackend;
+        let mut terminal = Terminal::new(TestBackend::new(12, 2)).unwrap();
+        let mut painter = Painter::default();
+        painter.paint(&mut terminal, says("long words", None)).unwrap();
+        assert!(!painter.paint(&mut terminal, says("long words", None)).unwrap());
+        // Shorter text after a draw that was not written: the rest of the
+        // old text must go, not linger from the draw that was skipped.
+        assert!(painter.paint(&mut terminal, says("no", None)).unwrap());
+        terminal.backend().assert_buffer_lines(["no          ", "            "]);
+        // And back: what was skipped earlier is not taken for what is shown.
+        assert!(painter.paint(&mut terminal, says("long words", None)).unwrap());
+        terminal.backend().assert_buffer_lines(["long words  ", "            "]);
+    }
+
+    #[test]
+    fn a_window_that_changed_size_is_always_painted() {
+        use ratatui::backend::TestBackend;
+        let mut terminal = Terminal::new(TestBackend::new(12, 2)).unwrap();
+        let mut painter = Painter::default();
+        painter.paint(&mut terminal, says("same", None)).unwrap();
+        terminal.backend_mut().resize(14, 2);
+        assert!(painter.paint(&mut terminal, says("same", None)).unwrap());
+        terminal.backend().assert_buffer_lines(["same          ", "              "]);
+    }
 
     fn wrapped(text: &str, width: usize) -> Vec<String> {
         let chars: Vec<char> = text.chars().collect();

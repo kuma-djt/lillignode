@@ -27,6 +27,16 @@
 //! would, and holds it open for the whole run. So the keystroke times are
 //! those with the page open.
 //!
+//! PROBE_IDLE_SECS=<n>: before typing, leave the program alone for n seconds
+//! and say how many bytes it wrote to its terminal meanwhile. The line
+//! `idle: watching pid` comes first, so its processor time over those
+//! seconds can be read from outside.
+//!
+//! PROBE_MAX_MEDIAN_MS=<n>: end with a failure if the median keystroke time
+//! is above n milliseconds. On Windows, Lillignode at 0.2.0 took about 19 ms
+//! (it wrote the cursor's place again after every key, and the terminal made
+//! the echo wait a frame for that); about 2 ms since.
+//!
 //! Rules this probe keeps (CONTRIBUTING.md):
 //! - It is for the stand-in, not for a real agent. It sets CLAUDE_CONFIG_DIR
 //!   to a throwaway folder for whatever it starts, so nothing it runs can
@@ -279,6 +289,18 @@ fn main() {
         None
     };
 
+    if let Some(secs) = std::env::var("PROBE_IDLE_SECS").ok().and_then(|s| s.parse::<u64>().ok()) {
+        say(format!("idle: watching pid {} for {secs} s", pid.unwrap_or(0)));
+        let before = p.raw.len();
+        let end = Instant::now() + Duration::from_secs(secs);
+        while let Some(left) = end.checked_duration_since(Instant::now()) {
+            if let Ok(ev) = p.rx.recv_timeout(left) {
+                p.take(ev);
+            }
+        }
+        say(format!("idle: {} bytes written to the terminal in {secs} s", p.raw.len() - before));
+    }
+
     // 2. Keystroke echo. One character at a time, timed from the write to the
     // arrival of the output that makes it visible on screen.
     let text = "zqjxkvwzqjxkvwzqjxkvwzqjxkvwzqjxkvwzqjxk";
@@ -299,6 +321,7 @@ fn main() {
         thread::sleep(Duration::from_millis(60));
     }
     times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let mut too_slow = false;
     if times.is_empty() {
         say("echo: no typed character ever appeared".into());
     } else {
@@ -312,6 +335,12 @@ fn main() {
             pct(0.95),
             times[times.len() - 1]
         ));
+        if let Some(most) = std::env::var("PROBE_MAX_MEDIAN_MS").ok().and_then(|s| s.parse::<f64>().ok()) {
+            too_slow = pct(0.5) > most;
+            if too_slow {
+                say(format!("echo: FAILED. The median is above the {most} ms allowed."));
+            }
+        }
     }
     if let Some(read) = &page {
         say(format!("page: still open after typing, {} bytes read in all", read.load(Ordering::Relaxed)));
@@ -367,5 +396,5 @@ fn main() {
     std::fs::write(out_dir.join(format!("{label}-exit-tail.txt")), tail.escape_debug().to_string()).unwrap();
     drop(say);
     std::fs::write(out_dir.join(format!("{label}-report.txt")), report).unwrap();
-    std::process::exit(0);
+    std::process::exit(i32::from(too_slow));
 }
