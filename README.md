@@ -46,7 +46,7 @@ The bottom line always starts with the menu keys. After them it says where your 
 
 ## Get it (Windows)
 
-1. Download `lillignode-0.2.0-windows-x64.zip` from the [latest release](https://github.com/kuma-djt/lillignode/releases/latest). The release page lists the zip's SHA-256, so you can check the download (`Get-FileHash lillignode-0.2.0-windows-x64.zip` in PowerShell).
+1. Download `lillignode-0.2.1-windows-x64.zip` from the [latest release](https://github.com/kuma-djt/lillignode/releases/latest). The release page lists the zip's SHA-256, so you can check the download (`Get-FileHash lillignode-0.2.1-windows-x64.zip` in PowerShell).
 2. Unzip it anywhere. It unpacks into one folder.
 3. Open Windows Terminal in that folder and run `.\lillignode.exe`.
 4. Press `n` to start an agent: Enter for Claude Code, Enter again for no options, then type the folder it should work in and press Enter. (Enter alone uses the folder Lillignode was started in.)
