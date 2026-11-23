@@ -410,8 +410,25 @@ fn card_on(board: &serde_json::Value, id: &str) -> serde_json::Value {
 /// Act on a card as the page's own buttons would. Returns what came of it
 /// and the words said back.
 fn act(page: &Page, token: &str, card: &str, action: &str, note: &str, undo: bool) -> (String, String) {
-    let body =
-        serde_json::json!({ "token": token, "card": card, "action": action, "note": note, "undo": undo });
+    // With what the page shows of the card now, as its buttons send.
+    let shown = card_on(&board_shown(page), card);
+    act_having_seen(page, token, card, action, note, undo, &shown)
+}
+
+/// Act on a card having been shown `shown` of it.
+fn act_having_seen(
+    page: &Page,
+    token: &str,
+    card: &str,
+    action: &str,
+    note: &str,
+    undo: bool,
+    shown: &serde_json::Value,
+) -> (String, String) {
+    let body = serde_json::json!({
+        "token": token, "card": card, "action": action, "note": note, "undo": undo,
+        "title": shown["title"].as_str().unwrap_or_default(), "recommendation": shown["recommendation"],
+    });
     let port = page.port;
     let answer = ask(
         page,
@@ -914,9 +931,10 @@ Host: localhost:{port}
     );
     let lines = outbox();
     check(
-        "one line in the outbox: card id, action, note, time",
+        "one line in the outbox: card id, action, note, time, and the title that was shown",
         lines.len() == 1
             && lines[0]["card"] == "c1"
+            && lines[0]["title"] == "Keep the old sign-in endpoint for one more release?"
             && lines[0]["action"] == "approve"
             && lines[0]["note"] == ""
             && lines[0]["at"].as_str().is_some_and(|at| lillignode::board::parse_time(at).is_some()),
@@ -1068,6 +1086,23 @@ Host: localhost:{port}
     check("a page that can only act cannot type", answer.starts_with("HTTP/1.1 404"), &answer);
     check("none of that added a line", outbox().len() == before, &format!("{:?}", outbox()));
     check("nor touched the Board's own file", std::fs::read(&board_file).unwrap() == as_written, "");
+
+    // The card is rewritten under its id between being shown and the press.
+    let shown = card_on(&board_shown(&page), "c3");
+    let rewritten = include_str!("board-standin.json").replace(
+        "Should the install guide name the download by its version?",
+        "Publish the signing key in the install guide?",
+    );
+    std::fs::write(&board_file, &rewritten).unwrap();
+    let (outcome, words) = act_having_seen(&page, &token, "c3", "approve", "", false, &shown);
+    check(
+        "a card that changed since the page showed it is not acted on, and says why",
+        outcome == "refused"
+            && words == "That card has changed since the page showed it. Read it again, then decide. Nothing was sent.",
+        &words,
+    );
+    check("and nothing was added", outbox().len() == before, &format!("{:?}", outbox()));
+    std::fs::write(&board_file, &as_written).unwrap();
 
     // Whatever keeps the Board picks the lines up, and then closes a card.
     std::fs::write(&outbox_file, "").unwrap();

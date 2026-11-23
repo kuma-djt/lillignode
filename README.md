@@ -160,15 +160,32 @@ The page's third column shows cards from a file you keep beside your workspace, 
 
 ```json
 { "cards": [ { "id": "c1", "owner": "Codex (web)", "kind": "decide", "tier": "now",
-               "title": "Move the settings page?", "recommendation": "Not yet.", "status": "open" } ] }
+               "title": "Move the settings page?", "recommendation": "Not yet.",
+               "status": "queued", "created_at": "2026-11-20T09:30:00Z", "due_at": "2026-12-03" } ] }
 ```
 
-- A card needs `id`, `owner`, `kind` (`decide`, `fire`, `do`, `question` or `know`), `tier` (`now` or `next`), `title` and `status`. It may have `recommendation`, `risk`, `cost`, `blocks`, `why`, `options` and `silo`. Only cards whose status is `open` are shown.
-- **Decide:** `decide`, `fire` and `question` cards, now before next, each with its title, recommendation and who raised it (its owner). No buttons yet.
-- **Only you can do:** `do` cards whose owner is `"me"`, as a plain list. Someone else's `do` card is not shown.
-- **Good to know:** `know` cards, as a quiet list, the last in the file first.
+- A card needs `id`, `owner` (who raised it), `kind` (`decide`, `fire`, `do`, `question` or `know`), `tier` (`now` or `next`), `title` and `status`. It may have `recommendation`, `created_at`, `due_at`, and `risk`, `cost`, `blocks`, `why`, `options` and `silo`, which are not shown.
+- **Open** means its status is `queued`, `revise`, `hold` or `more`. A card with any other status, `draft` among them, is not shown.
+- **Decide:** `decide`, `fire` and `question` cards, compact: the title, one line of the recommendation (rest the pointer on it for all of it), what it is and who raised it. Now before next, then newest first.
+- **Only you can do:** every open `do` card, with who raised it, as a plain list.
+- **Good to know:** `know` cards, as a quiet list, newest first.
+- `created_at` is what "newest" goes by; a card without one comes after those with. `due_at` is shown when set. Both are a day (`2026-12-03`) or a day and time with `Z` or an offset.
+- An `id` is at most 128 characters: letters, digits, spaces inside it, and `- _ . / : # @ ( ) + ,`. Two cards cannot share one.
 - The file is read again every two seconds. A file that cannot be read is said in one line; a card that cannot be read is left out and named.
 - Only what the Board shows leaves Lillignode: a card's risk, cost, options and the rest stay in the file.
+
+### Acting on a card from the page (off unless you ask, apart from the other two)
+
+Add `"page_can_act": true` beside `"page": true` and cards get buttons: **Approve**, **Revise** (which asks for a short note) and **Hold** on a card to decide, with one line under them saying what each does; a **Done** tick on something only you can do; **Got it** on something good to know.
+
+- **Nothing is written to `board.json`.** Each thing you do is one line added to `board-outbox.jsonl` beside it: the card's id, the action, the note, the time, and the title you were shown. The card then shows "Sent, waiting" until `board.json` no longer lists it as open.
+- **Undo for ten seconds.** Undo takes the line back out, if it has not been picked up.
+- **It is said.** Each action and each undo is said in Lillignode's own window, and the page's header says it can act instead of "Read only".
+- **You act on what you saw.** If the card with that id says something else by the time your press arrives, it is refused and you are told to read it again. A press in the moment the Board changes under the pointer is not taken.
+- **Who can act.** Only the page itself, on the same terms as typing: under the word, from `127.0.0.1`, with a token the page is given with its data; a link, a form, or another web site cannot. As with typing, the address is new each time Lillignode starts while this is on.
+- **Picking lines up.** Whatever reads the outbox takes the whole file, by renaming it, and reads that; it never edits the outbox in place. Undo does the same, so a line is never in two places.
+- **What the outbox is not: proof.** Any program running as you, an agent among them, can write a line to that file itself, and a line written that way looks like yours. Whatever picks lines up must not treat the file alone as your word. Keep the folder to yourself, as for the workspace.
+- **Not yet checked by a person.** Checked by script and in a browser with no window. Nothing picks the outbox up yet.
 
 ## Settings
 
@@ -196,9 +213,15 @@ And to let that page type to agents, which is off unless you ask even when the p
 { "page": true, "page_can_type": true }
 ```
 
+And to let it act on the cards of its Board, which is off unless you ask whatever the other two are:
+
+```json
+{ "page": true, "page_can_act": true }
+```
+
 If the colours come out wrong, add `"colors"` with `"full"`, `"256"`, `"16"` or `"none"`. Setting the `NO_COLOR` environment variable also switches colour off.
 
-All are optional, and a change takes effect the next time Lillignode is started. `billing` does nothing without `cost`, and `cost_warning_tokens` without it is reported as a mistake; so is `page_port` or `page_can_type` without `page`. A Lillignode older than the page does not know `"page"` and treats it as a mistake in the file.
+All are optional, and a change takes effect the next time Lillignode is started. `billing` does nothing without `cost`, and `cost_warning_tokens` without it is reported as a mistake; so is `page_port`, `page_can_type` or `page_can_act` without `page`. A Lillignode older than the page does not know `"page"` and treats it as a mistake in the file.
 
 **The file is strict.** One mistake in it and none of it is used: every setting is at its default until it is fixed. Lillignode never changes the file. It tells you when it starts, beginning with how to fix it ("To fix your settings file: ...") and naming the line and column where it can.
 
@@ -307,9 +330,10 @@ cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 cargo run --release --example e2e
 cargo run --release --example page_check
+cargo run --release --example handcheck
 ```
 
-The last two drive the real program against a stand-in agent; the first of them takes several minutes, the second checks the page and takes about one. On Windows, run the packaging script with `-BesideBuild` first so it covers status. See [CONTRIBUTING.md](CONTRIBUTING.md) before sending a change, including the rule that tests never touch a real Claude Code setup.
+The last three drive the real program against a stand-in agent: the first takes several minutes, the second checks the page and takes about two, and the third does the steps of the hand checks that a script can judge and takes about three. On Windows, run the packaging script with `-BesideBuild` first so it covers status. See [CONTRIBUTING.md](CONTRIBUTING.md) before sending a change, including the rule that tests never touch a real Claude Code setup.
 
 ## How it is built
 

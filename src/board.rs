@@ -19,9 +19,22 @@
 //!
 //! What the reader does to a card (approve, revise, hold, done, got it) is
 //! added to `board-outbox.jsonl`, one line each, for whatever keeps the
-//! Board to pick up; taking a line out of that file is picking it up. Which
-//! cards have been acted on is kept in `board-sent.json`, so a card shows as
-//! sent and waiting until the Board's file no longer lists it as open.
+//! Board to pick up. Which cards have been acted on is kept in
+//! `board-sent.json`, so a card shows as sent and waiting until the
+//! Board's file no longer lists it as open.
+//!
+//! Picking up: whatever takes lines from the outbox takes the whole file,
+//! by renaming it to a name of its own, and reads that. It never edits the
+//! outbox in place. Undo here does the same: it renames the outbox to a
+//! name of its own, takes its one line out, and puts the file back. So a
+//! line is in exactly one place at any moment, and an undo either takes
+//! its line out or finds the outbox already taken.
+//!
+//! A line says which card by id and by the title the reader was shown, so
+//! whatever picks it up can refuse a card that has since become another.
+//! What the outbox is not: proof. Any program running as this user can
+//! write a line to it. Whatever picks lines up must not treat the file
+//! alone as the user's word.
 //!
 //! This file is a reader: it names nothing of the engine, and is given
 //! only a folder to read and write in (`tests/boundaries.rs`).
@@ -217,6 +230,17 @@ struct CardShape {
     due_at: Option<String>,
 }
 
+/// The most characters a card's id may have.
+const ID_MAX: usize = 128;
+
+/// True for an id that can name a card in the outbox: not too long, and
+/// only letters, digits and plain marks, with no space at either end.
+fn plain_id(id: &str) -> bool {
+    id.chars().count() <= ID_MAX
+        && id == id.trim()
+        && id.chars().all(|c| c.is_alphanumeric() || " -_./:#@()+,".contains(c))
+}
+
 /// The statuses a card is open with.
 const OPEN: [&str; 4] = ["queued", "revise", "hold", "more"];
 
@@ -308,6 +332,12 @@ pub fn written_time(time: SystemTime) -> String {
 
 /// Read a file of at most `MAX_BYTES`. None: there is no such file.
 fn read_file(path: &Path) -> Result<Option<String>, String> {
+    // Only a plain file is opened: anything else there (a pipe, a folder)
+    // could hold the reader of it for ever.
+    match std::fs::metadata(path) {
+        Ok(found) if !found.is_file() => return Err("it is not a plain file".to_string()),
+        _ => {}
+    }
     let file = match std::fs::File::open(path) {
         Ok(file) => file,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -392,6 +422,16 @@ pub fn from_text(text: &str) -> Board {
         }
         if shape.id.trim().is_empty() {
             said_not_read(&mut board, format!("card {}: its id is empty", at + 1));
+            continue;
+        }
+        // An id is written to the outbox and into events, and names the
+        // card to whatever picks a line up: short, and of plain characters
+        // that cannot be taken for a line's end or go unseen.
+        if !plain_id(&shape.id) {
+            said_not_read(
+                &mut board,
+                format!("card {}: its id is over {ID_MAX} characters or has one that is not allowed", at + 1),
+            );
             continue;
         }
         // An action names a card by its id: two cards cannot share one.
@@ -530,23 +570,51 @@ struct SentFile {
     sent: Vec<Sent>,
 }
 
-/// The cards acted on and waiting. A file that is missing or cannot be
-/// read is none: then no card shows as waiting, and nothing is lost from
-/// the outbox.
-pub fn sent(folder: Option<&Path>) -> Vec<Sent> {
-    let Some(folder) = folder else { return Vec::new() };
+/// The cards acted on and waiting. None kept: none. A file that is there
+/// and cannot be read is an error, with why: then nothing may be acted on,
+/// because which cards already were is not known.
+pub fn sent(folder: Option<&Path>) -> Result<Vec<Sent>, String> {
+    let Some(folder) = folder else { return Ok(Vec::new()) };
+    let unreadable = |why: String| {
+        format!(
+            "{SENT}, which keeps which cards were acted on, was not read: {why}. Until it is put right or \
+             deleted, no card can be acted on from the page."
+        )
+    };
     match read_file(&folder.join(SENT)) {
-        Ok(Some(text)) => serde_json::from_str::<SentFile>(&text).map(|file| file.sent).unwrap_or_default(),
-        _ => Vec::new(),
+        Ok(None) => Ok(Vec::new()),
+        Ok(Some(text)) => serde_json::from_str::<SentFile>(&text)
+            .map(|file| file.sent)
+            .map_err(|e| unreadable(format!("it is not what Lillignode wrote ({e})"))),
+        Err(why) => Err(unreadable(why)),
     }
 }
 
-/// Write `text` to `path` whole or not at all: beside it first, then moved
-/// over it.
+/// A new file that only this user can read and write, where the system
+/// has a way to say so when making it. Refused if anything is already
+/// there: a file put in its place, or a link to another, is not written
+/// through.
+fn new_file(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path)
+}
+
+/// Write `text` to `path` whole or not at all: to a new file beside it
+/// first, then moved over it.
 fn write_whole(path: &Path, text: &str) -> std::io::Result<()> {
     let beside = path.with_extension("new");
+    match std::fs::remove_file(&beside) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
+        _ => {}
+    }
     let written = (|| {
-        let mut file = std::fs::File::create(&beside)?;
+        let mut file = new_file(&beside)?;
         file.write_all(text.as_bytes())?;
         file.sync_all()?;
         drop(file);
@@ -563,22 +631,70 @@ fn write_sent(folder: &Path, sent: Vec<Sent>) -> std::io::Result<()> {
     write_whole(&folder.join(SENT), &text)
 }
 
-/// Take exactly `line` out of the outbox, once. False: it is not there.
-fn take_line(folder: &Path, line: &str) -> std::io::Result<bool> {
+/// Add one line to the end of the outbox. The outbox must be a plain file
+/// or not there yet: a link in its place is not written through. If what
+/// is there does not end with a line's end (a write cut short), one is
+/// put first, so this line is never joined onto another.
+fn add_line(folder: &Path, line: &str) -> std::io::Result<()> {
     let path = folder.join(OUTBOX);
-    let text = match std::fs::read_to_string(&path) {
-        Ok(text) => text,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+    let (mut file, is_new) = match std::fs::symlink_metadata(&path) {
+        Ok(found) if !found.is_file() => {
+            return Err(std::io::Error::other("the outbox is not a plain file"));
+        }
+        Ok(_) => (std::fs::OpenOptions::new().read(true).append(true).open(&path)?, false),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (new_file(&path)?, true),
         Err(e) => return Err(e),
     };
-    let mut lines: Vec<&str> = text.lines().collect();
-    let Some(at) = lines.iter().rposition(|l| *l == line) else { return Ok(false) };
-    lines.remove(at);
-    let mut left = lines.join("\n");
-    if !left.is_empty() {
-        left.push('\n');
+    let mut whole = Vec::new();
+    if !is_new {
+        file.read_to_end(&mut whole)?;
     }
-    write_whole(&path, &left).map(|()| true)
+    let start = if whole.is_empty() || whole.ends_with(b"\n") { "" } else { "\n" };
+    file.write_all(format!("{start}{line}\n").as_bytes())?;
+    file.sync_all()
+}
+
+/// Take exactly `line` out of the outbox, once. False: it is not there,
+/// or the outbox has been taken. The outbox is taken whole first, by
+/// renaming it, as whatever picks lines up takes it; so the two never
+/// change the same file.
+fn take_line(folder: &Path, line: &str) -> std::io::Result<bool> {
+    let (path, mine) = (folder.join(OUTBOX), folder.join(format!("{OUTBOX}.undo")));
+    let _ = std::fs::remove_file(&mine);
+    match std::fs::rename(&path, &mine) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e),
+    }
+    let taken = (|| {
+        let text = std::fs::read_to_string(&mine)?;
+        let mut lines: Vec<&str> = text.lines().collect();
+        let found = lines.iter().rposition(|l| *l == line);
+        if let Some(at) = found {
+            lines.remove(at);
+            let mut left = lines.join("\n");
+            if !left.is_empty() {
+                left.push('\n');
+            }
+            let mut file = std::fs::OpenOptions::new().write(true).truncate(true).open(&mine)?;
+            file.write_all(left.as_bytes())?;
+            file.sync_all()?;
+        }
+        Ok(found.is_some())
+    })();
+    // Put back whatever happened: the other lines are still waiting.
+    let back = std::fs::rename(&mine, &path);
+    match (taken, back) {
+        (Ok(found), Ok(())) => Ok(found),
+        (Err(e), _) | (_, Err(e)) => Err(e),
+    }
+}
+
+/// What the reader was shown of a card when they acted on it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Seen {
+    pub title: String,
+    pub recommendation: Option<String>,
 }
 
 /// What was done, for the sentence that says so.
@@ -587,6 +703,9 @@ pub struct Acted {
     pub card: String,
     pub title: String,
     pub action: Action,
+    /// It was done, but something about it is not as it should be: said
+    /// with the rest.
+    pub warning: Option<String>,
 }
 
 const NOWHERE: &str =
@@ -601,14 +720,18 @@ fn clean_note(note: &str) -> String {
 
 /// Do `action` to the open card `card`: one line is added to the outbox,
 /// and the card is kept as sent and waiting. Nothing is written to the
-/// Board's own file. Refused, with the words to say, if the card is not
-/// open, the action does not fit it, it was already acted on, a Revise has
-/// no note, or the outbox cannot be written; then nothing was sent.
+/// Board's own file. `seen` is what the reader was shown of the card: if
+/// the card with that id now says something else, it is not the card they
+/// acted on, and it is refused. Refused too, with the words to say, if the
+/// card is not open, the action does not fit it, it was already acted on,
+/// a Revise has no note, or the outbox cannot be written. Then nothing
+/// was sent.
 pub fn act(
     folder: Option<&Path>,
     card: &str,
     action: &str,
     note: &str,
+    seen: &Seen,
     now: SystemTime,
 ) -> Result<Acted, String> {
     let Some(folder) = folder else { return Err(NOWHERE.to_string()) };
@@ -619,6 +742,12 @@ pub fn act(
     let Some(found) = board.cards().find(|c| c.id == card) else {
         return Err("That card is no longer open on the Board. Nothing was sent.".to_string());
     };
+    if found.title != seen.title || found.recommendation != seen.recommendation {
+        return Err(
+            "That card has changed since the page showed it. Read it again, then decide. Nothing was sent."
+                .to_string(),
+        );
+    }
     let Some(action) = Action::parse(action).filter(|action| action.fits(found.kind)) else {
         return Err("That cannot be done to this card. Nothing was sent.".to_string());
     };
@@ -629,9 +758,13 @@ pub fn act(
     if note.chars().count() > NOTE_MAX {
         return Err(format!("The note is over {NOTE_MAX} characters. Nothing was sent."));
     }
-    // Only cards still open are kept as waiting.
-    let mut waiting: Vec<Sent> =
-        sent(Some(folder)).into_iter().filter(|s| board.cards().any(|c| c.id == s.card)).collect();
+    // Which cards were already acted on must be known. Only cards still
+    // open are kept as waiting.
+    let mut waiting: Vec<Sent> = sent(Some(folder))
+        .map_err(|why| format!("{why} Nothing was sent."))?
+        .into_iter()
+        .filter(|s| board.cards().any(|c| c.id == s.card))
+        .collect();
     if let Some(earlier) = waiting.iter().find(|s| s.card == card) {
         let did = Action::parse(&earlier.action).map_or("an action", Action::name);
         return Err(format!(
@@ -639,8 +772,14 @@ pub fn act(
         ));
     }
     let at_ms = now.duration_since(SystemTime::UNIX_EPOCH).map_or(0, |since| since.as_millis() as u64);
-    let line =
-        json!({ "card": card, "action": action.word(), "note": note, "at": written_time(now) }).to_string();
+    let line = json!({
+        "card": card,
+        "action": action.word(),
+        "note": note,
+        "at": written_time(now),
+        "title": found.title,
+    })
+    .to_string();
     let could_not =
         |e: std::io::Error| format!("The Board's outbox could not be written ({e}). Nothing was sent.");
     // Kept as waiting first: if the line then cannot be added, the keeping
@@ -653,15 +792,11 @@ pub fn act(
         line: line.clone(),
     });
     write_sent(folder, waiting).map_err(could_not)?;
-    let added =
-        std::fs::OpenOptions::new().create(true).append(true).open(folder.join(OUTBOX)).and_then(
-            |mut file| file.write_all(format!("{line}\n").as_bytes()).and_then(|()| file.sync_all()),
-        );
-    if let Err(e) = added {
+    if let Err(e) = add_line(folder, &line) {
         let _ = write_sent(folder, before);
         return Err(could_not(e));
     }
-    Ok(Acted { card: card.to_string(), title: found.title.clone(), action })
+    Ok(Acted { card: card.to_string(), title: found.title.clone(), action, warning: None })
 }
 
 /// Undo what was done to `card`, within `UNDO_FOR` of doing it and only
@@ -670,13 +805,16 @@ pub fn act(
 /// then nothing was changed.
 pub fn undo(folder: Option<&Path>, card: &str, now: SystemTime) -> Result<Acted, String> {
     let Some(folder) = folder else { return Err(NOWHERE.to_string()) };
-    let mut waiting = sent(Some(folder));
+    let mut waiting = sent(Some(folder)).map_err(|why| format!("{why} Nothing was changed."))?;
     let Some(at) = waiting.iter().position(|s| s.card == card) else {
         return Err("There is nothing to undo for that card. Nothing was changed.".to_string());
     };
     let was = waiting[at].clone();
     let done_at = SystemTime::UNIX_EPOCH + Duration::from_millis(was.at_ms);
-    if now.duration_since(done_at).unwrap_or_default() > UNDO_FOR + UNDO_GRACE {
+    // A time that is still to come is not within ten seconds of now: the
+    // clock went back, or the time kept was changed.
+    let in_time = now.duration_since(done_at).is_ok_and(|since| since <= UNDO_FOR + UNDO_GRACE);
+    if !in_time {
         return Err(format!(
             "That was sent more than {} seconds ago, so it cannot be undone from here. Nothing was changed.",
             UNDO_FOR.as_secs()
@@ -693,18 +831,16 @@ pub fn undo(folder: Option<&Path>, card: &str, now: SystemTime) -> Result<Acted,
         Err(e) => return Err(format!("The Board's outbox could not be changed ({e}). Nothing was changed.")),
     }
     waiting.remove(at);
-    // The line is out. If this cannot be written the card still shows as
-    // waiting, though nothing waits: said, so it is not taken for sent.
-    if let Err(e) = write_sent(folder, waiting) {
-        return Err(format!(
-            "It was undone: its line is out of the outbox. But {SENT} could not be written ({e}), so the card \
-             still shows as waiting."
-        ));
-    }
+    // The line is out: it was undone, whatever happens next. If this
+    // cannot be written the card still shows as waiting, though nothing
+    // waits: said with the rest, so it is not taken for sent.
+    let warning = write_sent(folder, waiting).err().map(|e| {
+        format!("But {SENT} could not be written ({e}), so the card still shows as waiting, though nothing waits.")
+    });
     let title =
         read(Some(folder)).cards().find(|c| c.id == card).map(|c| c.title.clone()).unwrap_or_default();
     let action = Action::parse(&was.action).unwrap_or(Action::Hold);
-    Ok(Acted { card: card.to_string(), title, action })
+    Ok(Acted { card: card.to_string(), title, action, warning })
 }
 
 #[cfg(test)]
@@ -744,6 +880,21 @@ mod tests {
             .lines()
             .map(|line| serde_json::from_str(line).unwrap())
             .collect()
+    }
+
+    /// Act on a card having seen it as the Board's file has it now.
+    fn act_seen(dir: &Path, card: &str, action: &str, note: &str, now: SystemTime) -> Result<Acted, String> {
+        let board = read(Some(dir));
+        let seen = board
+            .cards()
+            .find(|c| c.id == card)
+            .map(|c| Seen { title: c.title.clone(), recommendation: c.recommendation.clone() })
+            .unwrap_or_default();
+        act(Some(dir), card, action, note, &seen, now)
+    }
+
+    fn waiting(dir: &Path) -> Vec<Sent> {
+        sent(Some(dir)).unwrap()
     }
 
     fn at(secs: u64) -> SystemTime {
@@ -969,21 +1120,21 @@ mod tests {
             ],
         );
         let before = std::fs::read(dir.join(FILE)).unwrap();
-        let acted = act(Some(&dir), "d", "revise", "  Keep it,\tbut\nsay when it goes.  ", at(5)).unwrap();
+        let acted = act_seen(&dir, "d", "revise", "  Keep it,\tbut\nsay when it goes.  ", at(5)).unwrap();
         assert_eq!(
             (acted.card.as_str(), acted.title.as_str(), acted.action),
             ("d", "title d", Action::Revise)
         );
-        act(Some(&dir), "y", "done", "a note that is not wanted", at(6)).unwrap();
-        act(Some(&dir), "k", "got-it", "", at(7)).unwrap();
+        act_seen(&dir, "y", "done", "a note that is not wanted", at(6)).unwrap();
+        act_seen(&dir, "k", "got-it", "", at(7)).unwrap();
         assert_eq!(
             outbox(&dir),
             [
-                json!({ "card": "d", "action": "revise", "note": "Keep it, but say when it goes.", "at": written_time(at(5)) }),
-                json!({ "card": "y", "action": "done", "note": "", "at": written_time(at(6)) }),
-                json!({ "card": "k", "action": "got-it", "note": "", "at": written_time(at(7)) }),
+                json!({ "card": "d", "action": "revise", "note": "Keep it, but say when it goes.", "at": written_time(at(5)), "title": "title d" }),
+                json!({ "card": "y", "action": "done", "note": "", "at": written_time(at(6)), "title": "title y" }),
+                json!({ "card": "k", "action": "got-it", "note": "", "at": written_time(at(7)), "title": "title k" }),
             ],
-            "card id, action, note, time: one line each, in order"
+            "card id, action, note, time, and the title that was shown: one line each, in order"
         );
         assert_eq!(
             std::fs::read(dir.join(FILE)).unwrap(),
@@ -991,13 +1142,13 @@ mod tests {
             "nothing is written to the Board's own file"
         );
         // Each card now shows as sent, with what and when.
-        let shown = read(Some(&dir)).to_json(&sent(Some(&dir)));
+        let shown = read(Some(&dir)).to_json(&waiting(&dir));
         assert_eq!(shown["decide"][0]["sent"]["action"], "revise");
         assert_eq!(shown["decide"][0]["sent"]["at"], 1_795_000_005_000_u64);
         assert_eq!(shown["yours"][0]["sent"]["action"], "done");
         assert_eq!(shown["know"][0]["sent"]["action"], "got-it");
         // And is not acted on twice.
-        let again = act(Some(&dir), "d", "approve", "", at(30)).unwrap_err();
+        let again = act_seen(&dir, "d", "approve", "", at(30)).unwrap_err();
         assert_eq!(again, "Revise was already sent for that card, and it is waiting. Nothing more was sent.");
         assert_eq!(outbox(&dir).len(), 3);
         // Picked up, and the Board's keeper takes the card off: it waits no
@@ -1010,11 +1161,11 @@ mod tests {
             .to_string(),
         )
         .unwrap();
-        let shown = read(Some(&dir)).to_json(&sent(Some(&dir)));
+        let shown = read(Some(&dir)).to_json(&waiting(&dir));
         assert!(shown["decide"].as_array().unwrap().is_empty(), "no longer open: no longer shown");
         assert_eq!(shown["yours"][0]["sent"]["action"], "done", "picked up but still open: still waiting");
-        act(Some(&dir), "n", "got-it", "", at(60)).unwrap();
-        let kept: Vec<String> = sent(Some(&dir)).into_iter().map(|s| s.card).collect();
+        act_seen(&dir, "n", "got-it", "", at(60)).unwrap();
+        let kept: Vec<String> = waiting(&dir).into_iter().map(|s| s.card).collect();
         assert_eq!(kept, ["y", "n"], "cards no longer open are let go");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1032,7 +1183,7 @@ mod tests {
             ],
         );
         let no =
-            |card: &str, action: &str, note: &str| act(Some(&dir), card, action, note, at(1)).unwrap_err();
+            |card: &str, action: &str, note: &str| act_seen(&dir, card, action, note, at(1)).unwrap_err();
         let not_this = "That cannot be done to this card. Nothing was sent.";
         for (card, action) in [
             ("d", "done"),
@@ -1060,10 +1211,10 @@ mod tests {
             no("d", "revise", &"x".repeat(NOTE_MAX + 1)),
             "The note is over 280 characters. Nothing was sent."
         );
-        assert_eq!(act(None, "d", "approve", "", at(1)).unwrap_err(), NOWHERE);
+        assert_eq!(act(None, "d", "approve", "", &Seen::default(), at(1)).unwrap_err(), NOWHERE);
         assert!(!dir.join(OUTBOX).exists() && !dir.join(SENT).exists(), "nothing was written at all");
         // A note of exactly the most allowed is taken.
-        act(Some(&dir), "d", "revise", &"é".repeat(NOTE_MAX), at(2)).unwrap();
+        act_seen(&dir, "d", "revise", &"é".repeat(NOTE_MAX), at(2)).unwrap();
         // A Board that cannot be read: nothing can be acted on.
         std::fs::write(dir.join(FILE), "{").unwrap();
         let said = no("f", "approve", "");
@@ -1075,12 +1226,12 @@ mod tests {
         // not show as waiting.
         let dir2 = folder("no-outbox", vec![card("d", "x", "decide", "now", "queued")]);
         std::fs::create_dir_all(dir2.join(OUTBOX)).unwrap();
-        let said = act(Some(&dir2), "d", "approve", "", at(1)).unwrap_err();
+        let said = act_seen(&dir2, "d", "approve", "", at(1)).unwrap_err();
         assert!(
             said.starts_with("The Board's outbox could not be written (")
                 && said.ends_with("Nothing was sent.")
         );
-        assert!(sent(Some(&dir2)).is_empty(), "not kept as waiting");
+        assert!(waiting(&dir2).is_empty(), "not kept as waiting");
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&dir2);
     }
@@ -1093,9 +1244,9 @@ mod tests {
             card("c", "x", "know", "now", "queued"),
         ];
         let dir = folder("undo", cards);
-        act(Some(&dir), "a", "approve", "", at(0)).unwrap();
-        act(Some(&dir), "b", "hold", "", at(1)).unwrap();
-        act(Some(&dir), "c", "got-it", "", at(2)).unwrap();
+        act_seen(&dir, "a", "approve", "", at(0)).unwrap();
+        act_seen(&dir, "b", "hold", "", at(1)).unwrap();
+        act_seen(&dir, "c", "got-it", "", at(2)).unwrap();
         // Within ten seconds: its line, and only its line, is taken out.
         let undone = undo(Some(&dir), "b", at(9)).unwrap();
         assert_eq!(
@@ -1105,20 +1256,22 @@ mod tests {
         let left: Vec<String> =
             outbox(&dir).iter().map(|l| l["card"].as_str().unwrap().to_string()).collect();
         assert_eq!(left, ["a", "c"]);
-        assert!(
-            read(Some(&dir)).to_json(&sent(Some(&dir)))["decide"][1]["sent"].is_null(),
-            "b waits no longer"
-        );
+        assert!(read(Some(&dir)).to_json(&waiting(&dir))["decide"][1]["sent"].is_null(), "b waits no longer");
         // And it can be acted on again.
-        act(Some(&dir), "b", "approve", "", at(10)).unwrap();
+        act_seen(&dir, "b", "approve", "", at(10)).unwrap();
         // Nothing to undo; too late; already picked up.
         assert_eq!(
             undo(Some(&dir), "nobody", at(10)).unwrap_err(),
             "There is nothing to undo for that card. Nothing was changed."
         );
+        let too_late =
+            "That was sent more than 10 seconds ago, so it cannot be undone from here. Nothing was changed.";
+        assert_eq!(undo(Some(&dir), "a", at(13)).unwrap_err(), too_late, "a was sent at 0: 13 s is too late");
+        // A clock that has gone back is not "within ten seconds".
         assert_eq!(
-            undo(Some(&dir), "a", at(13)).unwrap_err(),
-            "That was sent more than 10 seconds ago, so it cannot be undone from here. Nothing was changed."
+            undo(Some(&dir), "c", at(1)).unwrap_err(),
+            too_late,
+            "c was sent at 2: before then is not in time"
         );
         assert_eq!(outbox(&dir).len(), 3, "nothing was taken out");
         let text = std::fs::read_to_string(dir.join(OUTBOX)).unwrap();
@@ -1130,29 +1283,162 @@ mod tests {
             "It has already been picked up from the outbox, so it cannot be undone. Nothing was changed."
         );
         assert_eq!(
-            read(Some(&dir)).to_json(&sent(Some(&dir)))["know"][0]["sent"]["action"],
+            read(Some(&dir)).to_json(&waiting(&dir))["know"][0]["sent"]["action"],
             "got-it",
             "still waiting"
         );
+        // The limit is ten seconds and a little for the request to arrive:
+        // twelve is in time, and the moment after is not.
+        let edge = folder(
+            "undo-edge",
+            vec![card("a", "x", "decide", "now", "queued"), card("b", "x", "decide", "now", "queued")],
+        );
+        act_seen(&edge, "a", "approve", "", at(0)).unwrap();
+        act_seen(&edge, "b", "approve", "", at(0)).unwrap();
+        assert!(undo(Some(&edge), "a", at(12)).is_ok());
+        assert_eq!(undo(Some(&edge), "b", at(0) + Duration::from_millis(12_001)).unwrap_err(), too_late);
+        let _ = std::fs::remove_dir_all(&edge);
         // Undoing the last line leaves an empty outbox, not a broken one.
         let one = folder("undo-one", vec![card("a", "x", "decide", "now", "queued")]);
-        act(Some(&one), "a", "approve", "", at(0)).unwrap();
+        act_seen(&one, "a", "approve", "", at(0)).unwrap();
         undo(Some(&one), "a", at(1)).unwrap();
         assert_eq!(std::fs::read_to_string(one.join(OUTBOX)).unwrap(), "");
-        assert!(sent(Some(&one)).is_empty());
+        assert!(waiting(&one).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&one);
     }
 
     #[test]
-    fn a_sent_file_that_cannot_be_read_shows_no_card_as_waiting() {
+    fn while_which_cards_were_acted_on_cannot_be_read_nothing_can_be_acted_on() {
         let dir = folder("sent-broken", vec![card("a", "x", "decide", "now", "queued")]);
-        std::fs::write(dir.join(SENT), "{ not json").unwrap();
-        assert!(sent(Some(&dir)).is_empty());
-        assert!(read(Some(&dir)).to_json(&sent(Some(&dir)))["decide"][0]["sent"].is_null());
-        // And an action still goes through, writing it afresh.
-        act(Some(&dir), "a", "approve", "", at(0)).unwrap();
-        assert_eq!(sent(Some(&dir)).len(), 1);
+        act_seen(&dir, "a", "approve", "", at(0)).unwrap();
+        for broken in ["{ not json".to_string(), " ".repeat(MAX_BYTES as usize + 10)] {
+            std::fs::write(dir.join(SENT), broken).unwrap();
+            let why = sent(Some(&dir)).unwrap_err();
+            assert!(
+                why.starts_with("board-sent.json, which keeps which cards were acted on, was not read"),
+                "{why}"
+            );
+            assert!(why.ends_with("no card can be acted on from the page."), "{why}");
+            // Not acted on again, and not undone: which were is not known.
+            let said = act_seen(&dir, "a", "approve", "", at(1)).unwrap_err();
+            assert!(said.ends_with("Nothing was sent."), "{said}");
+            assert!(undo(Some(&dir), "a", at(1)).unwrap_err().ends_with("Nothing was changed."));
+            assert_eq!(outbox(&dir).len(), 1, "no second line");
+        }
+        // Deleted, as the sentence says: it works again.
+        std::fs::remove_file(dir.join(SENT)).unwrap();
+        assert!(waiting(&dir).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_card_that_changed_since_it_was_shown_is_not_acted_on() {
+        let dir = folder("seen", vec![card("x", "Codex (web)", "decide", "now", "queued")]);
+        let seen = Seen { title: "title x".into(), recommendation: Some("do x".into()) };
+        // The Board's file is rewritten under the same id before the click arrives.
+        let mut other = card("x", "Codex (web)", "decide", "now", "queued");
+        other["title"] = json!("Drop the production table");
+        std::fs::write(dir.join(FILE), json!({ "cards": [other.clone()] }).to_string()).unwrap();
+        let changed =
+            "That card has changed since the page showed it. Read it again, then decide. Nothing was sent.";
+        assert_eq!(act(Some(&dir), "x", "approve", "", &seen, at(0)).unwrap_err(), changed);
+        // Only what it recommends changed: still not the card that was shown.
+        other["title"] = json!("title x");
+        other["recommendation"] = json!("do the opposite");
+        std::fs::write(dir.join(FILE), json!({ "cards": [other] }).to_string()).unwrap();
+        assert_eq!(act(Some(&dir), "x", "approve", "", &seen, at(0)).unwrap_err(), changed);
+        assert!(!dir.join(OUTBOX).exists() && !dir.join(SENT).exists(), "nothing was written");
+        // Shown as it now is, it can be acted on, and the line says which title was approved.
+        let now = Seen { title: "title x".into(), recommendation: Some("do the opposite".into()) };
+        act(Some(&dir), "x", "approve", "", &now, at(1)).unwrap();
+        assert_eq!(outbox(&dir)[0]["title"], "title x");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_id_that_could_not_name_a_card_safely_leaves_the_card_out() {
+        let long = "x".repeat(ID_MAX + 1);
+        for bad in [
+            "a\nb",
+            "a\u{2028}b",
+            "a\u{85}b",
+            " padded",
+            "padded ",
+            "a\u{200b}b",
+            "a\u{202e}b",
+            "a\"b",
+            "a\\b",
+            long.as_str(),
+        ] {
+            let b = board(vec![
+                card(bad, "x", "decide", "now", "queued"),
+                card("good", "x", "decide", "now", "queued"),
+            ]);
+            assert_eq!(ids(&b.decide), ["good"], "{bad:?}");
+            assert_eq!(b.not_read.len(), 1, "{bad:?}");
+            assert!(
+                b.not_read[0].starts_with("card 1: its id is over 128 characters or has one"),
+                "{:?}",
+                b.not_read
+            );
+        }
+        for fine in ["c1", "PROJ-142", "api/keys#3", "docs: install (v2)", "é7", &"x".repeat(ID_MAX)] {
+            assert_eq!(board(vec![card(fine, "x", "decide", "now", "queued")]).decide.len(), 1, "{fine:?}");
+        }
+    }
+
+    #[test]
+    fn the_outbox_is_never_joined_onto_never_written_through_a_link_and_taken_whole_to_undo() {
+        let cards =
+            vec![card("a", "x", "decide", "now", "queued"), card("b", "x", "decide", "now", "queued")];
+        // A write cut short left no line's end: the next line starts its own.
+        let dir = folder("outbox-cut", cards.clone());
+        std::fs::write(dir.join(OUTBOX), "{\"card\":\"old\"}").unwrap();
+        act_seen(&dir, "a", "approve", "", at(0)).unwrap();
+        let text = std::fs::read_to_string(dir.join(OUTBOX)).unwrap();
+        assert_eq!(text.lines().count(), 2, "{text}");
+        assert!(
+            text.lines().all(|l| serde_json::from_str::<Value>(l).is_ok()),
+            "each line reads alone: {text}"
+        );
+        // Two lines that are the same to the letter: undo takes one.
+        let line = text.lines().last().unwrap().to_string();
+        std::fs::write(dir.join(OUTBOX), format!("{line}\n{line}\n")).unwrap();
+        undo(Some(&dir), "a", at(1)).unwrap();
+        assert_eq!(std::fs::read_to_string(dir.join(OUTBOX)).unwrap(), format!("{line}\n"));
+        assert!(!dir.join(format!("{OUTBOX}.undo")).exists(), "the outbox was put back under its own name");
+        // The outbox taken away by whatever picks it up, as it is meant to
+        // be: undo finds it gone, and does not bring it back.
+        act_seen(&dir, "b", "hold", "", at(2)).unwrap();
+        std::fs::rename(dir.join(OUTBOX), dir.join("taken-by-the-keeper")).unwrap();
+        assert!(undo(Some(&dir), "b", at(3)).unwrap_err().starts_with("It has already been picked up"));
+        assert!(!dir.join(OUTBOX).exists(), "what was picked up is not written back");
+        // Something that is not a plain file where the outbox goes: refused.
+        let dir2 = folder("outbox-folder", cards);
+        std::fs::create_dir_all(dir2.join(OUTBOX)).unwrap();
+        assert!(act_seen(&dir2, "a", "approve", "", at(0)).unwrap_err().ends_with("Nothing was sent."));
+        // A file already where the new one is written beside: not written
+        // through, but put aside.
+        let dir3 = folder("beside", vec![card("a", "x", "decide", "now", "queued")]);
+        let board_before = std::fs::read(dir3.join(FILE)).unwrap();
+        std::fs::hard_link(dir3.join(FILE), dir3.join("board-sent.new")).unwrap();
+        act_seen(&dir3, "a", "approve", "", at(0)).unwrap();
+        assert_eq!(
+            std::fs::read(dir3.join(FILE)).unwrap(),
+            board_before,
+            "the Board's file was not written through it"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for file in [OUTBOX, SENT] {
+                let mode = std::fs::metadata(dir3.join(file)).unwrap().permissions().mode() & 0o777;
+                assert_eq!(mode, 0o600, "{file}: this user's alone");
+            }
+        }
+        for d in [dir, dir2, dir3] {
+            let _ = std::fs::remove_dir_all(&d);
+        }
     }
 }

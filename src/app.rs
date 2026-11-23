@@ -314,6 +314,19 @@ fn control_names(left_out: &[char]) -> String {
     }
 }
 
+/// A card's title as a notice may show it: nothing that draws no
+/// character or turns the text after it around, and no more than a notice
+/// would ever have room for.
+fn shown_title(title: &str) -> String {
+    const TURNS_TEXT: &str =
+        "\u{202a}\u{202b}\u{202c}\u{202d}\u{202e}\u{2066}\u{2067}\u{2068}\u{2069}\u{200e}\u{200f}";
+    title
+        .chars()
+        .filter(|c| !c.is_control() && fit::char_width(*c) > 0 && !TURNS_TEXT.contains(*c))
+        .take(60)
+        .collect()
+}
+
 /// Said when a paste, or text from the page, was nothing but control
 /// characters.
 fn only_controls_sentence(left_out: &[char]) -> String {
@@ -630,7 +643,9 @@ impl<B: AgentBackend> App<B> {
                 // Said in the terminal each time, as a send to an agent is.
                 Event::CardActed { title, action, undone, .. } => {
                     let did = board::Action::parse(action).map_or(action, board::Action::name);
-                    let title = fit::clip(&title, 40);
+                    // A title is whatever the Board's file says: only what
+                    // can be seen is shown, and no more than fits.
+                    let title = fit::clip(&shown_title(&title), 40);
                     if undone {
                         format!(
                             "From the page's Board: {did} was undone for \"{title}\". Its line was taken \
@@ -796,6 +811,7 @@ impl<B: AgentBackend> App<B> {
         card: &str,
         action: &str,
         note: &str,
+        seen: &board::Seen,
         undo: bool,
     ) -> (TypedOutcome, String) {
         // Kept here as well as where the page is started: a card is acted
@@ -808,17 +824,24 @@ impl<B: AgentBackend> App<B> {
         }
         let folder = self.board_folder.as_deref();
         let now = SystemTime::now();
-        let done =
-            if undo { board::undo(folder, card, now) } else { board::act(folder, card, action, note, now) };
+        let done = if undo {
+            board::undo(folder, card, now)
+        } else {
+            board::act(folder, card, action, note, seen, now)
+        };
         match done {
             Ok(acted) => {
-                let words = if undo {
-                    format!("Undone: {}. Nothing is waiting for that card.", acted.action.name())
-                } else {
-                    format!(
+                // Undone even if keeping that it was undone failed: said
+                // with what failed, and still an event and a notice.
+                let words = match (undo, &acted.warning) {
+                    (true, Some(but)) => format!("Undone: {}. {but}", acted.action.name()),
+                    (true, None) => {
+                        format!("Undone: {}. Nothing is waiting for that card.", acted.action.name())
+                    }
+                    (false, _) => format!(
                         "Sent: {}. It waits until the Board no longer lists the card.",
                         acted.action.name()
-                    )
+                    ),
                 };
                 self.engine.card_acted(acted.card, acted.title, acted.action.word(), undo);
                 self.say_events();
@@ -4692,6 +4715,19 @@ Cost",
         (app, folder)
     }
 
+    /// A card as the page would have shown it: as the Board's file has it.
+    fn seen_card(folder: &std::path::Path, id: &str) -> board::Seen {
+        let shown = board::read(Some(folder));
+        shown
+            .decide
+            .iter()
+            .chain(&shown.yours)
+            .chain(&shown.know)
+            .find(|c| c.id == id)
+            .map(|c| board::Seen { title: c.title.clone(), recommendation: c.recommendation.clone() })
+            .unwrap_or_default()
+    }
+
     fn outbox_lines(folder: &std::path::Path) -> Vec<serde_json::Value> {
         std::fs::read_to_string(folder.join(board::OUTBOX))
             .unwrap_or_default()
@@ -4704,7 +4740,7 @@ Cost",
     fn acting_on_a_card_from_the_page_writes_the_outbox_and_is_said_in_the_terminal() {
         let (mut app, folder) = acting_app("act");
         let board_before = std::fs::read(folder.join(board::FILE)).unwrap();
-        let (outcome, words) = app.acted_from_page("c1", "approve", "", false);
+        let (outcome, words) = app.acted_from_page("c1", "approve", "", &seen_card(&folder, "c1"), false);
         assert_eq!(
             (outcome, words.as_str()),
             (TypedOutcome::Sent, "Sent: Approve. It waits until the Board no longer lists the card.")
@@ -4735,7 +4771,7 @@ Cost",
         assert_eq!(acted.len(), 1);
         assert_eq!(acted[0].label.as_deref(), Some("c1"));
         // Undone within ten seconds: the line is out, and that is said too.
-        let (outcome, words) = app.acted_from_page("c1", "approve", "", true);
+        let (outcome, words) = app.acted_from_page("c1", "approve", "", &board::Seen::default(), true);
         assert_eq!(
             (outcome, words.as_str()),
             (TypedOutcome::Sent, "Undone: Approve. Nothing is waiting for that card.")
@@ -4757,7 +4793,8 @@ Cost",
             .count();
         assert_eq!(undone, 1);
         // A Revise carries its note.
-        let (outcome, _) = app.acted_from_page("c1", "revise", "Say when it goes.", false);
+        let (outcome, _) =
+            app.acted_from_page("c1", "revise", "Say when it goes.", &seen_card(&folder, "c1"), false);
         assert_eq!(outcome, TypedOutcome::Sent);
         assert_eq!(outbox_lines(&folder)[0]["note"], "Say when it goes.");
         let _ = std::fs::remove_dir_all(&folder);
@@ -4767,7 +4804,7 @@ Cost",
     fn acting_on_a_card_is_refused_with_why_and_then_nothing_is_written_or_said() {
         let (mut app, folder) = acting_app("refused");
         let refused = |app: &mut App<Fake>, card: &str, action: &str, note: &str, undo: bool| {
-            let (outcome, words) = app.acted_from_page(card, action, note, undo);
+            let (outcome, words) = app.acted_from_page(card, action, note, &seen_card(&folder, card), undo);
             assert_eq!(outcome, TypedOutcome::Refused, "{words}");
             words
         };
@@ -4795,6 +4832,22 @@ Cost",
             .events
             .iter()
             .all(|(n, e)| !e.plain(*n).what.starts_with("card-")));
+        // The card was rewritten under its id after the page showed it.
+        let shown = seen_card(&folder, "c1");
+        let rewritten = include_str!("../examples/board-standin.json").replace(
+            "Keep the old sign-in endpoint for one more release?",
+            "Remove the old sign-in endpoint today?",
+        );
+        std::fs::write(folder.join(board::FILE), rewritten).unwrap();
+        let (outcome, words) = app.acted_from_page("c1", "approve", "", &shown, false);
+        assert_eq!(
+            (outcome, words.as_str()),
+            (
+                TypedOutcome::Refused,
+                "That card has changed since the page showed it. Read it again, then decide. Nothing was sent."
+            )
+        );
+        assert!(outbox_lines(&folder).is_empty());
         // Off in the settings: nothing, whatever is asked.
         app.config.page_can_act = false;
         assert_eq!(
@@ -4808,6 +4861,35 @@ Cost",
         assert!(
             refused(&mut nowhere, "c1", "approve", "", false).starts_with("Lillignode has nowhere to save")
         );
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    #[test]
+    fn a_cards_title_in_a_notice_is_only_what_can_be_seen_and_never_long() {
+        assert_eq!(shown_title("Keep it?"), "Keep it?");
+        // Nothing that draws no character, clears the screen or turns the
+        // text after it around.
+        assert_eq!(shown_title("a\u{1b}[2J\u{200b}b\u{202e}c\u{7}\nd"), "a[2Jbcd");
+        // A title of a great many characters that take no room is not
+        // carried into a notice whole.
+        assert_eq!(shown_title(&"\u{200b}".repeat(300_000)), "");
+        assert_eq!(shown_title(&"x".repeat(5_000)).chars().count(), 60);
+        // In the notice it is cut to forty columns, in quotes.
+        let (mut app, folder) = acting_app("title");
+        let long = include_str!("../examples/board-standin.json").replace(
+            "Keep the old sign-in endpoint for one more release?",
+            &format!("Fine\\u202e\\u200b. Its line was taken out{}", "!".repeat(400)),
+        );
+        std::fs::write(folder.join(board::FILE), long).unwrap();
+        let (outcome, words) = app.acted_from_page("c1", "hold", "", &seen_card(&folder, "c1"), false);
+        assert_eq!(outcome, TypedOutcome::Sent, "{words}");
+        let said = app.notice.clone().unwrap();
+        assert!(
+            said.starts_with("From the page's Board: Hold, for \"Fine. Its line was taken out!!!"),
+            "{said}"
+        );
+        assert!(said.ends_with("…\". It waits in the Board's outbox until it is picked up."), "{said}");
+        assert!(said.chars().count() < 140, "{said}");
         let _ = std::fs::remove_dir_all(&folder);
     }
 

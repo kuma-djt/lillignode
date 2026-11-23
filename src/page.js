@@ -523,17 +523,26 @@
   // due at a moment, as the day that moment falls on here.
   const day = (ms, whole) =>
     new Date(ms).toLocaleDateString([], { day: "numeric", month: "short", ...(whole ? { timeZone: "UTC" } : {}) });
-  const canAct = () => !!(state && state.acting);
+  // Buttons are offered only where Lillignode's settings allow acting, and
+  // not while Lillignode cannot tell which cards were already acted on.
+  const canAct = () => !!(state && state.acting) && !(board && board.acting_off);
+  // A word from one of the tables above, and nothing for a key it has not.
+  const word = (table, key) => (Object.hasOwn(table, key) ? table[key] : "");
+  // A click that lands within this long of the Board changing is not taken:
+  // the card under the pointer may not be the one that was read.
+  const SETTLE_MS = 700;
+  let cardsDrawn = "";     // the cards as last drawn, apart from what is waiting
+  let cardsChangedAt = 0;  // when they last changed
   const undoable = (card) => !!card.sent && Date.now() - card.sent.at < UNDO_MS;
 
   // What is said under a card's title: what it is, who raised it, when it
   // is due, and where it stands if it is not simply waiting its turn.
   function metaWords(card, withKind) {
     const parts = [];
-    if (withKind) parts.push((KIND_WORDS[card.kind] || "") + (card.tier === "next" ? ", next" : ""));
+    if (withKind) parts.push(word(KIND_WORDS, card.kind) + (card.tier === "next" ? ", next" : ""));
     parts.push("Raised by " + card.raised_by);
     if (card.due_at !== null && card.due_at !== undefined) parts.push("Due " + day(card.due_at, card.due_whole_day));
-    if (STATUS_WORDS[card.status]) parts.push(STATUS_WORDS[card.status]);
+    if (word(STATUS_WORDS, card.status)) parts.push(word(STATUS_WORDS, card.status));
     return parts.join(" · ");
   }
 
@@ -549,19 +558,34 @@
   // Lillignode said came of it.
   function act(card, action, note, undo) {
     if (!canAct() || actingNow) return;
+    if (!undo && Date.now() - cardsChangedAt < SETTLE_MS) {
+      boardSaid.hidden = false;
+      boardSaid.textContent = "The Board had only just changed, so that press was not taken. Read the card, then press again.";
+      return;
+    }
     actingNow = true;
     drawBoard();
     fetch("act", {
       method: "POST",
       cache: "no-store",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ token: state.acting, card, action, note, undo }),
+      // With what was shown of the card: Lillignode refuses if the card
+      // with that id now says something else.
+      body: JSON.stringify({
+        token: state.acting,
+        card: card.id,
+        action,
+        note,
+        undo,
+        title: card.title,
+        recommendation: card.recommendation === undefined ? null : card.recommendation,
+      }),
       signal: AbortSignal.timeout(10000),
     })
       .then((answer) => (answer.ok ? answer.json() : answer.text().then((words) => ({ outcome: "refused", words }))))
       .then((heard) => {
         actingNow = false;
-        if (heard.outcome === "sent" && revising === card) {
+        if (heard.outcome === "sent" && revising === card.id) {
           revising = null;
           noteDraft = "";
         }
@@ -582,16 +606,16 @@
   // What stands where a card's buttons would: that it was sent and waits,
   // with Undo while there is still time.
   function sentLine(card) {
-    const line = text("p", "card-sent", "Sent, waiting: " + (ACTION_WORDS[card.sent.action] || card.sent.action) + ".");
+    const line = text("p", "card-sent", "Sent, waiting: " + (word(ACTION_WORDS, card.sent.action) || "something") + ".");
     if (canAct() && undoable(card)) {
-      line.append(" ", button("Undo", "undo", () => act(card.id, card.sent.action, "", true)));
+      line.append(" ", button("Undo", "undo", () => act(card, card.sent.action, "", true)));
     }
     return line;
   }
 
   function decideCard(card) {
     const li = document.createElement("li");
-    li.className = "card " + (card.kind in KIND_WORDS ? card.kind : "") + (card.sent ? " waiting" : "");
+    li.className = "card " + (Object.hasOwn(KIND_WORDS, card.kind) ? card.kind : "") + (card.sent ? " waiting" : "");
     li.dataset.id = card.id;
     li.append(text("strong", "card-title", card.title));
     if (card.recommendation) {
@@ -600,7 +624,7 @@
       li.append(said);
     }
     const meta = text("p", "card-meta", "");
-    meta.append(text("span", "card-kind", (KIND_WORDS[card.kind] || "") + (card.tier === "next" ? ", next" : "")));
+    meta.append(text("span", "card-kind", word(KIND_WORDS, card.kind) + (card.tier === "next" ? ", next" : "")));
     meta.append(" · " + metaWords(card, false));
     li.append(meta);
     if (card.sent) {
@@ -617,7 +641,7 @@
       note.addEventListener("input", () => {
         noteDraft = note.value;
       });
-      const sendNote = () => act(card.id, "revise", noteDraft, false);
+      const sendNote = () => act(card, "revise", noteDraft, false);
       note.addEventListener("keydown", (e) => {
         if (e.key === "Enter") {
           e.preventDefault();
@@ -633,7 +657,7 @@
     } else if (canAct()) {
       const row = text("div", "card-actions", "");
       row.append(
-        button("Approve", "main", () => act(card.id, "approve", "", false)),
+        button("Approve", "main", () => act(card, "approve", "", false)),
         button("Revise", "", () => {
           revising = card.id;
           noteDraft = "";
@@ -641,7 +665,7 @@
           const note = document.querySelector("#board input.note");
           if (note) note.focus();
         }),
-        button("Hold", "", () => act(card.id, "hold", "", false)),
+        button("Hold", "", () => act(card, "hold", "", false)),
       );
       li.append(row, text("p", "card-help", HELP));
     }
@@ -658,7 +682,7 @@
     const foot = text("div", "card-foot", "");
     foot.append(text("span", "card-meta", metaWords(card, false) + (card.tier === "next" && action === "done" ? " · next" : "")));
     if (card.sent) foot.append(sentLine(card));
-    else if (canAct()) foot.append(button(words, "", () => act(card.id, action, "", false)));
+    else if (canAct()) foot.append(button(words, "", () => act(card, action, "", false)));
     li.append(foot);
     return li;
   }
@@ -671,6 +695,13 @@
     const from = JSON.stringify([board, canAct(), now, revising, actingNow, lostAt !== null, movedOn]);
     if (from === boardDrawn) return;
     boardDrawn = from;
+    // When the cards themselves last changed: what each says and where it
+    // stands, not whether one is waiting or can still be undone.
+    const cards = JSON.stringify([board.decide, board.yours, board.know].map((part) => part.map((c) => [c.id, c.title, c.recommendation])));
+    if (cards !== cardsDrawn) {
+      if (cardsDrawn !== "") cardsChangedAt = Date.now();
+      cardsDrawn = cards;
+    }
     const focused = document.activeElement && document.activeElement.classList.contains("note");
     boardNote.hidden = !(board.problem || board.empty);
     boardNote.textContent = board.problem || (board.empty ? "Nothing on the Board." : "");
@@ -686,8 +717,9 @@
     part("board-decide", board.decide, decideCard);
     part("board-yours", board.yours, (card) => listRow(card, "done", "✓ Done"));
     part("board-know", board.know, (card) => listRow(card, "got-it", "Got it"));
-    boardNotRead.hidden = !board.not_read;
-    boardNotRead.textContent = board.not_read || "";
+    const under = [board.not_read, board.acting_off].filter(Boolean).join(" ");
+    boardNotRead.hidden = under === "";
+    boardNotRead.textContent = under;
     if (focused) {
       const note = document.querySelector("#board input.note");
       if (note) note.focus();

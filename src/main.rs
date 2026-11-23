@@ -296,9 +296,17 @@ fn main() -> ExitCode {
                     handed_over_us = read_at.elapsed().as_micros();
                 }
                 Msg::Input(Input::Paste(text), _) => app.on_paste(text),
+                // Its sender has stopped waiting and been told it is not
+                // known whether it was done: now it is known. It was not.
+                Msg::Acted(acted) if acted.asked.elapsed() > page::ANSWER_WITHIN => {}
+                Msg::Typed(typed) if typed.asked.elapsed() > page::ANSWER_WITHIN => {}
                 Msg::Acted(acted) => {
+                    let seen = lillignode::board::Seen {
+                        title: acted.title.clone(),
+                        recommendation: acted.recommendation.clone(),
+                    };
                     let (outcome, words) =
-                        app.acted_from_page(&acted.card, &acted.action, &acted.note, acted.undo);
+                        app.acted_from_page(&acted.card, &acted.action, &acted.note, &seen, acted.undo);
                     let _ = acted.answer.send(page::TypedAnswer { outcome, words });
                 }
                 Msg::Typed(typed) => {

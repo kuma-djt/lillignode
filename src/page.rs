@@ -73,8 +73,10 @@ const HEAD_WITHIN: Duration = Duration::from_secs(10);
 /// The most text one Send may carry, with what wraps it.
 const MAX_BODY: usize = 64 * 1024;
 
-/// How long a Send waits to be told what became of it.
-const ANSWER_WITHIN: Duration = Duration::from_secs(5);
+/// How long a Send waits to be told what became of it. After that its
+/// sender is told it is not known whether it was sent, and it is no longer
+/// carried out.
+pub const ANSWER_WITHIN: Duration = Duration::from_secs(5);
 
 /// Text typed on the page for one agent, passed on to be sent. The page
 /// decides nothing about it.
@@ -89,6 +91,9 @@ pub struct Typed {
     pub agreed: bool,
     /// Enter alone, from the page's own button for it. `text` is empty.
     pub enter: bool,
+    /// When it arrived: one that has waited longer than its sender was
+    /// told to wait is not carried out.
+    pub asked: Instant,
     /// Where to say what became of it.
     pub answer: mpsc::Sender<TypedAnswer>,
 }
@@ -123,6 +128,13 @@ pub struct Acted {
     pub action: String,
     /// The note that goes with a Revise.
     pub note: String,
+    /// The card's title and recommendation as the page showed them when
+    /// the button was pressed.
+    pub title: String,
+    pub recommendation: Option<String>,
+    /// When it arrived: one that has waited longer than its sender was
+    /// told to wait is not carried out.
+    pub asked: Instant,
     /// Take back what was done to this card, instead of doing something.
     pub undo: bool,
     /// Where to say what became of it.
@@ -551,7 +563,7 @@ pub fn serve(
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Method {
     Get,
-    /// Only where typing is on, and only from this page.
+    /// Only where the page may type or act, and only from this page.
     Post,
 }
 
@@ -667,7 +679,7 @@ fn read_request(stream: &TcpStream, port: u16, can_type: bool, word: &str) -> Re
             _ if can_type => {
                 return Err((
                     "405 Method Not Allowed",
-                    "This page takes only what its Send button sends.".into(),
+                    "This page takes only what its own buttons send.".into(),
                 ))
             }
             _ => return Err(("405 Method Not Allowed", TAKES_NOTHING.to_string())),
@@ -701,7 +713,7 @@ fn read_request(stream: &TcpStream, port: u16, can_type: bool, word: &str) -> Re
                 if json != Some("application/json") {
                     return Err((
                         "415 Unsupported Media Type",
-                        "This page takes only what its Send button sends.".into(),
+                        "This page takes only what its own buttons send.".into(),
                     ));
                 }
                 let Some(length) = length.as_ref().and_then(|length| length.parse::<usize>().ok()) else {
@@ -834,7 +846,15 @@ fn answer(stream: &TcpStream, serving: &Serving) -> std::io::Result<()> {
         // Read again at each request: the file is the user's to change.
         "board" => {
             let folder = serving.folder.as_deref();
-            let shown = json!({ "board": board::read(folder).to_json(&board::sent(folder)) });
+            // If which cards were acted on cannot be read, the page is told
+            // why, and offers no button: a card must not be acted on twice.
+            let (waiting, acting_off) = match board::sent(folder) {
+                Ok(waiting) => (waiting, None),
+                Err(why) => (Vec::new(), Some(why)),
+            };
+            let mut shown = board::read(folder).to_json(&waiting);
+            shown["acting_off"] = json!(acting_off);
+            let shown = json!({ "board": shown });
             send(stream, "200 OK", "application/json", &shown.to_string())
         }
         _ => refuse(stream, "404 Not Found", "There is nothing here."),
@@ -876,6 +896,12 @@ struct ActBody {
     note: String,
     #[serde(default)]
     undo: bool,
+    /// What the page showed of the card: its title, and its
+    /// recommendation if it had one.
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    recommendation: Option<String>,
 }
 
 /// Something done to a card on this page: check its token, pass it on, and
@@ -888,7 +914,16 @@ fn take_acted(stream: &TcpStream, body: &[u8], acting: &Acting, token: &str) -> 
         return refuse(stream, "403 Forbidden", STALE);
     }
     let (answer, heard) = mpsc::channel();
-    let acted = Acted { card: sent.card, action: sent.action, note: sent.note, undo: sent.undo, answer };
+    let acted = Acted {
+        card: sent.card,
+        action: sent.action,
+        note: sent.note,
+        undo: sent.undo,
+        title: sent.title,
+        recommendation: sent.recommendation,
+        asked: Instant::now(),
+        answer,
+    };
     if !acting(acted) {
         return refuse(stream, "503 Service Unavailable", "Lillignode is closing. Nothing was sent.");
     }
@@ -931,6 +966,7 @@ fn take_typed(stream: &TcpStream, body: &[u8], typing: &Typing, token: &str) -> 
         text: sent.text,
         agreed: sent.agreed,
         enter: sent.enter,
+        asked: Instant::now(),
         answer,
     };
     if !typing(typed) {
@@ -1527,12 +1563,20 @@ mod tests {
         assert!(shown["decide"][0]["sent"].is_null(), "{shown}");
         assert_eq!(shown["decide"].as_array().unwrap().len(), 4, "{shown}");
         // A card acted on says so, with what and when.
-        board::act(Some(&folder), "c2", "approve", "", SystemTime::now()).unwrap();
+        let c2 = board::read(Some(&folder)).decide.into_iter().find(|c| c.id == "c2").unwrap();
+        let seen = board::Seen { title: c2.title, recommendation: c2.recommendation };
+        board::act(Some(&folder), "c2", "approve", "", &seen, SystemTime::now()).unwrap();
         let fire = board()["decide"].as_array().unwrap().iter().find(|c| c["id"] == "c2").cloned().unwrap();
         assert_eq!(fire["sent"]["action"], "approve", "{fire}");
         assert!(fire["sent"]["at"].is_u64());
         assert_eq!(shown["yours"].as_array().unwrap().len(), 2, "{shown}");
         assert_eq!(shown["know"].as_array().unwrap().len(), 2, "{shown}");
+        // Which cards were acted on cannot be read: the page is told why,
+        // and that nothing can be acted on.
+        assert!(board()["acting_off"].is_null());
+        std::fs::write(folder.join(board::SENT), "not what Lillignode wrote").unwrap();
+        let off = board()["acting_off"].as_str().unwrap_or_default().to_string();
+        assert!(off.ends_with("no card can be acted on from the page."), "{off}");
         std::fs::write(folder.join(board::FILE), "{").unwrap();
         assert!(board()["problem"]
             .as_str()
@@ -1675,8 +1719,11 @@ mod tests {
     }
 
     fn act_body(token: &str) -> String {
-        json!({ "token": token, "card": "c1", "action": "revise", "note": "Say when.", "undo": false })
-            .to_string()
+        json!({
+            "token": token, "card": "c1", "action": "revise", "note": "Say when.", "undo": false,
+            "title": "Keep it?", "recommendation": "Keep it.",
+        })
+        .to_string()
     }
 
     #[test]
@@ -1691,6 +1738,11 @@ mod tests {
         assert_eq!(
             (acted.card.as_str(), acted.action.as_str(), acted.note.as_str(), acted.undo),
             ("c1", "revise", "Say when.", false)
+        );
+        assert_eq!(
+            (acted.title.as_str(), acted.recommendation.as_deref()),
+            ("Keep it?", Some("Keep it.")),
+            "with what the page showed of the card"
         );
         // An undo is passed on as one.
         let undo = json!({ "token": token, "card": "c1", "action": "revise", "undo": true }).to_string();
@@ -1746,9 +1798,31 @@ mod tests {
         let nowhere = post_to(at, "/act", &own(at), &good);
         assert!(nowhere.starts_with("HTTP/1.1 404") && nowhere.ends_with(NOTHING), "{nowhere}");
         assert!(get(at, &format!("/act?token={token}&card=c1&action=approve")).starts_with("HTTP/1.1 404"));
-        // This machine's other name is refused, as where the page can type.
+        // This machine's other name is refused, for reading and for acting.
         let named = format!("GET /{}/state HTTP/1.1\r\nHost: localhost:{port}\r\n\r\n", at.word);
         assert!(ask_raw(at, &named).starts_with("HTTP/1.1 403"));
+        let length = good.len();
+        let named = format!(
+            "POST /{}/act HTTP/1.1\r\nHost: localhost:{port}\r\nOrigin: http://localhost:{port}\r\n{json}\
+             Content-Length: {length}\r\n\r\n{good}",
+            at.word
+        );
+        assert!(ask_raw(at, &named).starts_with("HTTP/1.1 403"));
+        // What the browser itself says of where the request comes from.
+        for site in ["same-site", "none"] {
+            let said = format!("{mine}Sec-Fetch-Site: {site}\r\n{json}");
+            assert!(act_to(at, &said, &good).starts_with("HTTP/1.1 403"), "{site}");
+        }
+        assert!(act_to(at, &own(at), &"x".repeat(MAX_BODY + 1)).starts_with("HTTP/1.1 413"));
+        // No other way of asking acts.
+        for method in ["PUT", "PATCH", "DELETE", "OPTIONS"] {
+            let asked = format!(
+                "{method} /{}/act HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n{}Content-Length: {length}\r\n\r\n{good}",
+                at.word,
+                own(at)
+            );
+            assert!(ask_raw(at, &asked).starts_with("HTTP/1.1 405"), "{method}");
+        }
         assert!(arrived.try_recv().is_err(), "none of it was passed on");
     }
 
