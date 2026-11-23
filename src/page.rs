@@ -12,6 +12,12 @@
 //! command a paste in the terminal uses. Without it, no request can send
 //! anything, whatever it says.
 //!
+//! Acting on a card of the Board is another, switched on apart from
+//! typing: somewhere to pass on what the reader did to which card
+//! (`Acting`). Whether it may be done, and the writing of it to the
+//! Board's outbox, happen where it arrives. Without it no request can act
+//! on a card.
+//!
 //! It listens on this machine only (127.0.0.1), and only when the user has
 //! switched it on. It is the first place an agent's screen leaves the
 //! terminal window, so every request is checked before it is answered:
@@ -107,6 +113,43 @@ pub enum TypedOutcome {
 /// Where the page passes on what was typed. False: there was nowhere left
 /// to pass it to.
 pub type Typing = Arc<dyn Fn(Typed) -> bool + Send + Sync>;
+
+/// What the reader did to a card of the Board on the page, passed on. The
+/// page decides nothing about it.
+pub struct Acted {
+    /// The card's id, as the Board's file has it.
+    pub card: String,
+    /// approve, revise, hold, done or got-it, as the page sent it.
+    pub action: String,
+    /// The note that goes with a Revise.
+    pub note: String,
+    /// Take back what was done to this card, instead of doing something.
+    pub undo: bool,
+    /// Where to say what became of it.
+    pub answer: mpsc::Sender<TypedAnswer>,
+}
+
+/// Where the page passes on what was done to a card. False: there was
+/// nowhere left to pass it to.
+pub type Acting = Arc<dyn Fn(Acted) -> bool + Send + Sync>;
+
+/// The ways a page may send something, each only if the user switched it
+/// on. With none, the page is read only.
+#[derive(Default)]
+pub struct Ways {
+    pub typing: Option<Typing>,
+    pub acting: Option<Acting>,
+}
+
+impl From<Option<Typing>> for Ways {
+    fn from(typing: Option<Typing>) -> Self {
+        Ways { typing, acting: None }
+    }
+}
+
+/// The token as each way of sending is shown it with the page's data:
+/// for typing, and for acting. None for a way that is off.
+type Tokens<'a> = (Option<&'a str>, Option<&'a str>);
 
 /// One place among the requests being answered, given back when dropped:
 /// however the answering ends, and if it never starts.
@@ -367,7 +410,10 @@ pub struct Served {
     /// Whether the page was handed somewhere to pass typing on to. Then
     /// the word is new each start, on purpose, and kept nowhere.
     pub can_type: bool,
-    /// The token a Send must carry, where the page may type.
+    /// Whether the page was handed somewhere to pass on what is done to a
+    /// card. Then, too, the word is new each start and kept nowhere.
+    pub can_act: bool,
+    /// The token anything sent must carry, where the page may send.
     token: Option<Arc<Mutex<String>>>,
 }
 
@@ -390,7 +436,7 @@ impl Served {
     /// with it: whoever had the old address has nothing left that works.
     pub fn change_word(&mut self) -> Option<String> {
         let word = new_word();
-        self.word_not_kept = match (&self.folder, self.can_type) {
+        self.word_not_kept = match (&self.folder, self.can_type || self.can_act) {
             (_, true) => None,
             (Some(folder), false) => keep_word(folder, &word).err(),
             (None, false) => Some("Lillignode has nowhere to save".to_string()),
@@ -409,54 +455,69 @@ fn new_token() -> String {
 }
 
 /// What every request is answered with: the copies to read, the word, and,
-/// where typing is on, where to pass it and the token a Send must carry.
+/// where the page may send, where each kind of thing is passed on and the
+/// token it must carry.
 struct Serving {
     reader: Reader,
     port: u16,
     word: Arc<Mutex<String>>,
-    typing: Option<(Typing, Arc<Mutex<String>>)>,
+    typing: Option<Typing>,
+    acting: Option<Acting>,
+    /// There if and only if the page may send anything.
+    token: Option<Arc<Mutex<String>>>,
     /// Where the Board's file is read: the folder Lillignode saves in.
     folder: Option<PathBuf>,
 }
 
 impl Serving {
-    /// The token a Send must carry now, where the page may type.
+    /// The token anything sent must carry now, where the page may send.
     fn token(&self) -> Option<String> {
-        self.typing.as_ref().map(|(_, token)| word_now(token))
+        self.token.as_ref().map(|token| word_now(token))
+    }
+
+    /// The token as the page is shown it: under each way that is on.
+    fn tokens<'a>(&self, token: Option<&'a str>) -> Tokens<'a> {
+        (token.filter(|_| self.typing.is_some()), token.filter(|_| self.acting.is_some()))
     }
 }
 
-/// Start answering on this machine at `port` (0: any free port). Without
-/// `typing` the page is read only, under the word kept in `folder`, or a
-/// new one kept there from now on. With `typing` the page may pass on text
-/// for an agent, and its word is new each start and kept nowhere. Returns where, or why it could not be started; then nothing is
-/// listening.
+/// Start answering on this machine at `port` (0: any free port). With no
+/// way to send (`ways`), the page is read only, under the word kept in
+/// `folder`, or a new one kept there from now on. With any, the page may
+/// pass on text for an agent or what was done to a card, and its word is
+/// new each start and kept nowhere. Returns where, or why it could not be
+/// started; then nothing is listening.
 pub fn serve(
     reader: Reader,
     port: u16,
     folder: Option<&Path>,
-    typing: Option<Typing>,
+    ways: impl Into<Ways>,
 ) -> Result<Served, String> {
+    let Ways { typing, acting } = ways.into();
+    let sends = typing.is_some() || acting.is_some();
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, port)).map_err(|e| e.to_string())?;
     let address = listener.local_addr().map_err(|e| e.to_string())?;
-    let (word, word_not_kept) = if typing.is_some() { (new_word(), None) } else { kept_word(folder) };
+    let (word, word_not_kept) = if sends { (new_word(), None) } else { kept_word(folder) };
     let word = Arc::new(Mutex::new(word));
     // The token is new each start and is never kept: it reaches a page only
     // with the data, which only a page under the word is given.
-    let typing = typing.map(|typing| (typing, Arc::new(Mutex::new(new_token()))));
+    let token = sends.then(|| Arc::new(Mutex::new(new_token())));
     let served = Served {
         address,
         word: word.clone(),
         folder: folder.map(Path::to_path_buf),
         word_not_kept,
         can_type: typing.is_some(),
-        token: typing.as_ref().map(|(_, token)| token.clone()),
+        can_act: acting.is_some(),
+        token: token.clone(),
     };
     let serving = Arc::new(Serving {
         reader,
         port: address.port(),
         word,
         typing,
+        acting,
+        token,
         folder: folder.map(Path::to_path_buf),
     });
     let open = Arc::new(AtomicUsize::new(0));
@@ -718,7 +779,7 @@ fn answer(stream: &TcpStream, serving: &Serving) -> std::io::Result<()> {
     stream.set_write_timeout(Some(Duration::from_secs(10)))?;
     // Everything is under the word: /<word>/ and what is beside it.
     let word = word_now(&serving.word);
-    let request = match read_request(stream, serving.port, serving.typing.is_some(), &word) {
+    let request = match read_request(stream, serving.port, serving.token.is_some(), &word) {
         Ok(request) => request,
         Err((status, why)) => return refuse(stream, status, &why),
     };
@@ -730,10 +791,9 @@ fn answer(stream: &TcpStream, serving: &Serving) -> std::io::Result<()> {
     let token = serving.token();
     let token = token.as_deref();
     if request.method == Method::Post {
-        return match (&serving.typing, token, rest) {
-            (Some((typing, _)), Some(token), Some("send")) => {
-                take_typed(stream, &request.body, typing, token)
-            }
+        return match (token, rest, &serving.typing, &serving.acting) {
+            (Some(token), Some("send"), Some(typing), _) => take_typed(stream, &request.body, typing, token),
+            (Some(token), Some("act"), _, Some(acting)) => take_acted(stream, &request.body, acting, token),
             _ => refuse(stream, "404 Not Found", "There is nothing here."),
         };
     }
@@ -767,12 +827,14 @@ fn answer(stream: &TcpStream, serving: &Serving) -> std::io::Result<()> {
                     Read::Ended => break,
                 }
             }
-            state_once(stream, latest.map(|(_, published)| published), agent, &request.query, token)
+            let tokens = serving.tokens(token);
+            state_once(stream, latest.map(|(_, published)| published), agent, &request.query, tokens)
         }
         "stream" => stream_states(stream, serving, &word, &request.query),
         // Read again at each request: the file is the user's to change.
         "board" => {
-            let shown = json!({ "board": board::read(serving.folder.as_deref()).to_json() });
+            let folder = serving.folder.as_deref();
+            let shown = json!({ "board": board::read(folder).to_json(&board::sent(folder)) });
             send(stream, "200 OK", "application/json", &shown.to_string())
         }
         _ => refuse(stream, "404 Not Found", "There is nothing here."),
@@ -803,6 +865,52 @@ const STALE: &str = "This page is out of step with Lillignode, so nothing was se
 const NO_ANSWER: &str = "Lillignode did not say what became of this, so it is not known whether it was \
                          sent. Look at the agent's terminal before sending it again.";
 
+/// What the page's buttons on a card send, and nothing else.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ActBody {
+    token: String,
+    card: String,
+    action: String,
+    #[serde(default)]
+    note: String,
+    #[serde(default)]
+    undo: bool,
+}
+
+/// Something done to a card on this page: check its token, pass it on, and
+/// say back what became of it. Nothing here decides whether it may be done.
+fn take_acted(stream: &TcpStream, body: &[u8], acting: &Acting, token: &str) -> std::io::Result<()> {
+    let Ok(sent) = serde_json::from_slice::<ActBody>(body) else {
+        return refuse(stream, "400 Bad Request", "The request could not be read.");
+    };
+    if !same(&sent.token, token) {
+        return refuse(stream, "403 Forbidden", STALE);
+    }
+    let (answer, heard) = mpsc::channel();
+    let acted = Acted { card: sent.card, action: sent.action, note: sent.note, undo: sent.undo, answer };
+    if !acting(acted) {
+        return refuse(stream, "503 Service Unavailable", "Lillignode is closing. Nothing was sent.");
+    }
+    said_back(stream, &heard)
+}
+
+/// Wait to be told what became of something passed on, and say it back.
+fn said_back(stream: &TcpStream, heard: &mpsc::Receiver<TypedAnswer>) -> std::io::Result<()> {
+    match heard.recv_timeout(ANSWER_WITHIN) {
+        Ok(TypedAnswer { outcome, words }) => {
+            let outcome = match outcome {
+                TypedOutcome::Sent => "sent",
+                TypedOutcome::Ask => "ask",
+                TypedOutcome::Refused => "refused",
+            };
+            let body = json!({ "outcome": outcome, "words": words });
+            send(stream, "200 OK", "application/json", &body.to_string())
+        }
+        Err(_) => refuse(stream, "503 Service Unavailable", NO_ANSWER),
+    }
+}
+
 /// A Send from this page: check its token, pass it on, and say back what
 /// became of it. Nothing here decides what is sent to whom.
 fn take_typed(stream: &TcpStream, body: &[u8], typing: &Typing, token: &str) -> std::io::Result<()> {
@@ -828,18 +936,7 @@ fn take_typed(stream: &TcpStream, body: &[u8], typing: &Typing, token: &str) -> 
     if !typing(typed) {
         return refuse(stream, "503 Service Unavailable", "Lillignode is closing. Nothing was sent.");
     }
-    match heard.recv_timeout(ANSWER_WITHIN) {
-        Ok(TypedAnswer { outcome, words }) => {
-            let outcome = match outcome {
-                TypedOutcome::Sent => "sent",
-                TypedOutcome::Ask => "ask",
-                TypedOutcome::Refused => "refused",
-            };
-            let body = json!({ "outcome": outcome, "words": words });
-            send(stream, "200 OK", "application/json", &body.to_string())
-        }
-        Err(_) => refuse(stream, "503 Service Unavailable", NO_ANSWER),
-    }
+    said_back(stream, &heard)
 }
 
 /// The events to send to a reader that has read up to `after` in the run
@@ -856,7 +953,7 @@ fn state_once(
     published: Option<Arc<Published>>,
     agent: Option<u64>,
     query: &str,
-    token: Option<&str>,
+    tokens: Tokens,
 ) -> std::io::Result<()> {
     {
         match published {
@@ -864,7 +961,7 @@ fn state_once(
                 let after = after_in(query, &published);
                 let body = json!({
                     "at": millis(published.state.taken_at),
-                    "state": state_json(&published, agent, after, token),
+                    "state": state_json(&published, agent, after, tokens),
                 });
                 send(stream, "200 OK", "application/json", &body.to_string())
             }
@@ -884,7 +981,7 @@ fn stream_states(mut stream: &TcpStream, serving: &Serving, word: &str, query: &
     // A stream ends when the word changes, and the token changes only with
     // the word: the one read here is right for as long as this runs.
     let token = serving.token();
-    let token = token.as_deref();
+    let tokens = serving.tokens(token.as_deref());
     let agent = number(query, "agent");
     // For as long as this page listens, its agent's screen is copied.
     let _showing = agent.map(|agent| reader.show(agent));
@@ -901,7 +998,7 @@ fn stream_states(mut stream: &TcpStream, serving: &Serving, word: &str, query: &
                 count = newer;
                 let at = millis(published.state.taken_at);
                 let from = after.unwrap_or_else(|| after_in(query, &published));
-                let mut state = state_json(&published, agent, from, token);
+                let mut state = state_json(&published, agent, from, tokens);
                 after = Some(from.max(published.state.as_of));
                 // Events are sent once. Apart from them, has anything
                 // changed since the last state sent?
@@ -936,9 +1033,9 @@ fn millis(time: SystemTime) -> u64 {
 }
 
 /// The state as the page reads it: every agent, the screen of `agent`, and
-/// the events numbered after `after`. Where the page may type, the token
-/// its Send must carry.
-fn state_json(published: &Published, agent: Option<u64>, after: u64, token: Option<&str>) -> Value {
+/// the events numbered after `after`. Where the page may type, or act on
+/// a card, the token what it sends must carry.
+fn state_json(published: &Published, agent: Option<u64>, after: u64, tokens: Tokens) -> Value {
     let state = &published.state;
     let agents: Vec<Value> = state.agents.iter().map(|a| agent_json(a, state.front == Some(a.key))).collect();
     let screen = published
@@ -960,7 +1057,8 @@ fn state_json(published: &Published, agent: Option<u64>, after: u64, token: Opti
         "events": events,
         // Events after `after` that are no longer kept.
         "missed": published.events_let_go.saturating_sub(after),
-        "typing": token,
+        "typing": tokens.0,
+        "acting": tokens.1,
     })
 }
 
@@ -1426,7 +1524,13 @@ mod tests {
         // The file is read again at each request.
         std::fs::write(folder.join(board::FILE), include_str!("../examples/board-standin.json")).unwrap();
         let shown = board();
+        assert!(shown["decide"][0]["sent"].is_null(), "{shown}");
         assert_eq!(shown["decide"].as_array().unwrap().len(), 4, "{shown}");
+        // A card acted on says so, with what and when.
+        board::act(Some(&folder), "c2", "approve", "", SystemTime::now()).unwrap();
+        let fire = board()["decide"].as_array().unwrap().iter().find(|c| c["id"] == "c2").cloned().unwrap();
+        assert_eq!(fire["sent"]["action"], "approve", "{fire}");
+        assert!(fire["sent"]["at"].is_u64());
         assert_eq!(shown["yours"].as_array().unwrap().len(), 2, "{shown}");
         assert_eq!(shown["know"].as_array().unwrap().len(), 2, "{shown}");
         std::fs::write(folder.join(board::FILE), "{").unwrap();
@@ -1540,6 +1644,158 @@ mod tests {
                 assert!(answer.starts_with("HTTP/1.1 404") && answer.ends_with(NOTHING), "{what}: {answer}");
             }
         }
+    }
+
+    /// A page that may act on cards and cannot type. What it passes on
+    /// arrives at the returned receiver, already answered.
+    fn served_acting() -> (Publisher, At, String, mpsc::Receiver<Acted>) {
+        let (passed, arrived) = mpsc::channel();
+        let passed = Mutex::new(passed);
+        let acting: Acting = Arc::new(move |acted: Acted| {
+            let _ = acted
+                .answer
+                .send(TypedAnswer { outcome: TypedOutcome::Sent, words: "Sent: Approve.".into() });
+            passed.lock().unwrap().send(acted).is_ok()
+        });
+        let (publisher, reader) = channel();
+        let served = serve(reader, 0, None, Ways { typing: None, acting: Some(acting) }).unwrap();
+        assert!(served.can_act && !served.can_type);
+        let word: &'static str = Box::leak(word_now(&served.word).into_boxed_str());
+        let at = At { address: served.address, word };
+        publisher.publish(published(1));
+        let state = get(at, "/state");
+        let body: Value = serde_json::from_str(state.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+        assert_eq!(body["state"]["typing"], Value::Null, "it cannot type, and is not told it can");
+        let token = body["state"]["acting"].as_str().expect("the token comes with the data").to_string();
+        (publisher, at, token, arrived)
+    }
+
+    fn act_to(at: At, headers: &str, body: &str) -> String {
+        post_to(at, &format!("/{}/act", at.word), headers, body)
+    }
+
+    fn act_body(token: &str) -> String {
+        json!({ "token": token, "card": "c1", "action": "revise", "note": "Say when.", "undo": false })
+            .to_string()
+    }
+
+    #[test]
+    fn acting_on_a_card_is_passed_on_only_from_this_page_with_its_token() {
+        let (_publisher, at, token, arrived) = served_acting();
+        let answer = act_to(at, &own(at), &act_body(&token));
+        assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
+        let said: Value = serde_json::from_str(answer.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+        assert_eq!(said, json!({ "outcome": "sent", "words": "Sent: Approve." }));
+        // Passed on as it came: the page chose nothing about it.
+        let acted = arrived.try_recv().expect("passed on");
+        assert_eq!(
+            (acted.card.as_str(), acted.action.as_str(), acted.note.as_str(), acted.undo),
+            ("c1", "revise", "Say when.", false)
+        );
+        // An undo is passed on as one.
+        let undo = json!({ "token": token, "card": "c1", "action": "revise", "undo": true }).to_string();
+        assert!(act_to(at, &own(at), &undo).starts_with("HTTP/1.1 200"));
+        assert!(arrived.try_recv().expect("passed on").undo);
+
+        let port = at.port();
+        let good = act_body(&token);
+        let json = "Content-Type: application/json\r\n";
+        let mine = format!("Origin: http://127.0.0.1:{port}\r\n");
+        let cases: Vec<(&str, String, String, &str)> = vec![
+            ("no origin at all", json.to_string(), good.clone(), "403"),
+            ("another site", format!("Origin: https://evil.example\r\n{json}"), good.clone(), "403"),
+            (
+                "another port on this machine",
+                format!("Origin: http://127.0.0.1:1\r\n{json}"),
+                good.clone(),
+                "403",
+            ),
+            ("a page with no origin", format!("Origin: null\r\n{json}"), good.clone(), "403"),
+            (
+                "the browser says another site",
+                format!("{mine}Sec-Fetch-Site: cross-site\r\n{json}"),
+                good.clone(),
+                "403",
+            ),
+            (
+                "a form",
+                format!("{mine}Content-Type: application/x-www-form-urlencoded\r\n"),
+                good.clone(),
+                "415",
+            ),
+            ("plain text", format!("{mine}Content-Type: text/plain\r\n"), good.clone(), "415"),
+            ("a wrong token", own(at), act_body(&token.to_uppercase()), "403"),
+            ("the word for a token", own(at), act_body(at.word), "403"),
+            ("no token", own(at), r#"{"card":"c1","action":"approve"}"#.to_string(), "400"),
+            (
+                "a line the page never sends",
+                own(at),
+                good.replacen('{', r#"{"status":"approved","#, 1),
+                "400",
+            ),
+            ("no card named", own(at), json!({ "token": token, "action": "approve" }).to_string(), "400"),
+            ("not json", own(at), "card=c1&action=approve".to_string(), "400"),
+        ];
+        for (what, headers, body, status) in cases {
+            let answer = act_to(at, &headers, &body);
+            assert!(answer.starts_with(&format!("HTTP/1.1 {status}")), "{what}: {answer}");
+            assert!(arrived.try_recv().is_err(), "{what}: passed on");
+            assert!(!answer.contains(&token) && !answer.contains(at.word), "{what}: says a secret back");
+        }
+        // Without the word, and by a plain link: nothing.
+        let nowhere = post_to(at, "/act", &own(at), &good);
+        assert!(nowhere.starts_with("HTTP/1.1 404") && nowhere.ends_with(NOTHING), "{nowhere}");
+        assert!(get(at, &format!("/act?token={token}&card=c1&action=approve")).starts_with("HTTP/1.1 404"));
+        // This machine's other name is refused, as where the page can type.
+        let named = format!("GET /{}/state HTTP/1.1\r\nHost: localhost:{port}\r\n\r\n", at.word);
+        assert!(ask_raw(at, &named).starts_with("HTTP/1.1 403"));
+        assert!(arrived.try_recv().is_err(), "none of it was passed on");
+    }
+
+    #[test]
+    fn each_way_of_sending_is_on_only_if_it_was_handed_over() {
+        // Acting, not typing: a Send made as the page makes one is nothing.
+        let (_publisher, at, token, arrived) = served_acting();
+        let answer = post(at, &own(at), &send_body(&token));
+        assert!(answer.starts_with("HTTP/1.1 404"), "{answer}");
+        assert!(arrived.try_recv().is_err());
+        // Typing, not acting: an action made as the page makes one is nothing.
+        let (_publisher, at, token, typed) = served_typing(TypedOutcome::Sent);
+        let state = get(at, "/state");
+        let body: Value = serde_json::from_str(state.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+        assert_eq!(body["state"]["acting"], Value::Null, "it cannot act, and is not told it can");
+        let answer = act_to(at, &own(at), &act_body(&token));
+        assert!(answer.starts_with("HTTP/1.1 404"), "{answer}");
+        assert!(typed.try_recv().is_err());
+        // Neither: read only, and it takes nothing.
+        let (publisher, at) = served();
+        publisher.publish(published(1));
+        let state = get(at, "/state");
+        let body: Value = serde_json::from_str(state.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+        assert_eq!((&body["state"]["typing"], &body["state"]["acting"]), (&Value::Null, &Value::Null));
+        let answer = act_to(at, &own(at), &act_body("anything"));
+        assert!(answer.starts_with("HTTP/1.1 405") && answer.ends_with(TAKES_NOTHING), "{answer}");
+    }
+
+    #[test]
+    fn a_page_that_may_act_has_a_word_that_is_new_each_start_and_kept_nowhere() {
+        let folder = scratch("acting-word");
+        let start = |acting: bool| {
+            let (publisher, reader) = channel();
+            let acting: Option<Acting> = acting.then(|| Arc::new(|_: Acted| false) as Acting);
+            (publisher, serve(reader, 0, Some(&folder), Ways { typing: None, acting }).unwrap())
+        };
+        let (_p, reading) = start(false);
+        let kept = word_now(&reading.word);
+        let (_p, one) = start(true);
+        let (_p, mut two) = start(true);
+        let (first, second) = (word_now(&one.word), word_now(&two.word));
+        assert!(first != kept && second != kept && first != second, "{kept} {first} {second}");
+        assert_eq!(read_word(&folder).as_deref(), Some(kept.as_str()), "the kept word is left alone");
+        let before = word_now(two.token.as_ref().unwrap());
+        assert_eq!(two.change_word(), None);
+        assert_ne!(word_now(two.token.as_ref().unwrap()), before, "the token goes with the word");
+        assert_eq!(read_word(&folder).as_deref(), Some(kept.as_str()));
     }
 
     #[test]

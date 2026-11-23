@@ -51,6 +51,11 @@ pub struct AgentCopy {
     /// it has reported none since it was started, if a shell's prompt has
     /// ended what it said, or if it is not running.
     pub reported_at: Option<SystemTime>,
+    /// When what is on its screen last changed, by something it sent.
+    /// Output that draws the same screen again, or nothing, does not move
+    /// it. None if it has changed nothing since it was started. Kept after
+    /// its program ends: it is when its last screen was drawn.
+    pub screen_changed_at: Option<SystemTime>,
     /// What its conversation has used, or why that is not known.
     pub cost: Cost,
     /// Its count of tokens, if that is past the user's warning.

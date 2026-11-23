@@ -69,6 +69,10 @@ pub enum Event {
     /// The page pressed Enter in this agent, and nothing else. Every such
     /// press, each time.
     EnterFromPage { agent: AgentKey, label: String },
+    /// Something was done to a card of the Board on the page, or what was
+    /// done was undone. `action` is the word the outbox has for it. Every
+    /// one, each time.
+    CardActed { card: String, title: String, action: &'static str, undone: bool },
 }
 
 /// How many of the latest events are kept for a reader that asks late.
@@ -109,6 +113,9 @@ impl Event {
             }
             Event::TypedFromPage { agent, label, .. } => ("typed-from-page", Some(*agent), Some(label)),
             Event::EnterFromPage { agent, label } => ("enter-from-page", Some(*agent), Some(label)),
+            // Not about an agent: the card's id stands where a label would.
+            Event::CardActed { card, undone: false, .. } => ("card-acted", None, Some(card)),
+            Event::CardActed { card, undone: true, .. } => ("card-action-undone", None, Some(card)),
         };
         EventCopy { number, what, agent, label: label.cloned() }
     }
@@ -480,6 +487,7 @@ impl<B: AgentBackend> Engine<B> {
                 needs_you: e.needs_you(),
                 needs_you_since: e.track.needs_you_since().filter(|_| e.is_running()),
                 reported_at: e.track.reported_at().filter(|_| e.is_running()),
+                screen_changed_at: e.term.screen_changed_at(),
                 cost: e.cost(),
                 over_cost_warning: self.ws.over_cost_warning(e),
                 start_again_cannot_help: e.start_again_cannot_help(),
@@ -802,6 +810,13 @@ impl<B: AgentBackend> Engine<B> {
         }
         self.say(Event::EnterFromPage { agent, label: label.clone() });
         Ok(label)
+    }
+
+    /// Something was done to a card of the Board from the page, or undone:
+    /// it is said, as an event. The engine keeps nothing of the Board; the
+    /// outbox is written by whoever tells it this.
+    pub fn card_acted(&mut self, card: String, title: String, action: &'static str, undone: bool) {
+        self.say(Event::CardActed { card, title, action, undone });
     }
 
     /// Tells this run of Lillignode from any other: agents' keys and event
@@ -1363,6 +1378,49 @@ mod tests {
         assert_eq!(got(&sent), [(1, "\x1b[200~one\rtwo\x1b[201~".to_string()), (1, "\r".to_string())]);
         assert_eq!(typed_events(&e).len(), 2, "every send is an event");
         assert_eq!(e.question(), None);
+    }
+
+    #[test]
+    fn what_is_done_to_a_card_is_an_event_naming_the_card_each_time() {
+        let mut e = engine(&[]);
+        e.card_acted("c1".into(), "Keep it?".into(), "approve", false);
+        e.card_acted("c1".into(), "Keep it?".into(), "approve", true);
+        e.card_acted("c2".into(), "Renew it".into(), "done", false);
+        let said: Vec<EventCopy> = e.events_after(0).events.iter().map(|(n, ev)| ev.plain(*n)).collect();
+        let plain: Vec<(&str, Option<&str>)> = said.iter().map(|p| (p.what, p.label.as_deref())).collect();
+        assert_eq!(
+            plain,
+            [("card-acted", Some("c1")), ("card-action-undone", Some("c1")), ("card-acted", Some("c2"))]
+        );
+        assert!(said.iter().all(|p| p.agent.is_none()), "a card is not an agent");
+        assert_eq!(e.take_events().len(), 3, "the terminal is told each");
+    }
+
+    #[test]
+    fn the_copy_says_when_each_agents_screen_last_changed() {
+        let mut e = engine(&["state=idle", "state=idle"]);
+        let (a, b) = (key(&e, 0), key(&e, 1));
+        let changed = |e: &Engine<Fake>, key| e.copy(SystemTime::now()).agent(key).unwrap().screen_changed_at;
+        // A status report draws nothing: neither screen has changed yet.
+        assert_eq!((changed(&e, a), changed(&e, b)), (None, None));
+        let before = SystemTime::now();
+        e.ws.handle(AgentEvent::Output(AgentId(1), b"hello".to_vec()));
+        let first = changed(&e, a).expect("it drew something");
+        assert!(first >= before && first <= SystemTime::now());
+        assert_eq!(changed(&e, b), None, "the other agent's screen did not change");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        // Another report, and the same text drawn again in the same place:
+        // output, but the screen is as it was.
+        e.ws.handle(AgentEvent::Output(AgentId(1), b"\x1b]7501;state=working\x1b\\".to_vec()));
+        e.ws.handle(AgentEvent::Output(AgentId(1), b"\rhello".to_vec()));
+        assert_eq!(changed(&e, a), Some(first), "nothing on screen changed");
+        // One more character: it has.
+        e.ws.handle(AgentEvent::Output(AgentId(1), b"!".to_vec()));
+        assert!(changed(&e, a).unwrap() > first);
+        // Kept after its program ends: it is when its last screen was drawn.
+        let last = changed(&e, a);
+        e.ws.handle(AgentEvent::Exited(AgentId(1), crate::agent::Exit { code: 0 }));
+        assert_eq!(changed(&e, a), last);
     }
 
     #[test]

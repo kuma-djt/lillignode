@@ -86,6 +86,8 @@ impl vt100::Callbacks for Replies {
 
 pub struct Terminal {
     parser: vt100::Parser<Replies>,
+    /// When what is on the screen last changed, by what the agent sent.
+    changed_at: Option<std::time::SystemTime>,
 }
 
 /// A colour of text or of what is behind it, as the agent asked for it.
@@ -153,14 +155,46 @@ impl Terminal {
     /// hands over status reports, whoever is running in it.
     pub fn new(rows: u16, cols: u16) -> Self {
         let replies = Replies::default();
-        Self { parser: vt100::Parser::new_with_callbacks(nz(rows), nz(cols), HISTORY_ROWS, replies) }
+        Self {
+            parser: vt100::Parser::new_with_callbacks(nz(rows), nz(cols), HISTORY_ROWS, replies),
+            changed_at: None,
+        }
+    }
+
+    /// What is on the screen now, cursor and all, as one number: two
+    /// screens that differ give different numbers.
+    fn drawn(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let screen = self.parser.screen();
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        screen.contents_formatted().hash(&mut hasher);
+        (screen.cursor_position(), screen.hide_cursor()).hash(&mut hasher);
+        hasher.finish()
+    }
+
+    /// When what is on the screen last changed because of something the
+    /// agent sent. Output that draws the same screen again, or draws
+    /// nothing (a status report, an answer to a question), does not move
+    /// it. None until the agent has changed the screen at all.
+    pub fn screen_changed_at(&self) -> Option<std::time::SystemTime> {
+        self.changed_at
     }
 
     /// Take in output from the agent. Returns anything that must be sent
     /// back to the agent in answer; empty most of the time.
     #[must_use = "replies must be sent to the agent or it may wait forever"]
     pub fn feed(&mut self, bytes: &[u8]) -> Vec<u8> {
+        self.feed_at(bytes, std::time::SystemTime::now())
+    }
+
+    /// As `feed`, at a time the caller gives.
+    #[must_use = "replies must be sent to the agent or it may wait forever"]
+    pub fn feed_at(&mut self, bytes: &[u8], now: std::time::SystemTime) -> Vec<u8> {
+        let before = self.drawn();
         self.parser.process(bytes);
+        if self.drawn() != before {
+            self.changed_at = Some(now);
+        }
         std::mem::take(&mut self.parser.callbacks_mut().pending)
     }
 
@@ -256,6 +290,38 @@ impl Terminal {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_time_the_screen_changed_moves_only_when_what_is_on_it_does() {
+        use std::time::{Duration, SystemTime};
+        let at = |secs: u64| SystemTime::UNIX_EPOCH + Duration::from_secs(secs);
+        let mut t = Terminal::new(5, 20);
+        assert_eq!(t.screen_changed_at(), None);
+        // A question to the terminal and a status report draw nothing.
+        let _ = t.feed_at(b"\x1b[6n\x1b]7501;state=working\x07", at(1));
+        assert_eq!(t.screen_changed_at(), None);
+        let _ = t.feed_at(b"working", at(2));
+        assert_eq!(t.screen_changed_at(), Some(at(2)));
+        // The same line drawn over itself, as a program redrawing does.
+        let _ = t.feed_at(b"\rworking", at(3));
+        assert_eq!(t.screen_changed_at(), Some(at(2)));
+        // A spinner's next frame is a change; so is the cursor moving, a
+        // colour, and the cursor being hidden.
+        for (n, bytes) in
+            [&b"\r|orking"[..], b"\x1b[2;1H", b"\x1b[1;1H\x1b[31m|\x1b[0m\x1b[2;1H", b"\x1b[?25l"]
+                .iter()
+                .enumerate()
+        {
+            let _ = t.feed_at(bytes, at(10 + n as u64));
+            assert_eq!(t.screen_changed_at(), Some(at(10 + n as u64)), "{n}");
+        }
+        // Reading history is not the agent's doing, and does not make the
+        // next output that changes nothing look like a change.
+        let _ = t.feed_at(b"\x1b[?25h", at(20));
+        t.scroll(1);
+        let _ = t.feed_at(b"\x1b]7501;state=idle\x07", at(21));
+        assert_eq!(t.screen_changed_at(), Some(at(20)));
+    }
 
     fn line_text(copy: &ScreenCopy, row: usize) -> String {
         copy.lines[row].iter().map(|run| run.text.as_str()).collect()

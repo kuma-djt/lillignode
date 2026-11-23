@@ -30,6 +30,12 @@
 //! box under the agent's terminal, sent as if typed, then Enter. Off unless
 //! set to true, whatever `page` is. Needs `page` to be true.
 //!
+//! `page_can_act`: true to let that page act on the cards of its Board:
+//! approve, revise, hold, done, got it. What is done is added to a file
+//! beside the workspace, `board-outbox.jsonl`; the Board's own file is
+//! never written. Off unless set to true, whatever `page` and
+//! `page_can_type` are. Needs `page` to be true.
+//!
 //! A missing file means the defaults. A file that cannot be used also means
 //! the defaults, with a message saying what was wrong: a mistake in this
 //! file must never leave the user without a way into the menu.
@@ -147,6 +153,9 @@ pub struct Config {
     /// Let the page type to agents. Off unless the user asks, apart from
     /// `page`: a page that is on is read only until this is too.
     pub page_can_type: bool,
+    /// Let the page act on the Board's cards. Off unless the user asks,
+    /// apart from `page` and from `page_can_type`.
+    pub page_can_act: bool,
 }
 
 /// How the user pays, which decides whether a dollar figure means anything
@@ -177,6 +186,7 @@ impl Default for Config {
             page: false,
             page_port: DEFAULT_PAGE_PORT,
             page_can_type: false,
+            page_can_act: false,
         }
     }
 }
@@ -214,6 +224,7 @@ struct File {
     page: Option<bool>,
     page_port: Option<u32>,
     page_can_type: Option<bool>,
+    page_can_act: Option<bool>,
 }
 
 fn parse(text: &str) -> Result<Config, String> {
@@ -263,6 +274,13 @@ fn parse(text: &str) -> Result<Config, String> {
         // Said, so the user does not look for a box that is not there.
         Some(true) if !config.page => {
             return Err("add \"page\": true, or take out \"page_can_type\", which needs it".to_string());
+        }
+        can => can.unwrap_or(false),
+    };
+    config.page_can_act = match file.page_can_act {
+        // Said, so the user does not look for buttons that are not there.
+        Some(true) if !config.page => {
+            return Err("add \"page\": true, or take out \"page_can_act\", which needs it".to_string());
         }
         can => can.unwrap_or(false),
     };
@@ -363,6 +381,24 @@ mod tests {
             assert!(bad.starts_with("make \"page_port\" a number from 1024 to 65535"), "{bad}");
         }
         assert!(parse(r#"{"page": "yes"}"#).is_err());
+    }
+
+    #[test]
+    fn the_page_cannot_act_on_the_board_unless_asked_apart_from_the_other_two() {
+        assert!(!Config::default().page_can_act);
+        // On, and able to type, it still cannot act.
+        assert!(!parse(r#"{"page": true}"#).unwrap().page_can_act);
+        let typing = parse(r#"{"page": true, "page_can_type": true}"#).unwrap();
+        assert!(typing.page_can_type && !typing.page_can_act);
+        // Able to act, it still cannot type.
+        let acting = parse(r#"{"page": true, "page_can_act": true}"#).unwrap();
+        assert!(acting.page_can_act && !acting.page_can_type);
+        for text in [r#"{"page_can_act": true}"#, r#"{"page": false, "page_can_act": true}"#] {
+            let needs = parse(text).unwrap_err();
+            assert!(needs.starts_with("add \"page\": true, or take out \"page_can_act\""), "{needs}");
+        }
+        assert!(!parse(r#"{"page_can_act": false}"#).unwrap().page_can_act, "off needs nothing");
+        assert!(parse(r#"{"page": true, "page_can_act": 1}"#).is_err());
     }
 
     #[test]

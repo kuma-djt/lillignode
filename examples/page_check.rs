@@ -31,14 +31,19 @@
 //!   end             end the program of the agent in front (Ctrl+D)
 //!   board <which>   put a Board file in the state folder: `standin` (the
 //!                   eight cards in board-standin.json), `broken`, or
-//!                   `none` to take it away
+//!                   `none` to take it away; `board close <id>` marks one
+//!                   card of the file there as no longer open
+//!   outbox          prints `DONE outbox` and the outbox's lines, joined
+//!                   by ` | `
+//!   pickup          empties the outbox, as whatever keeps the Board would
 //!   shows <text>    whether Lillignode's screen shows this text within
 //!                   three seconds: prints `DONE shows yes` or `no`
 //!   quit            quit Lillignode through its menu, and end
 //!
 //! With `--serve --type` the settings also let the page type, and a third
 //! agent, `plain`, is started first: a stand-in that says what it was sent
-//! and does not take a paste as one block.
+//! and does not take a paste as one block. With `--serve --act` the
+//! settings let the page act on the Board's cards.
 //!
 //! The page's address holds a word. The check reads it from Lillignode's
 //! screen, as a person would.
@@ -263,8 +268,15 @@ fn agent<'a>(state: &'a serde_json::Value, name: &str) -> &'a serde_json::Value 
     )
 }
 
-fn serve(sb: &Sandbox, port: u16, can_type: bool) {
-    let (mut s, page) = if can_type {
+fn serve(sb: &Sandbox, port: u16, can_type: bool, can_act: bool) {
+    let (mut s, page) = if can_act {
+        settings(sb, &format!("{{\"page\": true, \"page_port\": {port}, \"page_can_act\": true}}"));
+        let mut s = Session::start(sb);
+        let page = page_on_screen(&mut s, port);
+        s.new_agent("reporter");
+        s.expect("a reporting stand-in starts", "STANDIN READY status");
+        (s, page)
+    } else if can_type {
         settings(sb, &format!("{{\"page\": true, \"page_port\": {port}, \"page_can_type\": true}}"));
         let mut s = Session::start(sb);
         let page = page_on_screen(&mut s, port);
@@ -321,6 +333,19 @@ fn serve(sb: &Sandbox, port: u16, can_type: bool) {
                 s.raw(&[4]);
                 println!("DONE end");
             }
+            ("outbox", _) => {
+                let text =
+                    std::fs::read_to_string(sb.state.join(lillignode::board::OUTBOX)).unwrap_or_default();
+                println!("DONE outbox {}", text.lines().collect::<Vec<_>>().join(" | "));
+            }
+            ("pickup", _) => {
+                std::fs::write(sb.state.join(lillignode::board::OUTBOX), "").unwrap();
+                println!("DONE pickup");
+            }
+            ("board", which) if which.trim().starts_with("close ") => {
+                close_card(sb, which.trim().trim_start_matches("close ").trim());
+                println!("DONE board");
+            }
             ("board", which) => {
                 let path = sb.state.join(lillignode::board::FILE);
                 match which.trim() {
@@ -351,6 +376,60 @@ fn serve(sb: &Sandbox, port: u16, can_type: bool) {
     }
 }
 
+/// Mark one card of the Board's file as no longer open, as whatever keeps
+/// the Board would once it has acted on what was sent.
+fn close_card(sb: &Sandbox, id: &str) {
+    let path = sb.state.join(lillignode::board::FILE);
+    let mut file: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    for card in file["cards"].as_array_mut().unwrap() {
+        if card["id"] == id {
+            card["status"] = "approved".into();
+        }
+    }
+    std::fs::write(&path, file.to_string()).unwrap();
+}
+
+/// The Board as the page is given it.
+fn board_shown(page: &Page) -> serde_json::Value {
+    let answer = get(page, "/board").unwrap_or_default();
+    let body = answer.split_once("\r\n\r\n").map_or("", |(_, body)| body);
+    serde_json::from_str::<serde_json::Value>(body).unwrap_or_default()["board"].clone()
+}
+
+/// One card of the Board as the page is given it, wherever it is.
+fn card_on(board: &serde_json::Value, id: &str) -> serde_json::Value {
+    ["decide", "yours", "know"]
+        .iter()
+        .filter_map(|part| board[part].as_array())
+        .flatten()
+        .find(|card| card["id"] == id)
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// Act on a card as the page's own buttons would. Returns what came of it
+/// and the words said back.
+fn act(page: &Page, token: &str, card: &str, action: &str, note: &str, undo: bool) -> (String, String) {
+    let body =
+        serde_json::json!({ "token": token, "card": card, "action": action, "note": note, "undo": undo });
+    let port = page.port;
+    let answer = ask(
+        page,
+        &format!(
+            "POST /act HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n{}Content-Length: {}\r\n\r\n{body}",
+            own(port),
+            body.to_string().len()
+        ),
+    )
+    .unwrap_or_default();
+    let said: serde_json::Value =
+        serde_json::from_str(answer.split_once("\r\n\r\n").map_or("", |(_, body)| body)).unwrap_or_default();
+    match (said["outcome"].as_str(), said["words"].as_str()) {
+        (Some(outcome), Some(words)) => (outcome.to_string(), words.to_string()),
+        _ => (answer.lines().next().unwrap_or("").to_string(), answer),
+    }
+}
+
 fn main() {
     let (sb, standin) = sandbox("page-check");
     launcher(&sb.launchers, &standin, "reporter", "status");
@@ -358,7 +437,8 @@ fn main() {
     launcher(&sb.launchers, &standin, "whole", "echo");
     let port = free_port();
     if std::env::args().any(|a| a == "--serve") {
-        serve(&sb, port, std::env::args().any(|a| a == "--type"));
+        let has = |flag: &str| std::env::args().any(|a| a == flag);
+        serve(&sb, port, has("--type"), has("--act"));
         let _ = std::fs::remove_dir_all(&sb.root);
         return;
     }
@@ -779,6 +859,233 @@ Host: localhost:{port}
     check(
         "a stopped agent refuses, in the terminal's words",
         outcome == "refused" && words == format!("{plain_label} is not running, so nothing was sent to it."),
+        &words,
+    );
+    drop(s.quit("quit", true));
+
+    println!("H. Acting on a card of the Board, when the settings allow it");
+    let board_file = sb.state.join(lillignode::board::FILE);
+    let outbox_file = sb.state.join(lillignode::board::OUTBOX);
+    let outbox = || -> Vec<serde_json::Value> {
+        std::fs::read_to_string(&outbox_file)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .collect()
+    };
+    std::fs::write(&board_file, include_str!("board-standin.json")).unwrap();
+    let as_written = std::fs::read(&board_file).unwrap();
+    // Typing is on from the part before, acting is not: the page is told
+    // so, and acting as the page would is nothing.
+    settings(&sb, &format!("{{\"page\": true, \"page_port\": {port}, \"page_can_type\": true}}"));
+    let mut s = Session::start(&sb);
+    let page = page_on_screen(&mut s, port);
+    let now = state(&page, "");
+    check("a page that can only type is given nothing to act with", now["state"]["acting"].is_null(), "");
+    let token = now["state"]["typing"].as_str().unwrap_or_default().to_string();
+    let (status, _) = act(&page, &token, "c1", "approve", "", false);
+    check(
+        "and an action made just as the page would make one gets nothing",
+        status.starts_with("HTTP/1.1 404"),
+        &status,
+    );
+    check("nothing was written", !outbox_file.exists(), "");
+    drop(s.quit("quit", true));
+
+    settings(&sb, &format!("{{\"page\": true, \"page_port\": {port}, \"page_can_act\": true}}"));
+    let mut s = Session::start(&sb);
+    let page = page_on_screen(&mut s, port);
+    s.raw(CTRL_Q);
+    s.keys(b"s");
+    s.expect("Lillignode says the page can act", "They can also act on the cards of your Board from it");
+    s.keys(ESC);
+    let now = state(&page, "");
+    let token = now["state"]["acting"].as_str().unwrap_or_default().to_string();
+    check("the page is given a token to act with", token.len() >= 32, &now["state"]["acting"].to_string());
+    check("and cannot type", now["state"]["typing"].is_null(), "");
+    let kept = std::fs::read_to_string(sb.state.join("page-word")).unwrap_or_default();
+    check("while it can act, its word is new and kept nowhere", kept.trim() != page.word, kept.trim());
+
+    let (outcome, words) = act(&page, &token, "c1", "approve", "", false);
+    check(
+        "Approve on a card to decide is sent, and said so",
+        outcome == "sent" && words == "Sent: Approve. It waits until the Board no longer lists the card.",
+        &words,
+    );
+    let lines = outbox();
+    check(
+        "one line in the outbox: card id, action, note, time",
+        lines.len() == 1
+            && lines[0]["card"] == "c1"
+            && lines[0]["action"] == "approve"
+            && lines[0]["note"] == ""
+            && lines[0]["at"].as_str().is_some_and(|at| lillignode::board::parse_time(at).is_some()),
+        &format!("{lines:?}"),
+    );
+    check("the Board's own file is not written", std::fs::read(&board_file).unwrap() == as_written, "");
+    check(
+        "the card shows as sent and waiting",
+        card_on(&board_shown(&page), "c1")["sent"]["action"] == "approve",
+        "",
+    );
+    s.expect(
+        "Lillignode's window says what was done from the page",
+        "From the page's Board: Approve, for \"Keep the old sign-in endpoint",
+    );
+    let said = state(&page, "")["state"]["events"]
+        .as_array()
+        .is_some_and(|events| events.iter().any(|e| e["what"] == "card-acted" && e["label"] == "c1"));
+    check("the action is an event that names the card", said, "");
+    let (outcome, words) = act(&page, &token, "c1", "hold", "", false);
+    check(
+        "a card that is waiting is not acted on again",
+        outcome == "refused"
+            && words == "Approve was already sent for that card, and it is waiting. Nothing more was sent.",
+        &words,
+    );
+
+    let (outcome, words) = act(&page, &token, "c1", "approve", "", true);
+    check(
+        "Undo within ten seconds takes the line out",
+        outcome == "sent" && words.starts_with("Undone: Approve."),
+        &words,
+    );
+    check("the outbox is empty again", outbox().is_empty(), &format!("{:?}", outbox()));
+    check("and the card no longer waits", card_on(&board_shown(&page), "c1")["sent"].is_null(), "");
+    s.expect("Lillignode's window says it was undone", "Approve was undone for");
+
+    let (outcome, words) = act(&page, &token, "c2", "revise", "Find out why first.", false);
+    check(
+        "Revise carries its note",
+        outcome == "sent" && outbox().last().is_some_and(|l| l["note"] == "Find out why first."),
+        &words,
+    );
+    let (outcome, words) = act(&page, &token, "c3", "revise", "  ", false);
+    check(
+        "Revise without a note is refused, and says why",
+        outcome == "refused" && words == "Revise needs a short note saying what to change. Nothing was sent.",
+        &words,
+    );
+    let (outcome, _) = act(&page, &token, "c5", "done", "", false);
+    check(
+        "Done on something only you can do",
+        outcome == "sent" && outbox().last().is_some_and(|l| l["action"] == "done"),
+        "",
+    );
+    let (outcome, _) = act(&page, &token, "c7", "got-it", "", false);
+    check(
+        "Got it on something good to know",
+        outcome == "sent" && outbox().last().is_some_and(|l| l["action"] == "got-it"),
+        "",
+    );
+    check(
+        "three lines wait in the outbox, in order",
+        outbox().iter().map(|l| l["card"].as_str().unwrap_or("")).collect::<Vec<_>>() == ["c2", "c5", "c7"],
+        &format!("{:?}", outbox()),
+    );
+
+    let before = outbox().len();
+    for (what, card, action, expect) in [
+        (
+            "an action that does not fit the card",
+            "c5",
+            "approve",
+            "That cannot be done to this card. Nothing was sent.",
+        ),
+        (
+            "a card that is not on the Board",
+            "c99",
+            "approve",
+            "That card is no longer open on the Board. Nothing was sent.",
+        ),
+        (
+            "an action the Board does not have",
+            "c3",
+            "delete",
+            "That cannot be done to this card. Nothing was sent.",
+        ),
+    ] {
+        let (outcome, words) = act(&page, &token, card, action, "", false);
+        check(&format!("{what} is refused, and says why"), outcome == "refused" && words == expect, &words);
+    }
+    let good =
+        serde_json::json!({ "token": token, "card": "c3", "action": "approve", "note": "", "undo": false })
+            .to_string();
+    let json = "Content-Type: application/json\r\n";
+    let post_act = |headers: &str, body: &str| {
+        ask(
+            &page,
+            &format!(
+                "POST /act HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n{headers}Content-Length: {}\r\n\r\n{body}",
+                body.len()
+            ),
+        )
+        .unwrap_or_default()
+    };
+    let wrong = good.replace(&token, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    for (what, headers, body, status) in [
+        ("without the page's token", own(port), wrong, "HTTP/1.1 403"),
+        ("that does not say where it comes from", json.to_string(), good.clone(), "HTTP/1.1 403"),
+        (
+            "from another web site",
+            format!("Origin: https://elsewhere.example\r\nSec-Fetch-Site: cross-site\r\n{json}"),
+            good.clone(),
+            "HTTP/1.1 403",
+        ),
+        (
+            "from a form",
+            format!("Origin: http://127.0.0.1:{port}\r\nContent-Type: application/x-www-form-urlencoded\r\n"),
+            good.clone(),
+            "HTTP/1.1 415",
+        ),
+    ] {
+        let answer = post_act(&headers, &body);
+        check(&format!("an action {what} is refused"), answer.starts_with(status), &answer);
+    }
+    let link = get(&page, &format!("/act?token={token}&card=c3&action=approve"));
+    check("a plain link acts on nothing", link.unwrap_or_default().starts_with("HTTP/1.1 404"), "");
+    let nowhere = Page { port, word: String::new() };
+    let answer = ask(
+        &nowhere,
+        &format!(
+            "POST /act HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n{}Content-Length: {}\r\n\r\n{good}",
+            own(port),
+            good.len()
+        ),
+    )
+    .unwrap_or_default();
+    check("without the word, an action gets nothing", answer.starts_with("HTTP/1.1 404"), &answer);
+    let typed = serde_json::json!({ "token": token, "run": now["state"]["run"], "agent": 1, "text": "x", "agreed": true }).to_string();
+    let answer = ask(
+        &page,
+        &format!(
+            "POST /send HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n{}Content-Length: {}\r\n\r\n{typed}",
+            own(port),
+            typed.len()
+        ),
+    )
+    .unwrap_or_default();
+    check("a page that can only act cannot type", answer.starts_with("HTTP/1.1 404"), &answer);
+    check("none of that added a line", outbox().len() == before, &format!("{:?}", outbox()));
+    check("nor touched the Board's own file", std::fs::read(&board_file).unwrap() == as_written, "");
+
+    // Whatever keeps the Board picks the lines up, and then closes a card.
+    std::fs::write(&outbox_file, "").unwrap();
+    check(
+        "picked up, a card still open still shows as waiting",
+        card_on(&board_shown(&page), "c5")["sent"]["action"] == "done",
+        "",
+    );
+    close_card(&sb, "c5");
+    check(
+        "no longer open in the Board's file, it is no longer shown",
+        card_on(&board_shown(&page), "c5").is_null(),
+        "",
+    );
+    let (outcome, words) = act(&page, &token, "c2", "revise", "", true);
+    check(
+        "what was picked up cannot be undone, and says why",
+        outcome == "refused" && words == "It has already been picked up from the outbox, so it cannot be undone. Nothing was changed.",
         &words,
     );
     drop(s.quit("quit", true));

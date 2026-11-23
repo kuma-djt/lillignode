@@ -45,6 +45,12 @@
   const CAN_TYPE =
     "This page can type to your agents: what you send under the terminal goes to the agent named there, " +
     "as if you had typed it in Lillignode.";
+  const CAN_ACT =
+    "This page can act on your Board: what you press on a card is passed to Lillignode, which adds it to " +
+    "the Board's outbox.";
+  const CAN_BOTH =
+    "This page can type to your agents and act on your Board: what you send goes to the agent named under " +
+    "the terminal, and what you press on a card goes to the Board's outbox.";
   const NO_ANSWER =
     "No answer from Lillignode, so it is not known whether this was sent. Look at the agent's terminal " +
     "before sending it again.";
@@ -290,8 +296,9 @@
 
   function drawTyping() {
     const token = state ? state.typing : null;
-    standing.textContent = token ? CAN_TYPE : READ_ONLY;
-    standing.className = token ? "can-type" : "";
+    const acts = !!(state && state.acting);
+    standing.textContent = token && acts ? CAN_BOTH : token ? CAN_TYPE : acts ? CAN_ACT : READ_ONLY;
+    standing.className = token || acts ? "can-type" : "";
     const key = target();
     typing.hidden = !token || key === null;
     if (typing.hidden) return;
@@ -494,48 +501,197 @@
 
   // The Board: read from Lillignode, which reads it from a file of the
   // user's, every few seconds. What a card says is put on the page as text.
+  // Where Lillignode's settings allow it, a card has buttons: what is done
+  // is passed to Lillignode, which adds a line to the Board's outbox. This
+  // page writes nothing itself.
   const BOARD_MS = 2000;
+  const UNDO_MS = 10000;
   const boardNote = el("board-note");
   const boardNotRead = el("board-not-read");
+  const boardSaid = el("board-said");
   const KIND_WORDS = { decide: "Decide", fire: "Fire", question: "Question" };
-  let boardShown = "";
+  const ACTION_WORDS = { approve: "Approve", revise: "Revise", hold: "Hold", done: "Done", "got-it": "Got it" };
+  const STATUS_WORDS = { revise: "being revised", hold: "on hold", more: "more was asked for" };
+  const HELP = "Approve: go ahead. Revise: send it back with your note. Hold: not now.";
+  let board = null;        // the Board last heard
+  let boardDrawn = "";     // what the Board on the page was drawn from
+  let revising = null;     // the card a note is being written for
+  let noteDraft = "";      // that note, so far
+  let actingNow = false;   // something done to a card is on its way
 
-  function drawBoard(board) {
-    const shown = JSON.stringify(board);
-    // The same Board: left alone, so text a reader has selected stays so.
-    if (shown === boardShown) return;
-    boardShown = shown;
+  // A card due on a day is shown as that day wherever the reader is; one
+  // due at a moment, as the day that moment falls on here.
+  const day = (ms, whole) =>
+    new Date(ms).toLocaleDateString([], { day: "numeric", month: "short", ...(whole ? { timeZone: "UTC" } : {}) });
+  const canAct = () => !!(state && state.acting);
+  const undoable = (card) => !!card.sent && Date.now() - card.sent.at < UNDO_MS;
+
+  // What is said under a card's title: what it is, who raised it, when it
+  // is due, and where it stands if it is not simply waiting its turn.
+  function metaWords(card, withKind) {
+    const parts = [];
+    if (withKind) parts.push((KIND_WORDS[card.kind] || "") + (card.tier === "next" ? ", next" : ""));
+    parts.push("Raised by " + card.raised_by);
+    if (card.due_at !== null && card.due_at !== undefined) parts.push("Due " + day(card.due_at, card.due_whole_day));
+    if (STATUS_WORDS[card.status]) parts.push(STATUS_WORDS[card.status]);
+    return parts.join(" · ");
+  }
+
+  function button(words, cls, onClick) {
+    const b = text("button", cls, words);
+    b.type = "button";
+    b.disabled = actingNow || lostAt !== null || movedOn;
+    b.addEventListener("click", onClick);
+    return b;
+  }
+
+  // Pass on what was done to a card, or the undoing of it, and show what
+  // Lillignode said came of it.
+  function act(card, action, note, undo) {
+    if (!canAct() || actingNow) return;
+    actingNow = true;
+    drawBoard();
+    fetch("act", {
+      method: "POST",
+      cache: "no-store",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token: state.acting, card, action, note, undo }),
+      signal: AbortSignal.timeout(10000),
+    })
+      .then((answer) => (answer.ok ? answer.json() : answer.text().then((words) => ({ outcome: "refused", words }))))
+      .then((heard) => {
+        actingNow = false;
+        if (heard.outcome === "sent" && revising === card) {
+          revising = null;
+          noteDraft = "";
+        }
+        boardSaid.hidden = false;
+        boardSaid.textContent = heard.words;
+        readBoard();
+        drawBoard();
+      })
+      .catch(() => {
+        actingNow = false;
+        boardSaid.hidden = false;
+        boardSaid.textContent =
+          "No answer from Lillignode, so it is not known whether this was sent. Wait for the card to change before doing it again.";
+        drawBoard();
+      });
+  }
+
+  // What stands where a card's buttons would: that it was sent and waits,
+  // with Undo while there is still time.
+  function sentLine(card) {
+    const line = text("p", "card-sent", "Sent, waiting: " + (ACTION_WORDS[card.sent.action] || card.sent.action) + ".");
+    if (canAct() && undoable(card)) {
+      line.append(" ", button("Undo", "undo", () => act(card.id, card.sent.action, "", true)));
+    }
+    return line;
+  }
+
+  function decideCard(card) {
+    const li = document.createElement("li");
+    li.className = "card " + (card.kind in KIND_WORDS ? card.kind : "") + (card.sent ? " waiting" : "");
+    li.dataset.id = card.id;
+    li.append(text("strong", "card-title", card.title));
+    if (card.recommendation) {
+      const said = text("p", "card-recommendation", card.recommendation);
+      said.title = card.recommendation;
+      li.append(said);
+    }
+    const meta = text("p", "card-meta", "");
+    meta.append(text("span", "card-kind", (KIND_WORDS[card.kind] || "") + (card.tier === "next" ? ", next" : "")));
+    meta.append(" · " + metaWords(card, false));
+    li.append(meta);
+    if (card.sent) {
+      li.append(sentLine(card));
+    } else if (canAct() && revising === card.id) {
+      const row = text("div", "card-actions", "");
+      const note = document.createElement("input");
+      note.className = "note";
+      note.type = "text";
+      note.maxLength = 280;
+      note.value = noteDraft;
+      note.placeholder = "What should change?";
+      note.setAttribute("aria-label", "What should change in: " + card.title);
+      note.addEventListener("input", () => {
+        noteDraft = note.value;
+      });
+      const sendNote = () => act(card.id, "revise", noteDraft, false);
+      note.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          sendNote();
+        }
+      });
+      row.append(note, button("Send note", "main", sendNote), button("Cancel", "", () => {
+        revising = null;
+        noteDraft = "";
+        drawBoard();
+      }));
+      li.append(row);
+    } else if (canAct()) {
+      const row = text("div", "card-actions", "");
+      row.append(
+        button("Approve", "main", () => act(card.id, "approve", "", false)),
+        button("Revise", "", () => {
+          revising = card.id;
+          noteDraft = "";
+          drawBoard();
+          const note = document.querySelector("#board input.note");
+          if (note) note.focus();
+        }),
+        button("Hold", "", () => act(card.id, "hold", "", false)),
+      );
+      li.append(row, text("p", "card-help", HELP));
+    }
+    return li;
+  }
+
+  // A row of one of the two lists: its title, who raised it, and the one
+  // thing that can be done to it.
+  function listRow(card, action, words) {
+    const li = document.createElement("li");
+    li.dataset.id = card.id;
+    if (card.sent) li.className = "waiting";
+    li.append(text("span", "card-title", card.title));
+    const foot = text("div", "card-foot", "");
+    foot.append(text("span", "card-meta", metaWords(card, false) + (card.tier === "next" && action === "done" ? " · next" : "")));
+    if (card.sent) foot.append(sentLine(card));
+    else if (canAct()) foot.append(button(words, "", () => act(card.id, action, "", false)));
+    li.append(foot);
+    return li;
+  }
+
+  function drawBoard() {
+    if (!board) return;
+    // Drawn again only when what it would show has changed, so text a
+    // reader has selected, or a note being written, is left alone.
+    const now = [...board.decide, ...board.yours, ...board.know].filter(undoable).map((c) => c.id);
+    const from = JSON.stringify([board, canAct(), now, revising, actingNow, lostAt !== null, movedOn]);
+    if (from === boardDrawn) return;
+    boardDrawn = from;
+    const focused = document.activeElement && document.activeElement.classList.contains("note");
     boardNote.hidden = !(board.problem || board.empty);
     boardNote.textContent = board.problem || (board.empty ? "Nothing on the Board." : "");
-    boardNote.className = board.problem ? "quiet problem" : "quiet";
     const part = (id, cards, row) => {
       el(id).hidden = cards.length === 0;
       el(id + "-list").replaceChildren(...cards.map(row));
     };
-    part("board-decide", board.decide, (card) => {
-      const li = document.createElement("li");
-      li.className = "card " + (card.kind in KIND_WORDS ? card.kind : "");
-      li.dataset.id = card.id;
-      li.append(text("span", "card-kind", (KIND_WORDS[card.kind] || "") + (card.tier === "next" ? ", next" : ", now")));
-      li.append(text("strong", "card-title", card.title));
-      if (card.recommendation) li.append(text("p", "card-recommendation", card.recommendation));
-      li.append(text("p", "card-raised", "Raised by " + card.raised_by));
-      return li;
-    });
-    part("board-yours", board.yours, (card) => {
-      const li = text("li", "", card.title);
-      li.dataset.id = card.id;
-      if (card.tier === "next") li.append(text("span", "tier", "  next"));
-      return li;
-    });
-    part("board-know", board.know, (card) => {
-      const li = text("li", "", card.title);
-      li.dataset.id = card.id;
-      li.append(text("span", "card-raised", card.raised_by));
-      return li;
-    });
+    // A note is for a card that is still there to be revised.
+    if (revising !== null && !board.decide.some((c) => c.id === revising && !c.sent)) {
+      revising = null;
+      noteDraft = "";
+    }
+    part("board-decide", board.decide, decideCard);
+    part("board-yours", board.yours, (card) => listRow(card, "done", "✓ Done"));
+    part("board-know", board.know, (card) => listRow(card, "got-it", "Got it"));
     boardNotRead.hidden = !board.not_read;
     boardNotRead.textContent = board.not_read || "";
+    if (focused) {
+      const note = document.querySelector("#board input.note");
+      if (note) note.focus();
+    }
   }
 
   function readBoard() {
@@ -543,11 +699,15 @@
     fetch("board", { cache: "no-store", signal: AbortSignal.timeout(5000) })
       .then((answer) => (answer.ok ? answer.json() : null))
       .then((heard) => {
-        if (heard && heard.board) drawBoard(heard.board);
+        if (heard && heard.board) {
+          board = heard.board;
+          drawBoard();
+        }
       })
       .catch(() => {});
   }
 
+  setInterval(drawBoard, 1000);
   setInterval(draw, 1000);
   setInterval(readBoard, BOARD_MS);
   draw();

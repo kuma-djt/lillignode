@@ -79,7 +79,7 @@ main {
   flex: 1;
   min-height: 0;
   display: grid;
-  grid-template-columns: minmax(230px, 300px) minmax(0, 1fr) minmax(260px, 360px);
+  grid-template-columns: minmax(230px, 300px) minmax(0, 1fr) minmax(300px, 440px);
 }
 main > section { min-height: 0; overflow: auto; }
 #agents-column, #middle { border-right: 1px solid var(--rule); }
@@ -163,36 +163,77 @@ li.gone .agent-name { color: var(--cream-quiet); }
 #typing-ask { padding-top: 8px; }
 #typing-question { font-weight: 700; padding-bottom: 8px; }
 #typing-ask button { margin-right: 8px; }
-/* The Board. No orange here: orange is for an agent that needs you. */
+/* The Board. No orange here: orange is for an agent that needs you. It is
+   kept compact, so that four cards to decide and both lists under them
+   are in view together at 1400 by 900. */
+#board h2 { padding-bottom: 4px; }
 #board h3 {
-  font-size: 12px;
+  font-size: 11px;
   letter-spacing: 0.12em;
   text-transform: uppercase;
   color: var(--cream-quiet);
   font-weight: 600;
   margin: 0;
-  padding: 10px 16px 6px;
+  padding: 6px 14px 4px;
 }
 #board section[hidden], #board p[hidden] { display: none; }
-#board-decide-list { padding: 0 12px; }
+#board-said { padding: 0 14px 4px; font-size: 13px; font-weight: 600; }
+#board-decide-list { padding: 0 10px; }
 .card {
   background: var(--navy-raised);
   border: 1px solid var(--rule);
   border-radius: 4px;
-  padding: 10px 12px 12px;
-  margin-bottom: 10px;
+  padding: 6px 10px 7px;
+  margin-bottom: 6px;
 }
-.card-kind { font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--cream-quiet); }
-.card.fire .card-kind { color: var(--cream); font-weight: 700; }
-.card-title { display: block; font-size: 17px; font-weight: 600; margin: 4px 0 6px; }
-.card-recommendation { margin-bottom: 6px; }
+.card-title {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  font-size: 14px;
+  line-height: 1.3;
+  font-weight: 600;
+}
+/* One line: the rest is read by resting the pointer on it. */
+.card-recommendation { font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .card-recommendation::before { content: "Recommended: "; color: var(--cream-quiet); }
-.card-raised { font-size: 13px; color: var(--cream-quiet); }
-#board-yours-list li, #board-know-list li { padding: 6px 16px; border-top: 1px solid var(--rule); }
+.card-meta { font-size: 12px; color: var(--cream-quiet); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.card.fire .card-kind { color: var(--cream); font-weight: 700; }
+.card-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding-top: 4px; }
+#board button {
+  background: none;
+  color: var(--cream);
+  border: 1px solid var(--cream-quiet);
+  border-radius: 3px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 1px 9px;
+  cursor: pointer;
+}
+#board button.main { background: var(--cream); color: var(--navy); border-color: var(--cream); }
+#board button:disabled { color: var(--cream-quiet); border-color: var(--rule); background: none; cursor: default; }
+#board button:focus-visible, #board input:focus-visible { outline: 2px solid var(--cream); outline-offset: 1px; }
+#board input.note {
+  flex: 1;
+  min-width: 120px;
+  background: var(--navy-deep);
+  color: var(--cream);
+  border: 1px solid var(--cream-quiet);
+  border-radius: 3px;
+  font: inherit;
+  font-size: 13px;
+  padding: 2px 6px;
+}
+.card-help { font-size: 11px; color: var(--cream-quiet); padding-top: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.card-sent { font-size: 12px; font-weight: 600; }
+#board-yours-list li, #board-know-list li { padding: 4px 14px 5px; border-top: 1px solid var(--rule); }
 #board-yours-list li:last-child, #board-know-list li:last-child { border-bottom: 1px solid var(--rule); }
-#board-yours-list .tier { color: var(--cream-quiet); font-size: 13px; }
-#board-know-list li { color: var(--cream-quiet); font-size: 14px; }
-#board-know-list .card-raised { display: block; font-size: 12px; }
+#board-yours-list .card-title, #board-know-list .card-title { font-size: 13px; font-weight: 400; }
+#board-know-list .card-title { color: var(--cream-quiet); }
+.card-foot { display: flex; align-items: center; gap: 8px; }
+.card-foot .card-meta { flex: 1; min-width: 0; }
 
 /* Read by a screen reader, not shown. */
 #announce { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }

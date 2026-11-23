@@ -12,6 +12,7 @@ use ratatui::layout::Rect;
 
 use crate::action::Action;
 use crate::agent::{AgentBackend, AgentEvent, Size, StartError};
+use crate::board;
 use crate::config::{Billing, Config};
 use crate::cost::{self, Cost, Usage, Waiting, WhyNot};
 use crate::engine::{
@@ -269,6 +270,11 @@ pub struct App<B: AgentBackend> {
     page: Option<page::Served>,
     /// The page was handed the way to type to agents.
     page_types: bool,
+    /// The page was handed the way to act on the Board's cards.
+    page_acts: bool,
+    /// Where the Board's file and its outbox are: the folder Lillignode
+    /// saves in, if it has one.
+    board_folder: Option<PathBuf>,
     /// Why the page's address will not be the same next start, if it will
     /// not.
     page_word_not_kept: Option<String>,
@@ -462,6 +468,7 @@ impl<B: AgentBackend> App<B> {
         config_problem: Option<String>,
     ) -> Self {
         let mut engine = Engine::new(Workspace::new(backend, size));
+        let board_folder = state_dir.as_ref().ok().cloned();
         let mut start_problems: Vec<String> = config_problem.iter().cloned().collect();
         let mut said = Vec::new();
         match &state_dir {
@@ -504,6 +511,8 @@ impl<B: AgentBackend> App<B> {
             page_address: None,
             page: None,
             page_types: false,
+            page_acts: false,
+            board_folder,
             page_word_not_kept: None,
         };
         app.say_events();
@@ -618,6 +627,22 @@ impl<B: AgentBackend> App<B> {
                     format!("The page typed to {label}, then Enter.")
                 }
                 Event::EnterFromPage { label, .. } => format!("The page pressed Enter in {label}."),
+                // Said in the terminal each time, as a send to an agent is.
+                Event::CardActed { title, action, undone, .. } => {
+                    let did = board::Action::parse(action).map_or(action, board::Action::name);
+                    let title = fit::clip(&title, 40);
+                    if undone {
+                        format!(
+                            "From the page's Board: {did} was undone for \"{title}\". Its line was taken \
+                             out of the outbox."
+                        )
+                    } else {
+                        format!(
+                            "From the page's Board: {did}, for \"{title}\". It waits in the Board's outbox \
+                             until it is picked up."
+                        )
+                    }
+                }
                 Event::TypedFromPage { label, entered: false, .. } => {
                     format!("The page typed to {label}. Enter was not sent after it: the agent stopped just then.")
                 }
@@ -638,9 +663,15 @@ impl<B: AgentBackend> App<B> {
             // after anything already said, not before it.
             Ok(address) => {
                 self.page_address = Some(address.clone());
-                let can =
-                    if self.page_types { "see your agents and type to them" } else { "see your agents" };
-                format!("The page is on: {address}  Anyone with this address can {can}. {menu} then s shows it again.")
+                // Each wording fits the two notice rows of the narrowest
+                // window with the longest address there is.
+                let who = match (self.page_types, self.page_acts) {
+                    (false, false) => "Anyone with this address can see your agents.",
+                    (true, false) => "Anyone with this address can see your agents and type to them.",
+                    (false, true) => "Anyone with this address can see your agents and act on your Board.",
+                    (true, true) => "Anyone with it can see your agents, type to them and act on your Board.",
+                };
+                format!("The page is on: {address}  {who} {menu} then s shows it again.")
             }
             Err(why) => format!(
                 "The page was not started on port {} ({why}). Agents work as before. If another program \
@@ -658,6 +689,7 @@ impl<B: AgentBackend> App<B> {
     /// keeps it, so its address can be changed when asked.
     pub fn page_serving(&mut self, served: page::Served) {
         self.page_types = served.can_type;
+        self.page_acts = served.can_act;
         self.page_word_not_kept = served.word_not_kept.clone();
         let address = served.url();
         self.page = Some(served);
@@ -752,6 +784,48 @@ impl<B: AgentBackend> App<B> {
         // The terminal says each send too.
         self.say_events();
         answer
+    }
+
+    /// Something done to a card of the Board on the page, or the undoing
+    /// of it. Whether it may be done is decided here and in `board`; the
+    /// page chose nothing. One line is added to the Board's outbox (or
+    /// taken out of it), never to the Board's own file. Every one is an
+    /// engine event and is said in the terminal.
+    pub fn acted_from_page(
+        &mut self,
+        card: &str,
+        action: &str,
+        note: &str,
+        undo: bool,
+    ) -> (TypedOutcome, String) {
+        // Kept here as well as where the page is started: a card is acted
+        // on only if the user asked for that in the settings file.
+        if !self.config.page_can_act {
+            return (
+                TypedOutcome::Refused,
+                "This page cannot act on the Board. Nothing was sent.".to_string(),
+            );
+        }
+        let folder = self.board_folder.as_deref();
+        let now = SystemTime::now();
+        let done =
+            if undo { board::undo(folder, card, now) } else { board::act(folder, card, action, note, now) };
+        match done {
+            Ok(acted) => {
+                let words = if undo {
+                    format!("Undone: {}. Nothing is waiting for that card.", acted.action.name())
+                } else {
+                    format!(
+                        "Sent: {}. It waits until the Board no longer lists the card.",
+                        acted.action.name()
+                    )
+                };
+                self.engine.card_acted(acted.card, acted.title, acted.action.word(), undo);
+                self.say_events();
+                (TypedOutcome::Sent, words)
+            }
+            Err(why) => (TypedOutcome::Refused, why),
+        }
     }
 
     /// Enter alone, pressed on the page in the agent with this key number
@@ -2184,9 +2258,21 @@ impl<B: AgentBackend> App<B> {
         } else {
             ""
         };
+        let acts = if self.page_acts {
+            " They can also act on the cards of your Board from it: \"page_can_act\" is on in your settings \
+             file."
+        } else {
+            ""
+        };
         let lasts = match &self.page_word_not_kept {
             // Kept nowhere on purpose: an address that has leaked must not
             // be enough to type to an agent later.
+            None if self.page_types && self.page_acts => {
+                "While it can type or act, the address is new each time Lillignode starts.".to_string()
+            }
+            None if self.page_acts => {
+                "While it can act on the Board, the address is new each time Lillignode starts.".to_string()
+            }
             None if self.page_types => {
                 "While it can type, the address is new each time Lillignode starts.".to_string()
             }
@@ -2195,7 +2281,7 @@ impl<B: AgentBackend> App<B> {
         };
         format!(
             "\nThe page: {address}\nAnyone with this address can see every agent's name, status and screen \
-             while Lillignode is open.{types} {lasts} For a new address now: {menu}, then w.\n"
+             while Lillignode is open.{types}{acts} {lasts} For a new address now: {menu}, then w.\n"
         )
     }
 
@@ -4584,6 +4670,183 @@ Cost",
         let (outcome, _) = app.typed_from_page(&run, second, "safe\x1b[201~rm -rf x\nmore", false);
         assert_eq!(outcome, TypedOutcome::Sent);
         assert_eq!(*sent.borrow(), ["\x1b[200~safe[201~rm -rf x\rmore\x1b[201~", "\r"], "one paste, whole");
+    }
+
+    /// An app whose settings let the page act, saving in a folder of the
+    /// test's own that holds the stand-in Board.
+    fn acting_app(name: &str) -> (App<Fake>, PathBuf) {
+        let folder = std::env::temp_dir().join(format!("lillignode-app-act-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&folder);
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join(board::FILE), include_str!("../examples/board-standin.json")).unwrap();
+        let config = Config { page: true, page_can_act: true, ..Config::default() };
+        let mut app = App::launch(
+            Fake::default(),
+            Size { rows: 5, cols: 40 },
+            Ok(folder.clone()),
+            std::env::temp_dir(),
+            config,
+            None,
+        );
+        app.notice = None;
+        (app, folder)
+    }
+
+    fn outbox_lines(folder: &std::path::Path) -> Vec<serde_json::Value> {
+        std::fs::read_to_string(folder.join(board::OUTBOX))
+            .unwrap_or_default()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn acting_on_a_card_from_the_page_writes_the_outbox_and_is_said_in_the_terminal() {
+        let (mut app, folder) = acting_app("act");
+        let board_before = std::fs::read(folder.join(board::FILE)).unwrap();
+        let (outcome, words) = app.acted_from_page("c1", "approve", "", false);
+        assert_eq!(
+            (outcome, words.as_str()),
+            (TypedOutcome::Sent, "Sent: Approve. It waits until the Board no longer lists the card.")
+        );
+        assert_eq!(
+            app.notice.as_deref(),
+            Some(
+                "From the page's Board: Approve, for \"Keep the old sign-in endpoint for one m…\". It waits in \
+                 the Board's outbox until it is picked up."
+            )
+        );
+        let lines = outbox_lines(&folder);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(
+            (&lines[0]["card"], &lines[0]["action"], &lines[0]["note"]),
+            (&"c1".into(), &"approve".into(), &"".into())
+        );
+        assert!(board::parse_time(lines[0]["at"].as_str().unwrap()).is_some(), "with its time");
+        assert_eq!(
+            std::fs::read(folder.join(board::FILE)).unwrap(),
+            board_before,
+            "the Board's file is not written"
+        );
+        // An engine event each time, naming the card.
+        let said = app.engine.events_after(0).events;
+        let acted: Vec<_> =
+            said.iter().map(|(n, e)| e.plain(*n)).filter(|p| p.what == "card-acted").collect();
+        assert_eq!(acted.len(), 1);
+        assert_eq!(acted[0].label.as_deref(), Some("c1"));
+        // Undone within ten seconds: the line is out, and that is said too.
+        let (outcome, words) = app.acted_from_page("c1", "approve", "", true);
+        assert_eq!(
+            (outcome, words.as_str()),
+            (TypedOutcome::Sent, "Undone: Approve. Nothing is waiting for that card.")
+        );
+        assert!(outbox_lines(&folder).is_empty());
+        assert_eq!(
+            app.notice.as_deref(),
+            Some(
+                "From the page's Board: Approve was undone for \"Keep the old sign-in endpoint for one m…\". \
+                 Its line was taken out of the outbox."
+            )
+        );
+        let undone = app
+            .engine
+            .events_after(0)
+            .events
+            .iter()
+            .filter(|(n, e)| e.plain(*n).what == "card-action-undone")
+            .count();
+        assert_eq!(undone, 1);
+        // A Revise carries its note.
+        let (outcome, _) = app.acted_from_page("c1", "revise", "Say when it goes.", false);
+        assert_eq!(outcome, TypedOutcome::Sent);
+        assert_eq!(outbox_lines(&folder)[0]["note"], "Say when it goes.");
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    #[test]
+    fn acting_on_a_card_is_refused_with_why_and_then_nothing_is_written_or_said() {
+        let (mut app, folder) = acting_app("refused");
+        let refused = |app: &mut App<Fake>, card: &str, action: &str, note: &str, undo: bool| {
+            let (outcome, words) = app.acted_from_page(card, action, note, undo);
+            assert_eq!(outcome, TypedOutcome::Refused, "{words}");
+            words
+        };
+        assert_eq!(
+            refused(&mut app, "nobody", "approve", "", false),
+            "That card is no longer open on the Board. Nothing was sent."
+        );
+        assert_eq!(
+            refused(&mut app, "c5", "approve", "", false),
+            "That cannot be done to this card. Nothing was sent."
+        );
+        assert_eq!(
+            refused(&mut app, "c1", "revise", "", false),
+            "Revise needs a short note saying what to change. Nothing was sent."
+        );
+        assert_eq!(
+            refused(&mut app, "c1", "approve", "", true),
+            "There is nothing to undo for that card. Nothing was changed."
+        );
+        assert!(outbox_lines(&folder).is_empty());
+        assert_eq!(app.notice, None, "nothing happened, so nothing is said");
+        assert!(app
+            .engine
+            .events_after(0)
+            .events
+            .iter()
+            .all(|(n, e)| !e.plain(*n).what.starts_with("card-")));
+        // Off in the settings: nothing, whatever is asked.
+        app.config.page_can_act = false;
+        assert_eq!(
+            refused(&mut app, "c1", "approve", "", false),
+            "This page cannot act on the Board. Nothing was sent."
+        );
+        assert!(outbox_lines(&folder).is_empty());
+        // Nowhere to save: said.
+        let (mut nowhere, _, _) = typing_app(&[]);
+        nowhere.config.page_can_act = true;
+        assert!(
+            refused(&mut nowhere, "c1", "approve", "", false).starts_with("Lillignode has nowhere to save")
+        );
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    #[test]
+    fn a_page_that_can_act_is_said_to_wherever_its_address_is_shown() {
+        let room = 2 * usize::from(crate::ui::MIN_COLS);
+        let word = "abcdefghijkmnpqr";
+        let address = format!("http://127.0.0.1:65535/{word}/");
+        for (types, acts, who, lasts) in [
+            (
+                false,
+                true,
+                "Anyone with this address can see your agents and act on your Board.",
+                "While it can act on the Board, the address is new each time Lillignode starts.",
+            ),
+            (
+                true,
+                true,
+                "Anyone with it can see your agents, type to them and act on your Board.",
+                "While it can type or act, the address is new each time Lillignode starts.",
+            ),
+        ] {
+            let mut app = app_with_claude_agents(1);
+            (app.page_types, app.page_acts) = (types, acts);
+            app.notice = None;
+            app.page_started(Ok(address.clone()));
+            let said = app.notice.clone().unwrap();
+            assert_eq!(said, format!("The page is on: {address}  {who} Ctrl+Q then s shows it again."));
+            assert!(said.chars().count() <= room, "{} characters: {said}", said.chars().count());
+            let report = app.status_report_text();
+            assert!(
+                report.contains(
+                    "They can also act on the cards of your Board from it: \"page_can_act\" is on in your \
+                     settings file."
+                ),
+                "{report}"
+            );
+            assert!(report.contains(lasts), "{report}");
+        }
     }
 
     #[test]

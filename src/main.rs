@@ -23,6 +23,8 @@ enum Msg {
     Agent(AgentEvent),
     /// Text typed on the page for an agent.
     Typed(page::Typed),
+    /// Something done to a card of the Board on the page.
+    Acted(page::Acted),
 }
 
 impl From<AgentEvent> for Msg {
@@ -64,6 +66,10 @@ The page is read only unless you also add \"page_can_type\": true. Then it
 has a box to type to the agent it shows, and anyone with the address can
 type to your agents.
 
+The page's Board shows cards from board.json beside your workspace. Add
+\"page_can_act\": true and its cards get buttons; what you press is added to
+board-outbox.jsonl there. Lillignode never writes to board.json.
+
 Each agent uses its own account. Lillignode does not ask for your keys and
 sends nothing anywhere.",
         keys = config.menu_keys_label()
@@ -98,10 +104,18 @@ fn main() -> ExitCode {
                         println!(
                             "page:      http://127.0.0.1:{}/ and a word; Lillignode shows it. {}",
                             config.page_port,
-                            if config.page_can_type { "It can type to agents." } else { "Read only." }
+                            match (config.page_can_type, config.page_can_act) {
+                                (false, false) => "Read only.",
+                                (true, false) => "It can type to agents.",
+                                (false, true) => "It can act on the Board.",
+                                (true, true) => "It can type to agents and act on the Board.",
+                            }
                         );
                         println!("page word: {}", dir.join(page::WORD_FILE).display());
                         println!("board:     {}", dir.join(lillignode::board::FILE).display());
+                        if config.page_can_act {
+                            println!("outbox:    {}", dir.join(lillignode::board::OUTBOX).display());
+                        }
                     }
                     if let Some(problem) = &config_problem {
                         println!("\n{problem}");
@@ -197,7 +211,13 @@ fn main() -> ExitCode {
             let pass: page::Typing = std::sync::Arc::new(move |typed| tx.send(Msg::Typed(typed)).is_ok());
             pass
         });
-        match page::serve(reader, app.config.page_port, page_folder.as_deref(), typing) {
+        let acting = app.config.page_can_act.then(|| {
+            let tx = tx.clone();
+            let pass: page::Acting = std::sync::Arc::new(move |acted| tx.send(Msg::Acted(acted)).is_ok());
+            pass
+        });
+        let ways = page::Ways { typing, acting };
+        match page::serve(reader, app.config.page_port, page_folder.as_deref(), ways) {
             Ok(served) => {
                 app.page_serving(served);
                 Some(publisher)
@@ -276,6 +296,11 @@ fn main() -> ExitCode {
                     handed_over_us = read_at.elapsed().as_micros();
                 }
                 Msg::Input(Input::Paste(text), _) => app.on_paste(text),
+                Msg::Acted(acted) => {
+                    let (outcome, words) =
+                        app.acted_from_page(&acted.card, &acted.action, &acted.note, acted.undo);
+                    let _ = acted.answer.send(page::TypedAnswer { outcome, words });
+                }
                 Msg::Typed(typed) => {
                     let (outcome, words) = if typed.enter {
                         app.enter_from_page(&typed.run, typed.agent)
