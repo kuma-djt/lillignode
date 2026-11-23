@@ -226,6 +226,13 @@ li.gone .agent-name { color: var(--cream-quiet); }
   font-size: 13px;
   padding: 2px 6px;
 }
+/* A card opened by a tap shows its title and recommendation whole. */
+#board li { cursor: pointer; }
+#board li:focus-visible { outline: 2px solid var(--cream); outline-offset: 1px; }
+#board li.opened .card-title { display: block; -webkit-line-clamp: unset; overflow: visible; }
+#board li.opened .card-recommendation { white-space: normal; overflow: visible; }
+/* A card that is the Hub's to approve: said in words, no buttons. */
+.card-hub { font-size: 12px; font-weight: 700; padding-top: 3px; }
 .card-help { font-size: 11px; color: var(--cream-quiet); padding-top: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .card-sent { font-size: 12px; font-weight: 600; }
 #board-yours-list li, #board-know-list li { padding: 4px 14px 5px; border-top: 1px solid var(--rule); }

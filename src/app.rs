@@ -843,7 +843,7 @@ impl<B: AgentBackend> App<B> {
                         acted.action.name()
                     ),
                 };
-                self.engine.card_acted(acted.card, acted.title, acted.action.word(), undo);
+                self.engine.card_acted(acted.card, acted.title, acted.action.word(), undo, acted.line);
                 self.say_events();
                 (TypedOutcome::Sent, words)
             }

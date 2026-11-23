@@ -166,17 +166,19 @@ The page's third column shows cards from a file you keep beside your workspace, 
 
 - A card needs `id`, `owner` (who raised it), `kind` (`decide`, `fire`, `do`, `question` or `know`), `tier` (`now` or `next`), `title` and `status`. It may have `recommendation`, `created_at`, `due_at`, and `risk`, `cost`, `blocks`, `why`, `options` and `silo`, which are not shown.
 - **Open** means its status is `queued`, `revise`, `hold` or `more`. A card with any other status, `draft` among them, is not shown.
-- **Decide:** `decide`, `fire` and `question` cards, compact: the title, one line of the recommendation (rest the pointer on it for all of it), what it is and who raised it. Now before next, then newest first.
-- **Only you can do:** every open `do` card, with who raised it, as a plain list.
+- **Decide:** `decide`, `fire` and `question` cards, compact: the title, one line of the recommendation, what it is and who raised it. Now before next, then the longest waiting first. A tap (or Enter) on a card opens it whole; another closes it.
+- **Only you can do:** every open `do` card, with who raised it, as a plain list. Now before next, then the longest waiting first.
 - **Good to know:** `know` cards, as a quiet list, newest first.
-- `created_at` is what "newest" goes by; a card without one comes after those with. `due_at` is shown when set. Both are a day (`2026-12-03`) or a day and time with `Z` or an offset.
+- `created_at` is what "longest waiting" and "newest" go by; a card without one comes after those with. `due_at` is shown when set. Both are a day (`2026-12-03`) or a day and time with `Z` or an offset.
 - An `id` is at most 128 characters: letters, digits, spaces inside it, and `- _ . / : # @ ( ) + ,`. Two cards cannot share one.
 - The file is read again every two seconds. A file that cannot be read is said in one line; a card that cannot be read is left out and named.
 - Only what the Board shows leaves Lillignode: a card's risk, cost, options and the rest stay in the file.
 
 ### Acting on a card from the page (off unless you ask, apart from the other two)
 
-Add `"page_can_act": true` beside `"page": true` and cards get buttons: **Approve**, **Revise** (which asks for a short note) and **Hold** on a card to decide, with one line under them saying what each does; a **Done** tick on something only you can do; **Got it** on something good to know.
+Add `"page_can_act": true` beside `"page": true` and cards get buttons: **Approve**, **Revise** (which asks for a short note) and **Hold** on a card to decide, with one line under them saying what each does; a **Done** tick on something only you can do; **Got it** on something good to know. A card already on hold is offered Approve and Revise, not Hold.
+
+- **Some cards are not approved here.** A `fire`, a card with an `amount`, and a card whose `risk` is marked high (`"high"`, or a risk that starts with the word) say "Approve this one on the Hub" where the buttons would be, and Lillignode refuses an action on one whatever the page sends.
 
 - **Nothing is written to `board.json`.** Each thing you do is one line added to `board-outbox.jsonl` beside it: the card's id, the action, the note, the time, and the title you were shown. The card then shows "Sent, waiting" until `board.json` no longer lists it as open.
 - **Undo for ten seconds.** Undo takes the line back out, if it has not been picked up.
@@ -184,7 +186,9 @@ Add `"page_can_act": true` beside `"page": true` and cards get buttons: **Approv
 - **You act on what you saw.** If the card with that id says something else by the time your press arrives, it is refused and you are told to read it again. A press in the moment the Board changes under the pointer is not taken.
 - **Who can act.** Only the page itself, on the same terms as typing: under the word, from `127.0.0.1`, with a token the page is given with its data; a link, a form, or another web site cannot. As with typing, the address is new each time Lillignode starts while this is on.
 - **Picking lines up.** Whatever reads the outbox takes the whole file, by renaming it, and reads that; it never edits the outbox in place. Undo does the same, so a line is never in two places.
-- **What the outbox is not: proof.** Any program running as you, an agent among them, can write a line to that file itself, and a line written that way looks like yours. Whatever picks lines up must not treat the file alone as your word. Keep the folder to yourself, as for the workspace.
+- **Lillignode keeps its own record.** It remembers every line it wrote to the outbox while it runs, and whatever picks the outbox up asks Lillignode which lines are yours. The file alone is never taken as your word: any program running as you, an agent among them, can write a line to it.
+- **An agent running as you can do what you can do on this machine.** That includes reading the page's address, writing to the outbox, and anything else your account can do. The page keeps out other web sites and other people; it cannot keep out your own agents. Give an agent only the work you would do yourself.
+- **The outbox and the record of what waits are yours alone.** Lillignode makes both so that no other account on the machine can read or write them, on Windows as elsewhere, and refuses to act through either if someone else could.
 - **Not yet checked by a person.** Checked by script and in a browser with no window. Nothing picks the outbox up yet.
 
 ## Settings

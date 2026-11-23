@@ -12,6 +12,7 @@ pub mod kind;
 pub mod local;
 pub mod look;
 pub mod page;
+pub mod private;
 pub mod snapshot;
 pub mod state;
 pub mod status;

@@ -56,6 +56,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::board;
+use crate::private;
 use crate::snapshot::{AgentCopy, Published, Read, Reader};
 use crate::status::AgentStatus;
 use crate::terminal::{Run, ScreenCopy, Tint};
@@ -202,169 +203,11 @@ fn is_a_word(text: &str) -> bool {
 /// could read is no longer one only this user knows.
 fn read_word(folder: &Path) -> Option<String> {
     let path = folder.join(WORD_FILE);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if std::fs::metadata(&path).ok()?.permissions().mode() & 0o077 != 0 {
-            return None;
-        }
-    }
-    #[cfg(windows)]
-    if !only_this_users(&path) {
+    if !private::is_private(&path) {
         return None;
     }
     let text = std::fs::read_to_string(path).ok()?;
     Some(text.trim().to_string()).filter(|word| is_a_word(word))
-}
-
-/// Put `word` in `path`, a file only this user can read, by way of
-/// `folder`: at no moment is there a file with a letter of it in it that
-/// anyone else could open.
-#[cfg(unix)]
-fn write_private(folder: &Path, path: &Path, word: &str) -> std::io::Result<()> {
-    use std::os::unix::fs::OpenOptionsExt;
-    let new = folder.join(format!("{WORD_FILE}.new"));
-    match std::fs::remove_file(&new) {
-        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
-        _ => {}
-    }
-    let written = (|| {
-        let mut file = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&new)?;
-        file.write_all(format!("{word}\n").as_bytes())?;
-        file.sync_all()?;
-        drop(file);
-        std::fs::rename(&new, path)
-    })();
-    if written.is_err() {
-        let _ = std::fs::remove_file(&new);
-    }
-    written
-}
-
-/// On Windows a new file is as open as its folder until it is told
-/// otherwise, and a program that opened it in that moment keeps what it
-/// opened. So the file is made inside a folder that is first made this
-/// user's alone: it is private from its first moment. It is given its own
-/// list of who may use it before it is moved out.
-#[cfg(windows)]
-fn write_private(folder: &Path, path: &Path, word: &str) -> std::io::Result<()> {
-    let staging = folder.join(format!("{WORD_FILE}.new"));
-    let _ = std::fs::remove_dir_all(&staging);
-    let _ = std::fs::remove_file(&staging);
-    let written = (|| {
-        std::fs::create_dir(&staging)?;
-        only_this_user(&staging, true)?;
-        if !only_this_users(&staging) {
-            return Err(std::io::Error::other(format!(
-                "its folder could not be made this user's alone: Windows lists {}",
-                who_may_use(&staging).unwrap_or_else(|| "nothing readable".into())
-            )));
-        }
-        let inside = staging.join(WORD_FILE);
-        let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&inside)?;
-        file.write_all(format!("{word}\n").as_bytes())?;
-        file.sync_all()?;
-        drop(file);
-        only_this_user(&inside, false)?;
-        if !only_this_users(&inside) {
-            return Err(std::io::Error::other(format!(
-                "the file could not be made this user's alone: Windows lists {}",
-                who_may_use(&inside).unwrap_or_else(|| "nothing readable".into())
-            )));
-        }
-        std::fs::rename(&inside, path)
-    })();
-    let _ = std::fs::remove_dir_all(&staging);
-    written
-}
-
-/// Windows: one of the system's own tools, named whole so that nothing
-/// else of that name on PATH is run. What it printed, if it succeeded.
-#[cfg(windows)]
-fn system_tool(program: &str, args: &[std::ffi::OsString]) -> std::io::Result<String> {
-    use std::process::{Command, Stdio};
-    let system = std::env::var_os("SystemRoot").map_or_else(|| PathBuf::from(r"C:\Windows"), PathBuf::from);
-    let out = Command::new(system.join("System32").join(program)).args(args).stdin(Stdio::null()).output()?;
-    if !out.status.success() {
-        return Err(std::io::Error::other(format!("{program} could not do it")));
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
-}
-
-/// Windows: the id the system knows this user by, asked once.
-#[cfg(windows)]
-fn this_user() -> std::io::Result<&'static str> {
-    static ID: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    let id = ID.get_or_init(|| {
-        // "name","S-1-5-21-..."
-        let who =
-            system_tool("whoami.exe", &["/user".into(), "/fo".into(), "csv".into(), "/nh".into()]).ok()?;
-        let id = who.trim().rsplit(',').next().unwrap_or("").trim_matches('"').to_string();
-        (id.starts_with("S-1-") && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')).then_some(id)
-    });
-    id.as_deref().ok_or_else(|| std::io::Error::other("whoami did not say who this user is"))
-}
-
-/// Windows: take away what the folder above gave everyone else, and give
-/// this to this user alone. `hands_down`: for a folder, what is made in it
-/// afterwards is this user's alone too.
-#[cfg(windows)]
-fn only_this_user(path: &Path, hands_down: bool) -> std::io::Result<()> {
-    let id = this_user()?;
-    let grant = if hands_down { format!("*{id}:(OI)(CI)F") } else { format!("*{id}:F") };
-    system_tool("icacls.exe", &[path.into(), "/inheritance:r".into(), "/grant:r".into(), grant.into()])?;
-    Ok(())
-}
-
-/// Windows: the list of who may use `path`, as the system writes it out
-/// in its own plain form, the same in every language: for a file that is
-/// one user's alone, `P(A;;FA;;;S-1-5-21-…)`. None if it could not be read.
-#[cfg(windows)]
-fn who_may_use(path: &Path) -> Option<String> {
-    static NEXT: AtomicUsize = AtomicUsize::new(0);
-    let list = std::env::temp_dir().join(format!(
-        "lillignode-who-{}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
-    let saved = system_tool("icacls.exe", &[path.into(), "/save".into(), list.clone().into()]);
-    let bytes = std::fs::read(&list).unwrap_or_default();
-    let _ = std::fs::remove_file(&list);
-    saved.ok()?;
-    let units: Vec<u16> = bytes.as_chunks::<2>().0.iter().map(|pair| u16::from_le_bytes(*pair)).collect();
-    let text = String::from_utf16_lossy(&units);
-    // The file's name, then on the next line "D:" and the list. A part
-    // that begins "S:" may follow: it is about records kept, not about who
-    // may use the file.
-    let line = text.lines().find(|line| line.starts_with("D:"))?;
-    let list = line["D:".len()..].split("S:").next().unwrap_or("");
-    Some(list.trim_end_matches('\u{0}').trim().to_string())
-}
-
-/// Windows: true if `path` takes nothing from the folder above and the
-/// list of who may use it names nobody but this user, the system itself
-/// and the machine's administrators. Those two can read any file whatever
-/// its list says, so a list without them would keep out nobody more.
-/// Anything else, or not being able to tell, is false.
-#[cfg(windows)]
-fn only_this_users(path: &Path) -> bool {
-    let (Ok(id), Some(list)) = (this_user(), who_may_use(path)) else { return false };
-    // "P…" takes nothing from above. Then one "(A;…;…;;;who)" for each
-    // entry: "A" allows, and the last part is whom. The system writes
-    // itself as "SY", the administrators as "BA", and the machine's first
-    // account, whose id ends in 500, as "LA".
-    let Some((flags, entries)) = list.split_once('(') else { return false };
-    let mine = |who: &str| who == id || (who == "LA" && id.ends_with("-500"));
-    let mut this_user_is_named = false;
-    for entry in entries.trim_end_matches(')').split(")(") {
-        let parts: Vec<&str> = entry.split(';').collect();
-        let (Some(&"A"), Some(who)) = (parts.first(), parts.last()) else { return false };
-        this_user_is_named |= mine(who);
-        if !mine(who) && !["SY", "BA"].contains(who) {
-            return false;
-        }
-    }
-    flags.starts_with('P') && this_user_is_named
 }
 
 /// Keep `word` in `folder` for the next start, in a file only this user
@@ -373,7 +216,8 @@ fn only_this_users(path: &Path) -> bool {
 /// start. Returns why it was not kept.
 fn keep_word(folder: &Path, word: &str) -> Result<(), String> {
     let path = folder.join(WORD_FILE);
-    let kept = std::fs::create_dir_all(folder).and_then(|()| write_private(folder, &path, word));
+    let text = format!("{word}\n");
+    let kept = std::fs::create_dir_all(folder).and_then(|()| private::write_whole(folder, WORD_FILE, &text));
     kept.map_err(|e| match std::fs::remove_file(&path) {
         Err(gone) if gone.kind() != std::io::ErrorKind::NotFound => {
             format!("{e}; and {} could not be removed, so delete it yourself", path.display())
@@ -1563,12 +1407,15 @@ mod tests {
         assert!(shown["decide"][0]["sent"].is_null(), "{shown}");
         assert_eq!(shown["decide"].as_array().unwrap().len(), 4, "{shown}");
         // A card acted on says so, with what and when.
-        let c2 = board::read(Some(&folder)).decide.into_iter().find(|c| c.id == "c2").unwrap();
-        let seen = board::Seen { title: c2.title, recommendation: c2.recommendation };
-        board::act(Some(&folder), "c2", "approve", "", &seen, SystemTime::now()).unwrap();
+        let c1 = board::read(Some(&folder)).decide.into_iter().find(|c| c.id == "c1").unwrap();
+        let seen = board::Seen { title: c1.title, recommendation: c1.recommendation };
+        board::act(Some(&folder), "c1", "approve", "", &seen, SystemTime::now()).unwrap();
+        let acted = board()["decide"].as_array().unwrap().iter().find(|c| c["id"] == "c1").cloned().unwrap();
+        assert_eq!(acted["sent"]["action"], "approve", "{acted}");
+        assert!(acted["sent"]["at"].is_u64());
+        // The fire is the Hub's: the page is told, and offered nothing.
         let fire = board()["decide"].as_array().unwrap().iter().find(|c| c["id"] == "c2").cloned().unwrap();
-        assert_eq!(fire["sent"]["action"], "approve", "{fire}");
-        assert!(fire["sent"]["at"].is_u64());
+        assert_eq!((fire["hub_only"].clone(), fire["actions"].clone()), (json!(true), json!([])), "{fire}");
         assert_eq!(shown["yours"].as_array().unwrap().len(), 2, "{shown}");
         assert_eq!(shown["know"].as_array().unwrap().len(), 2, "{shown}");
         // Which cards were acted on cannot be read: the page is told why,
@@ -1923,7 +1770,7 @@ mod tests {
         let folder = scratch("kept");
         let (first, served) = served_in(&folder);
         #[cfg(windows)]
-        assert_eq!(served.word_not_kept, None, "the folder's own list: {:?}", who_may_use(&folder));
+        assert_eq!(served.word_not_kept, None, "the folder's own list: {:?}", private::who_may_use(&folder));
         assert_eq!(served.word_not_kept, None);
         let word = word_now(&served.word);
         assert_eq!(std::fs::read_to_string(folder.join(WORD_FILE)).unwrap().trim(), word);
@@ -1939,16 +1786,16 @@ mod tests {
             // Nothing handed down from the folder, and nobody named but
             // this user (and, on some machines, the system and its
             // administrators, who can read any file).
-            let list = who_may_use(&folder.join(WORD_FILE));
-            assert!(only_this_users(&folder.join(WORD_FILE)), "{list:?}");
+            let list = private::who_may_use(&folder.join(WORD_FILE));
+            assert!(private::only_this_users(&folder.join(WORD_FILE)), "{list:?}");
             assert!(list.as_deref().is_some_and(|list| !list.contains("ID;")), "{list:?}");
             // A file that everyone on the machine may read is not: the
             // check can say no.
             let open = folder.join("open-to-all");
             std::fs::write(&open, "x").unwrap();
             let everyone = std::ffi::OsString::from("*S-1-1-0:R");
-            system_tool("icacls.exe", &[open.clone().into(), "/grant".into(), everyone]).unwrap();
-            assert!(!only_this_users(&open), "{:?}", who_may_use(&open));
+            private::system_tool("icacls.exe", &[open.clone().into(), "/grant".into(), everyone]).unwrap();
+            assert!(!private::only_this_users(&open), "{:?}", private::who_may_use(&open));
         }
         // Lillignode closes and is started again: the same address, so a
         // bookmark still works and an open page finds it again.
@@ -1993,12 +1840,12 @@ mod tests {
             let open = "abcdefghijkmnpqr";
             std::fs::write(&path, open).unwrap();
             let everyone = std::ffi::OsString::from("*S-1-1-0:R");
-            system_tool("icacls.exe", &[path.clone().into(), "/grant".into(), everyone]).unwrap();
-            assert!(!only_this_users(&path));
+            private::system_tool("icacls.exe", &[path.clone().into(), "/grant".into(), everyone]).unwrap();
+            assert!(!private::only_this_users(&path));
             let (word, not_kept) = kept_word(Some(&folder));
             assert_ne!(word, open, "a word others could read is no longer a secret");
             assert_eq!(not_kept, None);
-            assert!(only_this_users(&path));
+            assert!(private::only_this_users(&path));
         }
         // Nowhere to keep it: a word all the same, and the reason said.
         let (word, not_kept) = kept_word(None);

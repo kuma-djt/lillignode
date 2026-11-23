@@ -33,8 +33,14 @@
 //! A line says which card by id and by the title the reader was shown, so
 //! whatever picks it up can refuse a card that has since become another.
 //! What the outbox is not: proof. Any program running as this user can
-//! write a line to it. Whatever picks lines up must not treat the file
-//! alone as the user's word.
+//! write a line to it. Lillignode keeps its own record of every line it
+//! wrote; whatever picks lines up asks Lillignode
+//! and never trusts the file alone.
+//!
+//! Some cards cannot be acted on from the page at all: a fire, a card with
+//! an amount, and a card whose risk is marked high. They say "Approve this
+//! one on the Hub" where the buttons would be, and an action on one is
+//! refused here.
 //!
 //! This file is a reader: it names nothing of the engine, and is given
 //! only a folder to read and write in (`tests/boundaries.rs`).
@@ -45,6 +51,8 @@ use std::time::{Duration, SystemTime};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+
+use crate::private;
 
 /// The Board's file, in the folder Lillignode saves in.
 pub const FILE: &str = "board.json";
@@ -156,12 +164,17 @@ impl Action {
         }
     }
 
-    /// Whether this can be done to a card of this kind.
-    fn fits(self, kind: Kind) -> bool {
-        match kind {
-            Kind::Decide | Kind::Fire | Kind::Question => {
-                matches!(self, Action::Approve | Action::Revise | Action::Hold)
-            }
+    const ALL: [Action; 5] = [Action::Approve, Action::Revise, Action::Hold, Action::Done, Action::GotIt];
+
+    /// Whether this can be done to this card as it stands: by its kind, and
+    /// not Hold on a card already on hold.
+    fn fits(self, card: &Card) -> bool {
+        match card.kind {
+            Kind::Decide | Kind::Fire | Kind::Question => match self {
+                Action::Approve | Action::Revise => true,
+                Action::Hold => card.status != "hold",
+                Action::Done | Action::GotIt => false,
+            },
             Kind::Do => self == Action::Done,
             Kind::Know => self == Action::GotIt,
         }
@@ -187,15 +200,18 @@ pub struct Card {
     /// It is due on a day, with no time of day: shown as that day
     /// wherever the reader is.
     pub due_whole_day: bool,
+    /// It cannot be acted on from the page: a fire, a card with an amount,
+    /// or one whose risk is marked high.
+    pub hub_only: bool,
 }
 
 /// The Board as the page shows it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Board {
-    /// Decide, fire and question cards: now before next, then newest first.
+    /// Decide, fire and question cards: now before next, then oldest first.
     pub decide: Vec<Card>,
     /// Do cards, each something only the reader can do: now before next,
-    /// then newest first.
+    /// then oldest first.
     pub yours: Vec<Card>,
     /// Know cards, newest first.
     pub know: Vec<Card>,
@@ -228,6 +244,29 @@ struct CardShape {
     created_at: Option<String>,
     #[serde(default)]
     due_at: Option<String>,
+    #[serde(default)]
+    amount: Option<Value>,
+    #[serde(default)]
+    risk: Option<Value>,
+}
+
+/// True for a card that has an amount: any value but none and an empty
+/// text.
+fn has_amount(amount: &Option<Value>) -> bool {
+    match amount {
+        None | Some(Value::Null) => false,
+        Some(Value::String(text)) => !text.trim().is_empty(),
+        Some(_) => true,
+    }
+}
+
+/// True for a risk marked high: the word "high" alone, or first and
+/// followed by something that is not a letter ("high: it breaks two
+/// callers"), in any case.
+fn risk_is_high(risk: &Option<Value>) -> bool {
+    let Some(Value::String(text)) = risk else { return false };
+    let text = text.trim().to_lowercase();
+    text.strip_prefix("high").is_some_and(|rest| !rest.starts_with(|c: char| c.is_alphanumeric()))
 }
 
 /// The most characters a card's id may have.
@@ -462,6 +501,7 @@ pub fn from_text(text: &str) -> Board {
             created_at,
             due_at,
             due_whole_day: shape.due_at.as_deref().is_some_and(|text| !text.trim().contains(['T', 't', ' '])),
+            hub_only: kind == Kind::Fire || has_amount(&shape.amount) || risk_is_high(&shape.risk),
         });
     }
     for card in cards {
@@ -471,17 +511,14 @@ pub fn from_text(text: &str) -> Board {
             Kind::Know => board.know.push(card),
         }
     }
-    // Newest first; a card that does not say when it was made comes after
-    // those that do, in the file's order. Stable, so now-before-next keeps
-    // that order within each tier.
-    let newest_first = |cards: &mut Vec<Card>| {
-        cards.sort_by_key(|card| std::cmp::Reverse(card.created_at.unwrap_or(i64::MIN)));
-    };
-    newest_first(&mut board.decide);
-    newest_first(&mut board.yours);
-    newest_first(&mut board.know);
-    board.decide.sort_by_key(|card| card.tier);
-    board.yours.sort_by_key(|card| card.tier);
+    // What waits on the reader: now before next, then the longest waiting
+    // first. What is only to know: the newest first. Either way a card
+    // that does not say when it was made comes after those that do, in the
+    // file's order: the sorts are stable.
+    let undated_last = |card: &Card| card.created_at.is_none();
+    board.decide.sort_by_key(|card| (card.tier, undated_last(card), card.created_at));
+    board.yours.sort_by_key(|card| (card.tier, undated_last(card), card.created_at));
+    board.know.sort_by_key(|card| (undated_last(card), std::cmp::Reverse(card.created_at)));
     board
 }
 
@@ -521,6 +558,14 @@ impl Board {
                 "due_at": c.due_at.map(|secs| secs * 1000),
                 "due_whole_day": c.due_whole_day,
                 "sent": acted.map(|s| json!({ "action": s.action, "at": s.at_ms })),
+                "hub_only": c.hub_only,
+                // What the page may offer: the actions that fit this card
+                // as it stands, or none for a card that is the Hub's.
+                "actions": if c.hub_only {
+                    Vec::new()
+                } else {
+                    Action::ALL.iter().filter(|a| a.fits(c)).map(|a| a.word()).collect::<Vec<_>>()
+                },
             })
         };
         let list = |cards: &[Card]| cards.iter().map(card).collect::<Vec<Value>>();
@@ -590,45 +635,18 @@ pub fn sent(folder: Option<&Path>) -> Result<Vec<Sent>, String> {
     }
 }
 
-/// A new file that only this user can read and write, where the system
-/// has a way to say so when making it. Refused if anything is already
-/// there: a file put in its place, or a link to another, is not written
-/// through.
-fn new_file(path: &Path) -> std::io::Result<std::fs::File> {
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    options.open(path)
-}
-
-/// Write `text` to `path` whole or not at all: to a new file beside it
-/// first, then moved over it.
-fn write_whole(path: &Path, text: &str) -> std::io::Result<()> {
-    let beside = path.with_extension("new");
-    match std::fs::remove_file(&beside) {
-        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
-        _ => {}
-    }
-    let written = (|| {
-        let mut file = new_file(&beside)?;
-        file.write_all(text.as_bytes())?;
-        file.sync_all()?;
-        drop(file);
-        std::fs::rename(&beside, path)
-    })();
-    if written.is_err() {
-        let _ = std::fs::remove_file(&beside);
-    }
-    written
-}
-
 fn write_sent(folder: &Path, sent: Vec<Sent>) -> std::io::Result<()> {
     let text = serde_json::to_string_pretty(&SentFile { sent }).unwrap_or_default();
-    write_whole(&folder.join(SENT), &text)
+    private::write_whole(folder, SENT, &text)
+}
+
+/// Said when a file of the Board's that should be this user's alone is
+/// not: anyone else who can write it could add an action, or hide one.
+fn not_private(name: &str) -> std::io::Error {
+    std::io::Error::other(format!(
+        "{name} can be read or written by others on this machine, so it is not trusted. Delete it, and \
+         Lillignode makes it again as yours alone"
+    ))
 }
 
 /// Add one line to the end of the outbox. The outbox must be a plain file
@@ -637,18 +655,22 @@ fn write_sent(folder: &Path, sent: Vec<Sent>) -> std::io::Result<()> {
 /// put first, so this line is never joined onto another.
 fn add_line(folder: &Path, line: &str) -> std::io::Result<()> {
     let path = folder.join(OUTBOX);
-    let (mut file, is_new) = match std::fs::symlink_metadata(&path) {
+    match std::fs::symlink_metadata(&path) {
         Ok(found) if !found.is_file() => {
             return Err(std::io::Error::other("the outbox is not a plain file"));
         }
-        Ok(_) => (std::fs::OpenOptions::new().read(true).append(true).open(&path)?, false),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (new_file(&path)?, true),
+        // Made new, empty, as this user's alone, before a line is in it.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => private::write_whole(folder, OUTBOX, "")?,
         Err(e) => return Err(e),
-    };
-    let mut whole = Vec::new();
-    if !is_new {
-        file.read_to_end(&mut whole)?;
+        Ok(_) => {}
     }
+    // Whoever else could write it could add a line of their own.
+    if !private::is_private(&path) {
+        return Err(not_private(OUTBOX));
+    }
+    let mut file = std::fs::OpenOptions::new().read(true).append(true).open(&path)?;
+    let mut whole = Vec::new();
+    file.read_to_end(&mut whole)?;
     let start = if whole.is_empty() || whole.ends_with(b"\n") { "" } else { "\n" };
     file.write_all(format!("{start}{line}\n").as_bytes())?;
     file.sync_all()
@@ -706,6 +728,8 @@ pub struct Acted {
     /// It was done, but something about it is not as it should be: said
     /// with the rest.
     pub warning: Option<String>,
+    /// The outbox line it added, or took out.
+    pub line: String,
 }
 
 const NOWHERE: &str =
@@ -748,7 +772,13 @@ pub fn act(
                 .to_string(),
         );
     }
-    let Some(action) = Action::parse(action).filter(|action| action.fits(found.kind)) else {
+    if found.hub_only {
+        return Err("This card is approved on the Hub, not from this page. Nothing was sent.".to_string());
+    }
+    let Some(action) = Action::parse(action).filter(|action| action.fits(found)) else {
+        if action == "hold" && found.status == "hold" {
+            return Err("That card is already on hold. Nothing was sent.".to_string());
+        }
         return Err("That cannot be done to this card. Nothing was sent.".to_string());
     };
     let note = if action == Action::Revise { clean_note(note) } else { String::new() };
@@ -757,6 +787,11 @@ pub fn act(
     }
     if note.chars().count() > NOTE_MAX {
         return Err(format!("The note is over {NOTE_MAX} characters. Nothing was sent."));
+    }
+    // A record of what waits that others could have written is not
+    // trusted, nor is acting through it.
+    if folder.join(SENT).exists() && !private::is_private(&folder.join(SENT)) {
+        return Err(format!("{}. Nothing was sent.", not_private(SENT)));
     }
     // Which cards were already acted on must be known. Only cards still
     // open are kept as waiting.
@@ -796,7 +831,7 @@ pub fn act(
         let _ = write_sent(folder, before);
         return Err(could_not(e));
     }
-    Ok(Acted { card: card.to_string(), title: found.title.clone(), action, warning: None })
+    Ok(Acted { card: card.to_string(), title: found.title.clone(), action, warning: None, line })
 }
 
 /// Undo what was done to `card`, within `UNDO_FOR` of doing it and only
@@ -840,7 +875,7 @@ pub fn undo(folder: Option<&Path>, card: &str, now: SystemTime) -> Result<Acted,
     let title =
         read(Some(folder)).cards().find(|c| c.id == card).map(|c| c.title.clone()).unwrap_or_default();
     let action = Action::parse(&was.action).unwrap_or(Action::Hold);
-    Ok(Acted { card: card.to_string(), title, action, warning })
+    Ok(Acted { card: card.to_string(), title, action, warning, line: was.line })
 }
 
 #[cfg(test)]
@@ -936,7 +971,7 @@ mod tests {
     }
 
     #[test]
-    fn each_kind_goes_to_its_place_newest_first_and_now_before_next() {
+    fn what_waits_on_the_reader_is_oldest_first_and_what_is_to_know_newest_first() {
         let b = board(vec![
             made(card("d-old", "x", "decide", "now", "queued"), "2026-11-01T08:00:00Z"),
             made(card("d-next", "x", "decide", "next", "queued"), "2026-11-22T08:00:00Z"),
@@ -949,9 +984,12 @@ mod tests {
             made(card("y-old", "x", "do", "now", "queued"), "2026-11-03T00:00:00Z"),
             made(card("y-new", "x", "do", "now", "queued"), "2026-11-04T00:00:00Z"),
         ]);
-        assert_eq!(ids(&b.decide), ["f-new", "q-mid", "d-old", "d-undated", "d-next"]);
-        assert_eq!(ids(&b.know), ["k-new", "k-old", "k-undated"], "newest first, whatever its tier");
-        assert_eq!(ids(&b.yours), ["y-new", "y-old"]);
+        // Decide and only-you-can-do: now before next, then the longest
+        // waiting first; a card that does not say when, after those that do.
+        assert_eq!(ids(&b.decide), ["d-old", "q-mid", "f-new", "d-undated", "d-next"]);
+        assert_eq!(ids(&b.yours), ["y-old", "y-new"]);
+        // Good to know: newest first, whatever its tier.
+        assert_eq!(ids(&b.know), ["k-new", "k-old", "k-undated"]);
         assert_eq!(b.to_json(&[])["know"][1]["created_at"], 1_793_577_600_000_i64, "2 November 2026, in ms");
     }
 
@@ -1195,7 +1233,6 @@ mod tests {
             ("d", "delete"),
             ("d", ""),
             ("d", "Approve"),
-            ("f", "done"),
         ] {
             assert_eq!(no(card, action, "x"), not_this, "{card} {action}");
         }
@@ -1333,6 +1370,119 @@ mod tests {
     }
 
     #[test]
+    fn a_fire_a_card_with_an_amount_and_one_whose_risk_is_high_are_the_hubs() {
+        let with = |id: &str, kind: &str, field: &str, value: Value| {
+            let mut c = card(id, "x", kind, "now", "queued");
+            if !field.is_empty() {
+                c[field] = value;
+            }
+            c
+        };
+        let b = board(vec![
+            with("fire", "fire", "", Value::Null),
+            with("money", "decide", "amount", json!(1200)),
+            with("money-text", "do", "amount", json!("$40 a month")),
+            with("zero", "decide", "amount", json!(0)),
+            with("high", "decide", "risk", json!("High")),
+            with("high-said", "question", "risk", json!("high: two callers break")),
+            with("high-know", "know", "risk", json!("HIGH")),
+            with("no-amount", "decide", "amount", Value::Null),
+            with("empty-amount", "decide", "amount", json!("  ")),
+            with("low", "decide", "risk", json!("low")),
+            with("higher", "decide", "risk", json!("higher than last week")),
+            with("plain", "decide", "", Value::Null),
+        ]);
+        let hub: Vec<&str> = b.cards().filter(|c| c.hub_only).map(|c| c.id.as_str()).collect();
+        let mut hub = hub;
+        hub.sort_unstable();
+        assert_eq!(hub, ["fire", "high", "high-know", "high-said", "money", "money-text", "zero"]);
+        // The page is told, and offered no action for them.
+        let shown = b.to_json(&[]);
+        let of = |id: &str| -> Value {
+            ["decide", "yours", "know"]
+                .iter()
+                .flat_map(|p| shown[*p].as_array().unwrap().clone())
+                .find(|c| c["id"] == id)
+                .unwrap()
+        };
+        assert_eq!((of("fire")["hub_only"].clone(), of("fire")["actions"].clone()), (json!(true), json!([])));
+        assert_eq!(of("plain")["actions"], json!(["approve", "revise", "hold"]));
+        assert_eq!(of("plain")["hub_only"], false);
+        // And an action on one is refused here too, whatever the page sent.
+        let dir = folder(
+            "hub",
+            vec![with("fire", "fire", "", Value::Null), with("money", "do", "amount", json!(5))],
+        );
+        let hub_words = "This card is approved on the Hub, not from this page. Nothing was sent.";
+        for (id, action) in [("fire", "approve"), ("fire", "hold"), ("money", "done")] {
+            assert_eq!(act_seen(&dir, id, action, "", at(0)).unwrap_err(), hub_words, "{id} {action}");
+        }
+        assert!(!dir.join(OUTBOX).exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_card_on_hold_offers_approve_and_revise_and_not_hold() {
+        let b = board(vec![
+            card("held", "x", "decide", "now", "hold"),
+            card("q", "x", "question", "now", "queued"),
+        ]);
+        let shown = b.to_json(&[]);
+        assert_eq!(shown["decide"][0]["actions"], json!(["approve", "revise"]));
+        assert_eq!(shown["decide"][1]["actions"], json!(["approve", "revise", "hold"]));
+        let dir = folder("held", vec![card("held", "x", "decide", "now", "hold")]);
+        assert_eq!(
+            act_seen(&dir, "held", "hold", "", at(0)).unwrap_err(),
+            "That card is already on hold. Nothing was sent."
+        );
+        assert!(!dir.join(OUTBOX).exists());
+        act_seen(&dir, "held", "approve", "", at(1)).unwrap();
+        assert_eq!(outbox(&dir)[0]["action"], "approve");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_outbox_and_the_sent_file_are_made_this_users_alone_and_not_trusted_otherwise() {
+        let dir = folder(
+            "private",
+            vec![card("a", "x", "decide", "now", "queued"), card("b", "x", "decide", "now", "queued")],
+        );
+        act_seen(&dir, "a", "approve", "", at(0)).unwrap();
+        assert!(private::is_private(&dir.join(OUTBOX)), "the outbox is made this user's alone");
+        assert!(private::is_private(&dir.join(SENT)), "so is the record of what waits");
+        // Made by someone else, as open as the folder: refused, and why.
+        let open = |name: &str, text: &str| {
+            let _ = std::fs::remove_file(dir.join(name));
+            std::fs::write(dir.join(name), text).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(dir.join(name), std::fs::Permissions::from_mode(0o666)).unwrap();
+            }
+        };
+        let lines = std::fs::read_to_string(dir.join(OUTBOX)).unwrap();
+        open(OUTBOX, &lines);
+        let said = act_seen(&dir, "b", "approve", "", at(1)).unwrap_err();
+        assert!(
+            said.contains("board-outbox.jsonl can be read or written by others on this machine"),
+            "{said}"
+        );
+        assert!(said.ends_with("Nothing was sent."), "{said}");
+        assert_eq!(std::fs::read_to_string(dir.join(OUTBOX)).unwrap(), lines, "no line was added");
+        std::fs::remove_file(dir.join(OUTBOX)).unwrap();
+        let sent_text = std::fs::read_to_string(dir.join(SENT)).unwrap();
+        open(SENT, &sent_text);
+        let said = act_seen(&dir, "b", "approve", "", at(2)).unwrap_err();
+        assert!(said.starts_with("board-sent.json can be read or written by others"), "{said}");
+        assert!(!dir.join(OUTBOX).exists(), "nothing was written");
+        // Deleted, as the sentence says: made again as this user's alone.
+        std::fs::remove_file(dir.join(SENT)).unwrap();
+        act_seen(&dir, "b", "approve", "", at(3)).unwrap();
+        assert!(private::is_private(&dir.join(OUTBOX)) && private::is_private(&dir.join(SENT)));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn a_card_that_changed_since_it_was_shown_is_not_acted_on() {
         let dir = folder("seen", vec![card("x", "Codex (web)", "decide", "now", "queued")]);
         let seen = Seen { title: "title x".into(), recommendation: Some("do x".into()) };
@@ -1394,7 +1544,7 @@ mod tests {
             vec![card("a", "x", "decide", "now", "queued"), card("b", "x", "decide", "now", "queued")];
         // A write cut short left no line's end: the next line starts its own.
         let dir = folder("outbox-cut", cards.clone());
-        std::fs::write(dir.join(OUTBOX), "{\"card\":\"old\"}").unwrap();
+        private::write_whole(&dir, OUTBOX, "{\"card\":\"old\"}").unwrap();
         act_seen(&dir, "a", "approve", "", at(0)).unwrap();
         let text = std::fs::read_to_string(dir.join(OUTBOX)).unwrap();
         assert_eq!(text.lines().count(), 2, "{text}");
@@ -1404,7 +1554,7 @@ mod tests {
         );
         // Two lines that are the same to the letter: undo takes one.
         let line = text.lines().last().unwrap().to_string();
-        std::fs::write(dir.join(OUTBOX), format!("{line}\n{line}\n")).unwrap();
+        private::write_whole(&dir, OUTBOX, &format!("{line}\n{line}\n")).unwrap();
         undo(Some(&dir), "a", at(1)).unwrap();
         assert_eq!(std::fs::read_to_string(dir.join(OUTBOX)).unwrap(), format!("{line}\n"));
         assert!(!dir.join(format!("{OUTBOX}.undo")).exists(), "the outbox was put back under its own name");

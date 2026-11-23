@@ -86,8 +86,12 @@ impl vt100::Callbacks for Replies {
 
 pub struct Terminal {
     parser: vt100::Parser<Replies>,
-    /// When what is on the screen last changed, by what the agent sent.
+    /// When anything on the screen last changed, by what the agent sent:
+    /// its text, a colour, or the cursor.
     changed_at: Option<std::time::SystemTime>,
+    /// When its text or colours last changed. The cursor moving, or being
+    /// shown and hidden as a blinking cursor is, does not count.
+    text_changed_at: Option<std::time::SystemTime>,
 }
 
 /// A colour of text or of what is behind it, as the agent asked for it.
@@ -158,24 +162,38 @@ impl Terminal {
         Self {
             parser: vt100::Parser::new_with_callbacks(nz(rows), nz(cols), HISTORY_ROWS, replies),
             changed_at: None,
+            text_changed_at: None,
         }
     }
 
-    /// What is on the screen now, cursor and all, as one number: two
-    /// screens that differ give different numbers.
-    fn drawn(&self) -> u64 {
+    /// What is on the screen now, as two numbers: its text and colours,
+    /// and its cursor (where it is, and whether it shows). Two screens that
+    /// differ in one give different numbers for it.
+    fn drawn(&self) -> (u64, (u16, u16, bool)) {
         use std::hash::{Hash, Hasher};
         let screen = self.parser.screen();
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        screen.contents_formatted().hash(&mut hasher);
-        (screen.cursor_position(), screen.hide_cursor()).hash(&mut hasher);
-        hasher.finish()
+        // Each row with its colours, and nothing of the cursor.
+        for row in screen.rows_formatted(0, screen.size().1.get()) {
+            row.hash(&mut hasher);
+        }
+        let (row, col) = screen.cursor_position();
+        (hasher.finish(), (row, col, screen.hide_cursor()))
     }
 
-    /// When what is on the screen last changed because of something the
-    /// agent sent. Output that draws the same screen again, or draws
-    /// nothing (a status report, an answer to a question), does not move
-    /// it. None until the agent has changed the screen at all.
+    /// When the text or colours on the screen last changed because of
+    /// something the agent sent. The cursor moving, or showing and hiding
+    /// as it blinks, does not move it. None until the agent has drawn
+    /// anything.
+    pub fn text_changed_at(&self) -> Option<std::time::SystemTime> {
+        self.text_changed_at
+    }
+
+    /// When anything on the screen last changed because of something the
+    /// agent sent: text, colours or the cursor. Output that draws the same
+    /// screen again, or draws nothing (a status report, an answer to a
+    /// question), does not move it. None until the agent has changed the
+    /// screen at all.
     pub fn screen_changed_at(&self) -> Option<std::time::SystemTime> {
         self.changed_at
     }
@@ -190,9 +208,13 @@ impl Terminal {
     /// As `feed`, at a time the caller gives.
     #[must_use = "replies must be sent to the agent or it may wait forever"]
     pub fn feed_at(&mut self, bytes: &[u8], now: std::time::SystemTime) -> Vec<u8> {
-        let before = self.drawn();
+        let (text_before, cursor_before) = self.drawn();
         self.parser.process(bytes);
-        if self.drawn() != before {
+        let (text, cursor) = self.drawn();
+        if text != text_before {
+            self.text_changed_at = Some(now);
+        }
+        if text != text_before || cursor != cursor_before {
             self.changed_at = Some(now);
         }
         std::mem::take(&mut self.parser.callbacks_mut().pending)
@@ -321,6 +343,33 @@ mod tests {
         t.scroll(1);
         let _ = t.feed_at(b"\x1b]7501;state=idle\x07", at(21));
         assert_eq!(t.screen_changed_at(), Some(at(20)));
+    }
+
+    #[test]
+    fn the_text_has_its_own_time_which_the_cursor_does_not_move() {
+        use std::time::{Duration, SystemTime};
+        let at = |secs: u64| SystemTime::UNIX_EPOCH + Duration::from_secs(secs);
+        let mut t = Terminal::new(5, 20);
+        assert_eq!((t.text_changed_at(), t.screen_changed_at()), (None, None));
+        let _ = t.feed_at(b"working", at(1));
+        assert_eq!((t.text_changed_at(), t.screen_changed_at()), (Some(at(1)), Some(at(1))));
+        // The cursor moving, and blinking (hidden, shown, hidden): only the
+        // time anything changed moves.
+        for (n, bytes) in [&b"\x1b[3;5H"[..], b"\x1b[?25l", b"\x1b[?25h", b"\x1b[?25l"].iter().enumerate() {
+            let _ = t.feed_at(bytes, at(10 + n as u64));
+            assert_eq!(t.text_changed_at(), Some(at(1)), "{n}: the text did not change");
+            assert_eq!(t.screen_changed_at(), Some(at(10 + n as u64)), "{n}");
+        }
+        // A colour alone is a change of the text's time: the same letter,
+        // now red.
+        let _ = t.feed_at(b"\x1b[1;1H\x1b[31mw\x1b[0m", at(20));
+        assert_eq!(t.text_changed_at(), Some(at(20)));
+        // A letter.
+        let _ = t.feed_at(b"\x1b[1;8H!", at(21));
+        assert_eq!((t.text_changed_at(), t.screen_changed_at()), (Some(at(21)), Some(at(21))));
+        // The same drawn again, cursor where it was: neither.
+        let _ = t.feed_at(b"\x1b[1;8H!", at(22));
+        assert_eq!((t.text_changed_at(), t.screen_changed_at()), (Some(at(21)), Some(at(21))));
     }
 
     fn line_text(copy: &ScreenCopy, row: usize) -> String {

@@ -49,8 +49,8 @@
     "This page can act on your Board: what you press on a card is passed to Lillignode, which adds it to " +
     "the Board's outbox.";
   const CAN_BOTH =
-    "This page can type to your agents and act on your Board: what you send goes to the agent named under " +
-    "the terminal, and what you press on a card goes to the Board's outbox.";
+    "This page can type to your agents and act on your Board. Text goes to the agent named under the " +
+    "terminal; what you press on a card goes to the Board's outbox.";
   const NO_ANSWER =
     "No answer from Lillignode, so it is not known whether this was sent. Look at the agent's terminal " +
     "before sending it again.";
@@ -512,7 +512,10 @@
   const KIND_WORDS = { decide: "Decide", fire: "Fire", question: "Question" };
   const ACTION_WORDS = { approve: "Approve", revise: "Revise", hold: "Hold", done: "Done", "got-it": "Got it" };
   const STATUS_WORDS = { revise: "being revised", hold: "on hold", more: "more was asked for" };
-  const HELP = "Approve: go ahead. Revise: send it back with your note. Hold: not now.";
+  const HELP_WORDS = { approve: "Approve: go ahead.", revise: "Revise: send it back with your note.", hold: "Hold: not now." };
+  const HUB = "Approve this one on the Hub";
+  // Cards opened whole by a tap, by id.
+  const opened = new Set();
   let board = null;        // the Board last heard
   let boardDrawn = "";     // what the Board on the page was drawn from
   let revising = null;     // the card a note is being written for
@@ -654,22 +657,59 @@
         drawBoard();
       }));
       li.append(row);
+    } else if (card.hub_only) {
+      // Not from here, whatever the settings: Lillignode refuses it too.
+      li.append(text("p", "card-hub", HUB));
     } else if (canAct()) {
+      // The buttons this card allows as it stands: a card on hold is not
+      // offered Hold. Lillignode says which, and refuses any other.
+      const allowed = (card.actions || []).filter((a) => Object.hasOwn(HELP_WORDS, a));
       const row = text("div", "card-actions", "");
-      row.append(
-        button("Approve", "main", () => act(card, "approve", "", false)),
-        button("Revise", "", () => {
-          revising = card.id;
-          noteDraft = "";
-          drawBoard();
-          const note = document.querySelector("#board input.note");
-          if (note) note.focus();
-        }),
-        button("Hold", "", () => act(card, "hold", "", false)),
-      );
-      li.append(row, text("p", "card-help", HELP));
+      for (const a of allowed) {
+        if (a === "approve") row.append(button("Approve", "main", () => act(card, "approve", "", false)));
+        if (a === "revise") {
+          row.append(
+            button("Revise", "", () => {
+              revising = card.id;
+              noteDraft = "";
+              drawBoard();
+              const note = document.querySelector("#board input.note");
+              if (note) note.focus();
+            }),
+          );
+        }
+        if (a === "hold") row.append(button("Hold", "", () => act(card, "hold", "", false)));
+      }
+      li.append(row, text("p", "card-help", allowed.map((a) => HELP_WORDS[a]).join(" ")));
     }
+    openable(li, card);
     return li;
+  }
+
+  // A tap on a card, not on one of its buttons or its note, opens it whole:
+  // its title and recommendation, not cut. Another tap closes it. It can be
+  // reached and opened from the keyboard too.
+  function openable(li, card) {
+    li.tabIndex = 0;
+    li.setAttribute("aria-expanded", opened.has(card.id) ? "true" : "false");
+    if (opened.has(card.id)) li.classList.add("opened");
+    const toggle = () => {
+      if (opened.has(card.id)) opened.delete(card.id);
+      else opened.add(card.id);
+      drawBoard();
+      const again = [...document.querySelectorAll("#board li")].find((x) => x.dataset.id === card.id);
+      if (again) again.focus();
+    };
+    li.addEventListener("click", (e) => {
+      if (e.target.closest("button, input")) return;
+      toggle();
+    });
+    li.addEventListener("keydown", (e) => {
+      if (e.target === li && (e.key === "Enter" || e.key === " ")) {
+        e.preventDefault();
+        toggle();
+      }
+    });
   }
 
   // A row of one of the two lists: its title, who raised it, and the one
@@ -682,8 +722,10 @@
     const foot = text("div", "card-foot", "");
     foot.append(text("span", "card-meta", metaWords(card, false) + (card.tier === "next" && action === "done" ? " · next" : "")));
     if (card.sent) foot.append(sentLine(card));
-    else if (canAct()) foot.append(button(words, "", () => act(card, action, "", false)));
+    else if (card.hub_only) foot.append(text("span", "card-hub", HUB));
+    else if (canAct() && (card.actions || []).includes(action)) foot.append(button(words, "", () => act(card, action, "", false)));
     li.append(foot);
+    openable(li, card);
     return li;
   }
 
@@ -692,7 +734,7 @@
     // Drawn again only when what it would show has changed, so text a
     // reader has selected, or a note being written, is left alone.
     const now = [...board.decide, ...board.yours, ...board.know].filter(undoable).map((c) => c.id);
-    const from = JSON.stringify([board, canAct(), now, revising, actingNow, lostAt !== null, movedOn]);
+    const from = JSON.stringify([board, canAct(), now, revising, actingNow, lostAt !== null, movedOn, [...opened]]);
     if (from === boardDrawn) return;
     boardDrawn = from;
     // When the cards themselves last changed: what each says and where it

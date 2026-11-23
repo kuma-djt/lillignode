@@ -43,7 +43,7 @@
 //! With `--serve --type` the settings also let the page type, and a third
 //! agent, `plain`, is started first: a stand-in that says what it was sent
 //! and does not take a paste as one block. With `--serve --act` the
-//! settings let the page act on the Board's cards.
+//! settings let the page act on the Board's cards; with both, both.
 //!
 //! The page's address holds a word. The check reads it from Lillignode's
 //! screen, as a person would.
@@ -270,7 +270,8 @@ fn agent<'a>(state: &'a serde_json::Value, name: &str) -> &'a serde_json::Value 
 
 fn serve(sb: &Sandbox, port: u16, can_type: bool, can_act: bool) {
     let (mut s, page) = if can_act {
-        settings(sb, &format!("{{\"page\": true, \"page_port\": {port}, \"page_can_act\": true}}"));
+        let and_type = if can_type { ", \"page_can_type\": true" } else { "" };
+        settings(sb, &format!("{{\"page\": true, \"page_port\": {port}, \"page_can_act\": true{and_type}}}"));
         let mut s = Session::start(sb);
         let page = page_on_screen(&mut s, port);
         s.new_agent("reporter");
@@ -972,7 +973,35 @@ Host: localhost:{port}
     check("and the card no longer waits", card_on(&board_shown(&page), "c1")["sent"].is_null(), "");
     s.expect("Lillignode's window says it was undone", "Approve was undone for");
 
-    let (outcome, words) = act(&page, &token, "c2", "revise", "Find out why first.", false);
+    // The fire is the Hub's to approve: the page is offered nothing for it,
+    // and an action on it is refused.
+    let fire = card_on(&board_shown(&page), "c2");
+    check(
+        "a fire is offered no action from the page",
+        fire["hub_only"] == true && fire["actions"] == serde_json::json!([]),
+        &fire.to_string(),
+    );
+    let (outcome, words) = act(&page, &token, "c2", "approve", "", false);
+    check(
+        "and an action on it is refused, and says where to go",
+        outcome == "refused"
+            && words == "This card is approved on the Hub, not from this page. Nothing was sent.",
+        &words,
+    );
+    // A card on hold is offered Approve and Revise, and Hold is refused.
+    let held = card_on(&board_shown(&page), "c4");
+    check(
+        "a card on hold is offered Approve and Revise, not Hold",
+        held["actions"] == serde_json::json!(["approve", "revise"]),
+        &held.to_string(),
+    );
+    let (outcome, words) = act(&page, &token, "c4", "hold", "", false);
+    check(
+        "and Hold on it is refused",
+        outcome == "refused" && words == "That card is already on hold. Nothing was sent.",
+        &words,
+    );
+    let (outcome, words) = act(&page, &token, "c4", "revise", "Find out why first.", false);
     check(
         "Revise carries its note",
         outcome == "sent" && outbox().last().is_some_and(|l| l["note"] == "Find out why first."),
@@ -998,7 +1027,7 @@ Host: localhost:{port}
     );
     check(
         "three lines wait in the outbox, in order",
-        outbox().iter().map(|l| l["card"].as_str().unwrap_or("")).collect::<Vec<_>>() == ["c2", "c5", "c7"],
+        outbox().iter().map(|l| l["card"].as_str().unwrap_or("")).collect::<Vec<_>>() == ["c4", "c5", "c7"],
         &format!("{:?}", outbox()),
     );
 
@@ -1117,7 +1146,7 @@ Host: localhost:{port}
         card_on(&board_shown(&page), "c5").is_null(),
         "",
     );
-    let (outcome, words) = act(&page, &token, "c2", "revise", "", true);
+    let (outcome, words) = act(&page, &token, "c4", "revise", "", true);
     check(
         "what was picked up cannot be undone, and says why",
         outcome == "refused" && words == "It has already been picked up from the outbox, so it cannot be undone. Nothing was changed.",

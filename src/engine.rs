@@ -357,6 +357,9 @@ pub struct Engine<B: AgentBackend> {
     cost_said: bool,
     /// The last save after a change failed.
     save_failing: bool,
+    /// Every line this run added to the Board's outbox and has not taken
+    /// back: its own record, which the file cannot stand in for.
+    outbox_written: Vec<String>,
 }
 
 impl<B: AgentBackend> Engine<B> {
@@ -381,6 +384,7 @@ impl<B: AgentBackend> Engine<B> {
             status_said: Vec::new(),
             cost_said: false,
             save_failing: false,
+            outbox_written: Vec::new(),
         }
     }
 
@@ -488,6 +492,7 @@ impl<B: AgentBackend> Engine<B> {
                 needs_you_since: e.track.needs_you_since().filter(|_| e.is_running()),
                 reported_at: e.track.reported_at().filter(|_| e.is_running()),
                 screen_changed_at: e.term.screen_changed_at(),
+                text_changed_at: e.term.text_changed_at(),
                 cost: e.cost(),
                 over_cost_warning: self.ws.over_cost_warning(e),
                 start_again_cannot_help: e.start_again_cannot_help(),
@@ -815,8 +820,34 @@ impl<B: AgentBackend> Engine<B> {
     /// Something was done to a card of the Board from the page, or undone:
     /// it is said, as an event. The engine keeps nothing of the Board; the
     /// outbox is written by whoever tells it this.
-    pub fn card_acted(&mut self, card: String, title: String, action: &'static str, undone: bool) {
+    ///
+    /// `line` is the outbox line written, or taken back. The engine keeps
+    /// its own record of each: what it says the user did is what is in
+    /// that record, never what is in the file.
+    pub fn card_acted(
+        &mut self,
+        card: String,
+        title: String,
+        action: &'static str,
+        undone: bool,
+        line: String,
+    ) {
+        if undone {
+            if let Some(at) = self.outbox_written.iter().rposition(|l| *l == line) {
+                self.outbox_written.remove(at);
+            }
+        } else {
+            self.outbox_written.push(line);
+        }
         self.say(Event::CardActed { card, title, action, undone });
+    }
+
+    /// Whether this line of the Board's outbox is one Lillignode wrote in
+    /// this run, on the user's press on the page, and has not taken back.
+    /// Whatever picks the outbox up asks this, and takes no line it says no
+    /// to: any program running as the user can write to the file.
+    pub fn vouches_for(&self, line: &str) -> bool {
+        self.outbox_written.iter().any(|l| l == line)
     }
 
     /// Tells this run of Lillignode from any other: agents' keys and event
@@ -1383,9 +1414,16 @@ mod tests {
     #[test]
     fn what_is_done_to_a_card_is_an_event_naming_the_card_each_time() {
         let mut e = engine(&[]);
-        e.card_acted("c1".into(), "Keep it?".into(), "approve", false);
-        e.card_acted("c1".into(), "Keep it?".into(), "approve", true);
-        e.card_acted("c2".into(), "Renew it".into(), "done", false);
+        let (one, two) = (r#"{"card":"c1"}"#.to_string(), r#"{"card":"c2"}"#.to_string());
+        e.card_acted("c1".into(), "Keep it?".into(), "approve", false, one.clone());
+        assert!(e.vouches_for(&one), "its own line, while it stands");
+        e.card_acted("c1".into(), "Keep it?".into(), "approve", true, one.clone());
+        assert!(!e.vouches_for(&one), "taken back: no longer");
+        e.card_acted("c2".into(), "Renew it".into(), "done", false, two.clone());
+        assert!(e.vouches_for(&two));
+        // A line it did not write, however like its own, it does not vouch for.
+        assert!(!e.vouches_for(r#"{"card":"c3"}"#));
+        assert!(!e.vouches_for(&format!("{two} ")));
         let said: Vec<EventCopy> = e.events_after(0).events.iter().map(|(n, ev)| ev.plain(*n)).collect();
         let plain: Vec<(&str, Option<&str>)> = said.iter().map(|p| (p.what, p.label.as_deref())).collect();
         assert_eq!(
@@ -1417,6 +1455,14 @@ mod tests {
         // One more character: it has.
         e.ws.handle(AgentEvent::Output(AgentId(1), b"!".to_vec()));
         assert!(changed(&e, a).unwrap() > first);
+        // The text's own time: moved by the letter, not by the cursor.
+        let text = |e: &Engine<Fake>| e.copy(SystemTime::now()).agent(a).unwrap().text_changed_at;
+        let lettered = text(&e).expect("the letter changed the text");
+        assert_eq!(Some(lettered), changed(&e, a));
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        e.ws.handle(AgentEvent::Output(AgentId(1), b"\x1b[3;1H\x1b[?25l".to_vec()));
+        assert_eq!(text(&e), Some(lettered), "the cursor moving and hiding is not a change of text");
+        assert!(changed(&e, a).unwrap() > lettered, "but it is a change of the screen");
         // Kept after its program ends: it is when its last screen was drawn.
         let last = changed(&e, a);
         e.ws.handle(AgentEvent::Exited(AgentId(1), crate::agent::Exit { code: 0 }));
