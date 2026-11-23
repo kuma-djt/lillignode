@@ -1333,6 +1333,11 @@ impl<B: AgentBackend> App<B> {
         }
     }
 
+    /// The size of the window Lillignode last acted on.
+    pub fn window(&self) -> Rect {
+        self.window
+    }
+
     /// Tell Lillignode the size of its window. The engine is told the room
     /// agents have: the whole agent area, or half of it each when two fit
     /// side by side. It decides what size agents are given.

@@ -244,6 +244,16 @@ fn main() -> ExitCode {
     let mut painter = ui::Painter::default();
     while !app.engine.closing() {
         app.clock = started.elapsed().as_secs();
+        // The window's size is asked for, not only heard about. A resize
+        // that arrives in the same moment as keys can go unreported (seen
+        // on Linux and macOS); the screen would then be drawn at the new
+        // size while text was fitted, and agents sized, for the old one.
+        if let Ok(size) = terminal.size() {
+            let now = ratatui::layout::Rect::new(0, 0, size.width, size.height);
+            if now != app.window() {
+                app.set_window(now);
+            }
+        }
         // Nothing is written when the screen would be the same: see `Painter`.
         if let Err(e) = painter.paint(&mut terminal, |frame| {
             app.too_small = ui::areas(frame.area()).is_none();
