@@ -337,7 +337,7 @@ The last three drive the real program against a stand-in agent: the first takes 
 
 ## How it is built
 
-Most of Lillignode's code is written by an AI coding agent, Claude Code, directed by a person. Every change passes the checks above and independent reviews, and each release is checked by hand by a person against real Claude Code. What has not been checked yet is listed under [Known limits in 0.2](#known-limits-in-02).
+Most of Lillignode's code is written by an AI coding agent, Claude Code, directed by a person. Every change passes the checks above and independent reviews. A release that adds features is checked by hand by a person against real agents; a patch release says in its notes what was checked and how. What has not been checked yet is listed under [Known limits in 0.2](#known-limits-in-02).
 
 ## Licence
 
