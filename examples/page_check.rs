@@ -1195,7 +1195,9 @@ fn adapter_section(sb: &Sandbox, port: u16) {
     let named = serde_json::json!({ "page": true, "page_port": port, "page_can_act": true,
         "board_adapter": { "command": adapter, "args": [cards, log] } });
     settings(sb, &named.to_string());
-    let mut s = Session::start(sb);
+    // A variable Lillignode has and the settings do not name: it must not
+    // reach the adapter.
+    let mut s = Session::start_with(sb, &sb.state, &[("ADAPTER_STANDIN_PROBE", "1")]);
     let page = page_on_screen(&mut s, port);
     s.raw(CTRL_Q);
     s.keys(b"s");
@@ -1207,7 +1209,7 @@ fn adapter_section(sb: &Sandbox, port: u16) {
     let shown = board_until(&page, 10, |b| !card_on(b, "c1").is_null());
     check("the cards come from the adapter", !card_on(&shown, "c1").is_null(), &shown.to_string());
     check(
-        "named as it named itself",
+        "named as it named itself, and a variable the settings do not name did not reach it",
         shown["adapter"]["name"] == "the stand-in Hub",
         &shown["adapter"].to_string(),
     );

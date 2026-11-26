@@ -10,7 +10,8 @@
 //! which it refuses. It sends the cards again every second, so a change to
 //! the file reaches the page as a change at the service would.
 //!
-//! `ADAPTER_STANDIN_SILENT=1` makes it say nothing at all.
+//! `ADAPTER_STANDIN_SILENT=1` makes it say nothing at all. If it is given
+//! `ADAPTER_STANDIN_PROBE`, the name it gives itself says so.
 
 use std::io::{BufRead, Write};
 use std::time::Duration;
@@ -30,7 +31,14 @@ fn main() {
         let _ = writeln!(out, "{line}");
         let _ = out.flush();
     };
-    say(serde_json::json!({ "hello": 1, "name": "the stand-in Hub" }).to_string());
+    // A check sets ADAPTER_STANDIN_PROBE where Lillignode starts and does
+    // not name it: if it ever reaches this program, its name says so.
+    let name = if std::env::var_os("ADAPTER_STANDIN_PROBE").is_some() {
+        "the stand-in Hub (it was given ADAPTER_STANDIN_PROBE)"
+    } else {
+        "the stand-in Hub"
+    };
+    say(serde_json::json!({ "hello": 1, "name": name }).to_string());
     say(serde_json::json!({ "reporting": [
         { "agent": "ops-bot", "line": "Deployed the docs site.", "at": "2026-11-26T20:00:00Z" },
         { "agent": "night-runner", "line": "Waiting for the nightly build.", "at": "2026-11-26T19:30:00Z" },
