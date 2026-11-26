@@ -156,6 +156,18 @@ pub struct Config {
     /// Let the page act on the Board's cards. Off unless the user asks,
     /// apart from `page` and from `page_can_type`.
     pub page_can_act: bool,
+    /// One outside program to start and talk to over its own pipe for the
+    /// Board, in place of the Board's files. Off unless named.
+    pub board_adapter: Option<BoardAdapter>,
+}
+
+/// The program that keeps the Board: what to run, and its arguments.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BoardAdapter {
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
 }
 
 /// How the user pays, which decides whether a dollar figure means anything
@@ -187,6 +199,7 @@ impl Default for Config {
             page_port: DEFAULT_PAGE_PORT,
             page_can_type: false,
             page_can_act: false,
+            board_adapter: None,
         }
     }
 }
@@ -225,6 +238,7 @@ struct File {
     page_port: Option<u32>,
     page_can_type: Option<bool>,
     page_can_act: Option<bool>,
+    board_adapter: Option<BoardAdapter>,
 }
 
 fn parse(text: &str) -> Result<Config, String> {
@@ -283,6 +297,16 @@ fn parse(text: &str) -> Result<Config, String> {
             return Err("add \"page\": true, or take out \"page_can_act\", which needs it".to_string());
         }
         can => can.unwrap_or(false),
+    };
+    config.board_adapter = match file.board_adapter {
+        // The Board is only on the page.
+        Some(_) if !config.page => {
+            return Err("add \"page\": true, or take out \"board_adapter\", which needs it".to_string());
+        }
+        Some(adapter) if adapter.command.trim().is_empty() => {
+            return Err("give \"board_adapter\" a \"command\" to run, or take it out".to_string());
+        }
+        adapter => adapter,
     };
     let Some(specs) = file.menu_keys else { return Ok(config) };
     if specs.is_empty() {
@@ -369,6 +393,18 @@ mod tests {
     fn the_page_is_off_unless_asked_for_and_its_port_must_be_usable() {
         assert!(!Config::default().page);
         assert!(!parse(r#"{"bell": false}"#).unwrap().page);
+        let adapter =
+            parse(r#"{"page": true, "board_adapter": {"command": "python", "args": ["hub.py"]}}"#).unwrap();
+        assert_eq!(
+            adapter.board_adapter,
+            Some(BoardAdapter { command: "python".into(), args: vec!["hub.py".into()] })
+        );
+        assert_eq!(parse(r#"{"page": true}"#).unwrap().board_adapter, None);
+        assert!(parse(r#"{"board_adapter": {"command": "python"}}"#).unwrap_err().contains("\"page\": true"));
+        assert!(parse(r#"{"page": true, "board_adapter": {"command": " "}}"#)
+            .unwrap_err()
+            .contains("command"));
+        assert!(parse(r#"{"page": true, "board_adapter": {"command": "x", "key": "y"}}"#).is_err());
         let on = parse(r#"{"page": true}"#).unwrap();
         assert_eq!((on.page, on.page_port), (true, DEFAULT_PAGE_PORT));
         assert_eq!(parse(r#"{"page": true, "page_port": 8123}"#).unwrap().page_port, 8123);

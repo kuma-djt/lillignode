@@ -759,12 +759,41 @@
     part("board-decide", board.decide, decideCard);
     part("board-yours", board.yours, (card) => listRow(card, "done", "✓ Done"));
     part("board-know", board.know, (card) => listRow(card, "got-it", "Got it"));
+    drawAdapter();
     const under = [board.not_read, board.acting_off].filter(Boolean).join(" ");
     boardNotRead.hidden = under === "";
     boardNotRead.textContent = under;
     if (focused) {
       const note = document.querySelector("#board input.note");
       if (note) note.focus();
+    }
+  }
+
+  // Where an adapter keeps the Board: who reports through it, and what came
+  // of each action. Ages are counted from the adapter's own clock reading,
+  // so a page on another machine with its clock wrong still says them right.
+  function drawAdapter() {
+    const adapter = board.adapter;
+    const reporting = adapter ? adapter.reporting || [] : [];
+    el("reporting").hidden = reporting.length === 0;
+    el("reporting-title").textContent = "Reporting through " + (adapter ? adapter.name : "the adapter");
+    el("reporting-list").replaceChildren(...reporting.map((r) => {
+      const li = text("li", "reporting-row", "");
+      li.append(text("span", "reporting-agent", r.agent));
+      const age = r.at === null || r.at === undefined ? "" : " " + ago(Math.max(0, adapter.now - r.at)) + " ago";
+      li.append(text("span", "reporting-age quiet", age));
+      li.append(text("p", "reporting-line", r.line || "(nothing said)"));
+      return li;
+    }));
+    const actions = adapter ? adapter.actions || [] : [];
+    el("board-sent-on").hidden = actions.length === 0;
+    el("board-sent-on").replaceChildren(...actions.slice(-5).reverse().map((a) => {
+      return text("li", "sent-on sent-on-" + a.state, a.action + " on “" + a.title + "”: " + a.words);
+    }));
+    const said = adapter && (adapter.stopped || adapter.problem);
+    if (said && !board.problem) {
+      boardNote.hidden = false;
+      boardNote.textContent = said;
     }
   }
 

@@ -1154,6 +1154,147 @@ Host: localhost:{port}
     );
     drop(s.quit("quit", true));
 
+    println!("I. A Board adapter, when the settings name one");
+    adapter_section(&sb, port);
+
     let _ = std::fs::remove_dir_all(&sb.root);
     println!("\nAll checks passed.");
+}
+
+/// The adapter's page, read until `until` holds of it or `secs` pass.
+fn board_until(page: &Page, secs: u64, until: impl Fn(&serde_json::Value) -> bool) -> serde_json::Value {
+    let end = std::time::Instant::now() + Duration::from_secs(secs);
+    loop {
+        let shown = board_shown(page);
+        if until(&shown) || std::time::Instant::now() >= end {
+            return shown;
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+}
+
+fn adapter_section(sb: &Sandbox, port: u16) {
+    let ext = if cfg!(windows) { ".exe" } else { "" };
+    let here = std::env::current_exe().unwrap();
+    let adapter = here.parent().unwrap().join(format!("adapter_standin{ext}"));
+    check("the stand-in adapter is built", adapter.is_file(), &adapter.display().to_string());
+    let (cards, log) = (sb.root.join("adapter-board.json"), sb.root.join("adapter-log.jsonl"));
+    std::fs::write(&cards, include_str!("board-standin.json")).unwrap();
+    let outbox_file = sb.state.join(lillignode::board::OUTBOX);
+    let _ = std::fs::remove_file(&outbox_file);
+    let _ = std::fs::remove_file(sb.state.join(lillignode::board::SENT));
+    let logged = || std::fs::read_to_string(&log).unwrap_or_default();
+    let named = serde_json::json!({ "page": true, "page_port": port, "page_can_act": true,
+        "board_adapter": { "command": adapter, "args": [cards, log] } });
+    settings(sb, &named.to_string());
+    let mut s = Session::start(sb);
+    let page = page_on_screen(&mut s, port);
+    let shown = board_until(&page, 10, |b| !card_on(b, "c1").is_null());
+    check("the cards come from the adapter", !card_on(&shown, "c1").is_null(), &shown.to_string());
+    check(
+        "named as it named itself",
+        shown["adapter"]["name"] == "the stand-in Hub",
+        &shown["adapter"].to_string(),
+    );
+    check("it said hello, which it was sent", logged().lines().next() == Some(r#"{"hello":1}"#), &logged());
+    let reporting = shown["adapter"]["reporting"].as_array().cloned().unwrap_or_default();
+    check(
+        "the agents reporting through it are given to the page, each with its newest line and when",
+        reporting.len() == 2
+            && reporting[0]["agent"] == "ops-bot"
+            && reporting[0]["line"] == "Deployed the docs site."
+            && reporting[0]["at"].is_u64(),
+        &format!("{reporting:?}"),
+    );
+    let token = state(&page, "")["state"]["acting"].as_str().unwrap_or_default().to_string();
+
+    let (outcome, words) = act_having_seen(&page, &token, "c1", "approve", "", false, &card_on(&shown, "c1"));
+    check(
+        "an action is held for its ten seconds, and the reader is told so",
+        outcome == "sent"
+            && words == "Approve goes to the Board's adapter in ten seconds, unless you undo it.",
+        &words,
+    );
+    std::thread::sleep(Duration::from_secs(2));
+    check("inside the ten seconds nothing reaches the adapter", !logged().contains("\"action\""), &logged());
+    let (outcome, words) = act(&page, &token, "c1", "approve", "", true);
+    check("undone inside them", outcome == "sent" && words.starts_with("Undone: Approve."), &words);
+
+    let (outcome, _) = act_having_seen(&page, &token, "c3", "approve", "", false, &card_on(&shown, "c3"));
+    check("another action is held", outcome == "sent", &outcome);
+    let (outcome, _) = act_having_seen(&page, &token, "c5", "done", "", false, &card_on(&shown, "c5"));
+    check("and one the adapter will refuse", outcome == "sent", &outcome);
+    let answered = board_until(&page, 16, |b| {
+        let actions = b["adapter"]["actions"].as_array().cloned().unwrap_or_default();
+        actions.iter().filter(|a| a["state"] == "taken" || a["state"] == "refused").count() == 2
+    });
+    let log_now = logged();
+    check(
+        "after its ten seconds an action reaches the adapter, whole, with an id",
+        log_now.lines().any(|l| {
+            l.contains(r#""card":"c3""#) && l.contains(r#""action":"approve""#) && l.contains(r#""id":"a"#)
+        }),
+        &log_now,
+    );
+    check("the one undone never does", !log_now.contains(r#""card":"c1""#), &log_now);
+    let actions = answered["adapter"]["actions"].as_array().cloned().unwrap_or_default();
+    let said = |card: &str| {
+        actions.iter().find(|a| a["card"] == card).map(|a| a["words"].clone()).unwrap_or_default()
+    };
+    check("what the adapter took is said", said("c3") == "Taken by the adapter.", &said("c3").to_string());
+    check(
+        "what it refused is said, with its reason",
+        said("c5") == "Refused by the adapter: that card was closed at the service",
+        &said("c5").to_string(),
+    );
+    check(
+        "and the refused card can be acted on again",
+        card_on(&answered, "c5")["sent"].is_null() && !card_on(&answered, "c3")["sent"].is_null(),
+        &answered.to_string(),
+    );
+    check("nothing was written to the outbox file", !outbox_file.exists(), "");
+    let (outcome, words) = act(&page, &token, "c3", "approve", "", true);
+    check(
+        "what went on to the adapter cannot be undone, and says why",
+        outcome == "refused"
+            && words == "It has already been sent on, so it cannot be undone. Nothing was changed.",
+        &words,
+    );
+    drop(s.quit("quit", true));
+
+    // An adapter that cannot be started: said where the Board would be;
+    // nothing is acted on, and nothing goes to the outbox file instead.
+    let missing = serde_json::json!({ "page": true, "page_port": port, "page_can_act": true,
+        "board_adapter": { "command": "no-such-adapter-program", "args": [] } });
+    settings(sb, &missing.to_string());
+    let mut s = Session::start(sb);
+    let page = page_on_screen(&mut s, port);
+    let shown = board_shown(&page);
+    let problem = shown["problem"].as_str().unwrap_or_default().to_string();
+    check(
+        "an adapter that cannot be started says why where the Board would be",
+        problem.contains("could not be started") && problem.contains("Nothing can be acted on"),
+        &problem,
+    );
+    let token = state(&page, "")["state"]["acting"].as_str().unwrap_or_default().to_string();
+    let (outcome, _) = act(&page, &token, "c1", "approve", "", false);
+    check("and an action is refused", outcome == "refused", &outcome);
+    check("with nothing written to the outbox file", !outbox_file.exists(), "");
+    drop(s.quit("quit", true));
+
+    // One that says nothing: stopped after its ten seconds, and said.
+    let silent = sb.root.join("silent");
+    std::fs::create_dir_all(&silent).unwrap();
+    settings(sb, &named.to_string());
+    let mut s = Session::start_with(sb, &sb.state, &[("ADAPTER_STANDIN_SILENT", "1")]);
+    let page = page_on_screen(&mut s, port);
+    let shown = board_until(&page, 14, |b| b["problem"].as_str().is_some_and(|p| p.contains("said nothing")));
+    check(
+        "an adapter that never says hello is taken as stopped after ten seconds, and said",
+        shown["problem"].as_str().is_some_and(|p| p.contains("it said nothing in ten seconds")),
+        &shown.to_string(),
+    );
+    drop(s.quit("quit", true));
+    let _ = std::fs::remove_file(sb.state.join(lillignode::board::SENT));
+    settings(sb, &format!("{{\"page\": true, \"page_port\": {port}}}"));
 }

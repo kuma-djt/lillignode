@@ -1,4 +1,5 @@
 pub mod action;
+pub mod adapter;
 pub mod agent;
 pub mod app;
 pub mod board;

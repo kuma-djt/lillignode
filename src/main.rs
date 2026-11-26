@@ -216,7 +216,16 @@ fn main() -> ExitCode {
             let pass: page::Acting = std::sync::Arc::new(move |acted| tx.send(Msg::Acted(acted)).is_ok());
             pass
         });
-        let ways = page::Ways { typing, acting };
+        // The Board's adapter, if the settings name one: started here, in
+        // the folder Lillignode saves in, and handed to the page and to
+        // the app (which sends it what was done to a card).
+        let adapter = app.config.board_adapter.clone().map(|named| {
+            let folder = page_folder.clone().unwrap_or_else(|| std::path::PathBuf::from("."));
+            lillignode::adapter::Link::start(&named.command, &named.args, &folder, page_folder.as_deref())
+                .unwrap_or_else(|why| lillignode::adapter::Link::failed(&why))
+        });
+        app.board_adapter = adapter.clone();
+        let ways = page::Ways { typing, acting, adapter };
         match page::serve(reader, app.config.page_port, page_folder.as_deref(), ways) {
             Ok(served) => {
                 app.page_serving(served);
@@ -344,6 +353,11 @@ fn main() -> ExitCode {
     }
     // The page is told Lillignode has gone, not left to find out.
     drop(publisher);
+    // The Board's adapter ends with Lillignode; anything still inside its
+    // ten seconds to undo is not sent.
+    if let Some(adapter) = &app.board_adapter {
+        adapter.stop();
+    }
 
     let stopped = app.engine.ws.running_labels();
     let ended = app.engine.ws.ended_labels();

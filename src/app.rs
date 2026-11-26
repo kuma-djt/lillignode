@@ -275,6 +275,9 @@ pub struct App<B: AgentBackend> {
     /// Where the Board's file and its outbox are: the folder Lillignode
     /// saves in, if it has one.
     board_folder: Option<PathBuf>,
+    /// The Board's adapter, when the settings name one (running, or saying
+    /// why not). With one, nothing goes to the outbox file.
+    pub board_adapter: Option<crate::adapter::Link>,
     /// Why the page's address will not be the same next start, if it will
     /// not.
     page_word_not_kept: Option<String>,
@@ -526,6 +529,7 @@ impl<B: AgentBackend> App<B> {
             page_types: false,
             page_acts: false,
             board_folder,
+            board_adapter: None,
             page_word_not_kept: None,
         };
         app.say_events();
@@ -646,16 +650,23 @@ impl<B: AgentBackend> App<B> {
                     // A title is whatever the Board's file says: only what
                     // can be seen is shown, and no more than fits.
                     let title = fit::clip(&shown_title(&title), 40);
-                    if undone {
-                        format!(
+                    match (undone, self.board_adapter.is_some()) {
+                        (true, false) => format!(
                             "From the page's Board: {did} was undone for \"{title}\". Its line was taken \
                              out of the outbox."
-                        )
-                    } else {
-                        format!(
+                        ),
+                        (false, false) => format!(
                             "From the page's Board: {did}, for \"{title}\". It waits in the Board's outbox \
                              until it is picked up."
-                        )
+                        ),
+                        (true, true) => format!(
+                            "From the page's Board: {did} was undone for \"{title}\". Nothing went to the \
+                             Board's adapter."
+                        ),
+                        (false, true) => format!(
+                            "From the page's Board: {did}, for \"{title}\". It goes to the Board's adapter \
+                             in ten seconds, unless it is undone on the page."
+                        ),
                     }
                 }
                 Event::TypedFromPage { label, entered: false, .. } => {
@@ -824,10 +835,19 @@ impl<B: AgentBackend> App<B> {
         }
         let folder = self.board_folder.as_deref();
         let now = SystemTime::now();
-        let done = if undo {
-            board::undo(folder, card, now)
-        } else {
-            board::act(folder, card, action, note, seen, now)
+        let done = match &self.board_adapter {
+            None if undo => board::undo(folder, card, now),
+            None => board::act(folder, card, action, note, seen, now),
+            Some(link) => {
+                let shown = link.board();
+                if undo {
+                    board::undo_on(folder, &shown, card, now, Some(&|line: &str| link.withdraw(line)))
+                } else {
+                    let title = seen.title.clone();
+                    let hold = |line: &str| link.hold(card, &title, action, line);
+                    board::act_on(folder, &shown, card, action, note, seen, now, Some(&hold))
+                }
+            }
         };
         match done {
             Ok(acted) => {
@@ -838,6 +858,10 @@ impl<B: AgentBackend> App<B> {
                     (true, None) => {
                         format!("Undone: {}. Nothing is waiting for that card.", acted.action.name())
                     }
+                    (false, _) if self.board_adapter.is_some() => format!(
+                        "{} goes to the Board's adapter in ten seconds, unless you undo it.",
+                        acted.action.name()
+                    ),
                     (false, _) => format!(
                         "Sent: {}. It waits until the Board no longer lists the card.",
                         acted.action.name()

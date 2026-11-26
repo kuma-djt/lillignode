@@ -38,7 +38,7 @@
 //! and never trusts the file alone.
 //!
 //! Some cards cannot be acted on from the page at all: a fire, a card with
-//! an amount, and a card whose risk is marked high. They say "Approve this
+//! an amount (`amount_cents` above 0), and a card whose risk is marked high. They say "Approve this
 //! one on the Hub" where the buttons would be, and an action on one is
 //! refused here.
 //!
@@ -245,17 +245,21 @@ struct CardShape {
     #[serde(default)]
     due_at: Option<String>,
     #[serde(default)]
-    amount: Option<Value>,
+    amount_cents: Option<Value>,
     #[serde(default)]
     risk: Option<Value>,
 }
 
-/// True for a card that has an amount: any value but none and an empty
-/// text.
-fn has_amount(amount: &Option<Value>) -> bool {
-    match amount {
+/// True for a card that has an amount: `amount_cents` above 0. A number
+/// written as text counts as the number. Text that is not a number is
+/// taken as an amount, so a card the reader cannot judge here goes to the
+/// Hub; none, empty text, 0 and below are not.
+fn has_amount(amount_cents: &Option<Value>) -> bool {
+    match amount_cents {
         None | Some(Value::Null) => false,
-        Some(Value::String(text)) => !text.trim().is_empty(),
+        Some(Value::Number(n)) => n.as_f64().is_some_and(|n| n > 0.0),
+        Some(Value::String(text)) if text.trim().is_empty() => false,
+        Some(Value::String(text)) => text.trim().parse::<f64>().map_or(true, |n| n > 0.0),
         Some(_) => true,
     }
 }
@@ -501,7 +505,7 @@ pub fn from_text(text: &str) -> Board {
             created_at,
             due_at,
             due_whole_day: shape.due_at.as_deref().is_some_and(|text| !text.trim().contains(['T', 't', ' '])),
-            hub_only: kind == Kind::Fire || has_amount(&shape.amount) || risk_is_high(&shape.risk),
+            hub_only: kind == Kind::Fire || has_amount(&shape.amount_cents) || risk_is_high(&shape.risk),
         });
     }
     for card in cards {
@@ -758,8 +762,29 @@ pub fn act(
     seen: &Seen,
     now: SystemTime,
 ) -> Result<Acted, String> {
+    let board = read(folder);
+    act_on(folder, &board, card, action, note, seen, now, None)
+}
+
+/// Where an action's line goes when it is not added to the outbox file:
+/// held, to be sent on later by whoever holds it. Says why if it cannot be.
+pub type Hold<'a> = &'a dyn Fn(&str) -> Result<(), String>;
+
+/// As `act`, on `board` as given (from the Board's file or from an
+/// adapter), and with the line given to `hold` in place of the outbox
+/// file, if there is one. Which cards wait is kept in `SENT` either way.
+#[allow(clippy::too_many_arguments)]
+pub fn act_on(
+    folder: Option<&Path>,
+    board: &Board,
+    card: &str,
+    action: &str,
+    note: &str,
+    seen: &Seen,
+    now: SystemTime,
+    hold: Option<Hold>,
+) -> Result<Acted, String> {
     let Some(folder) = folder else { return Err(NOWHERE.to_string()) };
-    let board = read(Some(folder));
     if let Some(problem) = &board.problem {
         return Err(format!("{problem} Nothing was sent."));
     }
@@ -827,11 +852,25 @@ pub fn act(
         line: line.clone(),
     });
     write_sent(folder, waiting).map_err(could_not)?;
-    if let Err(e) = add_line(folder, &line) {
+    let added = match hold {
+        Some(hold) => hold(&line).map_err(|why| format!("{why} Nothing was sent.")),
+        None => add_line(folder, &line).map_err(could_not),
+    };
+    if let Err(why) = added {
         let _ = write_sent(folder, before);
-        return Err(could_not(e));
+        return Err(why);
     }
     Ok(Acted { card: card.to_string(), title: found.title.clone(), action, warning: None, line })
+}
+
+/// The card whose action's line this is waits no longer: what it was
+/// sent to refused it, so it can be acted on again. Nothing is said if
+/// that cannot be kept; the card then still shows as waiting.
+pub fn forget_sent(folder: Option<&Path>, line: &str) {
+    let Some(folder) = folder else { return };
+    let Ok(waiting) = sent(Some(folder)) else { return };
+    let left: Vec<Sent> = waiting.into_iter().filter(|s| s.line != line).collect();
+    let _ = write_sent(folder, left);
 }
 
 /// Undo what was done to `card`, within `UNDO_FOR` of doing it and only
@@ -839,6 +878,23 @@ pub fn act(
 /// card is no longer waiting. Refused, with the words to say, otherwise;
 /// then nothing was changed.
 pub fn undo(folder: Option<&Path>, card: &str, now: SystemTime) -> Result<Acted, String> {
+    let board = read(folder);
+    undo_on(folder, &board, card, now, None)
+}
+
+/// Takes a held line back: true if it was still held, false if it has
+/// already gone on.
+pub type Withdraw<'a> = &'a dyn Fn(&str) -> bool;
+
+/// As `undo`, on `board` as given, taking the line back from whoever
+/// holds it (`withdraw`) in place of the outbox file, if there is one.
+pub fn undo_on(
+    folder: Option<&Path>,
+    board: &Board,
+    card: &str,
+    now: SystemTime,
+    withdraw: Option<Withdraw>,
+) -> Result<Acted, String> {
     let Some(folder) = folder else { return Err(NOWHERE.to_string()) };
     let mut waiting = sent(Some(folder)).map_err(|why| format!("{why} Nothing was changed."))?;
     let Some(at) = waiting.iter().position(|s| s.card == card) else {
@@ -855,7 +911,16 @@ pub fn undo(folder: Option<&Path>, card: &str, now: SystemTime) -> Result<Acted,
             UNDO_FOR.as_secs()
         ));
     }
-    match take_line(folder, &was.line) {
+    let taken = match withdraw {
+        Some(withdraw) if withdraw(&was.line) => Ok(true),
+        Some(_) => {
+            return Err(
+                "It has already been sent on, so it cannot be undone. Nothing was changed.".to_string()
+            )
+        }
+        None => take_line(folder, &was.line),
+    };
+    match taken {
         Ok(true) => {}
         Ok(false) => {
             return Err(
@@ -872,8 +937,7 @@ pub fn undo(folder: Option<&Path>, card: &str, now: SystemTime) -> Result<Acted,
     let warning = write_sent(folder, waiting).err().map(|e| {
         format!("But {SENT} could not be written ({e}), so the card still shows as waiting, though nothing waits.")
     });
-    let title =
-        read(Some(folder)).cards().find(|c| c.id == card).map(|c| c.title.clone()).unwrap_or_default();
+    let title = board.cards().find(|c| c.id == card).map(|c| c.title.clone()).unwrap_or_default();
     let action = Action::parse(&was.action).unwrap_or(Action::Hold);
     Ok(Acted { card: card.to_string(), title, action, warning, line: was.line })
 }
@@ -1380,14 +1444,18 @@ mod tests {
         };
         let b = board(vec![
             with("fire", "fire", "", Value::Null),
-            with("money", "decide", "amount", json!(1200)),
-            with("money-text", "do", "amount", json!("$40 a month")),
-            with("zero", "decide", "amount", json!(0)),
+            with("money", "decide", "amount_cents", json!(1200)),
+            with("money-text", "do", "amount_cents", json!("4000")),
+            with("money-words", "do", "amount_cents", json!("forty dollars")),
+            with("zero", "decide", "amount_cents", json!(0)),
+            with("zero-text", "decide", "amount_cents", json!("0")),
+            with("below", "decide", "amount_cents", json!(-5)),
+            with("old-field", "decide", "amount", json!(1200)),
             with("high", "decide", "risk", json!("High")),
             with("high-said", "question", "risk", json!("high: two callers break")),
             with("high-know", "know", "risk", json!("HIGH")),
-            with("no-amount", "decide", "amount", Value::Null),
-            with("empty-amount", "decide", "amount", json!("  ")),
+            with("no-amount", "decide", "amount_cents", Value::Null),
+            with("empty-amount", "decide", "amount_cents", json!("  ")),
             with("low", "decide", "risk", json!("low")),
             with("higher", "decide", "risk", json!("higher than last week")),
             with("plain", "decide", "", Value::Null),
@@ -1395,7 +1463,7 @@ mod tests {
         let hub: Vec<&str> = b.cards().filter(|c| c.hub_only).map(|c| c.id.as_str()).collect();
         let mut hub = hub;
         hub.sort_unstable();
-        assert_eq!(hub, ["fire", "high", "high-know", "high-said", "money", "money-text", "zero"]);
+        assert_eq!(hub, ["fire", "high", "high-know", "high-said", "money", "money-text", "money-words"]);
         // The page is told, and offered no action for them.
         let shown = b.to_json(&[]);
         let of = |id: &str| -> Value {
@@ -1411,7 +1479,7 @@ mod tests {
         // And an action on one is refused here too, whatever the page sent.
         let dir = folder(
             "hub",
-            vec![with("fire", "fire", "", Value::Null), with("money", "do", "amount", json!(5))],
+            vec![with("fire", "fire", "", Value::Null), with("money", "do", "amount_cents", json!(5))],
         );
         let hub_words = "This card is approved on the Hub, not from this page. Nothing was sent.";
         for (id, action) in [("fire", "approve"), ("fire", "hold"), ("money", "done")] {

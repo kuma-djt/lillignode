@@ -178,7 +178,7 @@ The page's third column shows cards from a file you keep beside your workspace, 
 
 Add `"page_can_act": true` beside `"page": true` and cards get buttons: **Approve**, **Revise** (which asks for a short note) and **Hold** on a card to decide, with one line under them saying what each does; a **Done** tick on something only you can do; **Got it** on something good to know. A card already on hold is offered Approve and Revise, not Hold.
 
-- **Some cards are not approved here.** A `fire`, a card with an `amount`, and a card whose `risk` is marked high (`"high"`, or a risk that starts with the word) say "Approve this one on the Hub" where the buttons would be, and Lillignode refuses an action on one whatever the page sends.
+- **Some cards are not approved here.** A `fire`, a card with an `amount_cents` above 0, and a card whose `risk` is marked high (`"high"`, or a risk that starts with the word) say "Approve this one on the Hub" where the buttons would be, and Lillignode refuses an action on one whatever the page sends.
 
 - **Nothing is written to `board.json`.** Each thing you do is one line added to `board-outbox.jsonl` beside it: the card's id, the action, the note, the time, and the title you were shown. The card then shows "Sent, waiting" until `board.json` no longer lists it as open.
 - **Undo for ten seconds.** Undo takes the line back out, if it has not been picked up.
@@ -190,6 +190,22 @@ Add `"page_can_act": true` beside `"page": true` and cards get buttons: **Approv
 - **An agent running as you can do what you can do on this machine.** That includes reading the page's address, writing to the outbox, and anything else your account can do. The page keeps out other web sites and other people; it cannot keep out your own agents. Give an agent only the work you would do yourself.
 - **The outbox and the record of what waits are yours alone.** Lillignode makes both so that no other account on the machine can read or write them, on Windows as elsewhere, and refuses to act through either if someone else could.
 - **Not yet checked by a person.** Checked by script and in a browser with no window. Nothing picks the outbox up yet.
+
+### A program that keeps the Board
+
+Instead of the two files, Lillignode can start one program of your choosing and talk to it over its own pipe:
+
+```json
+{ "page": true, "page_can_act": true,
+  "board_adapter": { "command": "python", "args": ["C:/tools/my_adapter.py"] } }
+```
+
+- **Off unless named.** Without `board_adapter`, the files are used as above.
+- **What it sends** (one JSON object a line on its output): `{"hello": 1, "name": "…"}`, then `{"cards": [ … ]}` (the whole Board, each card as in `board.json`) as often as it likes, and, if it has them, `{"reporting": [ {"agent": "…", "line": "…", "at": "…"} ]}`: agents that run elsewhere and report through it, each with its newest line. The page lists those under "Reporting through" and the name it gave, apart from Lillignode's own agents.
+- **What it is sent** (on its input): `{"hello": 1}`, then each action as `{"id": "a1", "action": { …the line that would have gone to the outbox… }}`. It answers `{"took": "a1"}` or `{"refused": "a1", "why": "…"}`; both are shown under the Board, and a refused card can be acted on again.
+- **Sent only after ten seconds.** An action is held for the ten seconds Undo lasts and sent only if it was not undone. Only actions Lillignode wrote on your press are ever held, so only those are ever sent. Quitting inside the ten seconds sends nothing.
+- **Nothing goes to the outbox file instead.** If the program cannot be started, says nothing for ten seconds, or stops, the Board says so and nothing can be acted on until Lillignode is started again. It is not started again by itself.
+- **It runs as you**, with your environment, in the folder Lillignode saves in. Whatever it needs to reach a service (an address, a key) it takes from there; Lillignode never sees it.
 
 ## Settings
 
@@ -225,7 +241,7 @@ And to let it act on the cards of its Board, which is off unless you ask whateve
 
 If the colours come out wrong, add `"colors"` with `"full"`, `"256"`, `"16"` or `"none"`. Setting the `NO_COLOR` environment variable also switches colour off.
 
-All are optional, and a change takes effect the next time Lillignode is started. `billing` does nothing without `cost`, and `cost_warning_tokens` without it is reported as a mistake; so is `page_port`, `page_can_type` or `page_can_act` without `page`. A Lillignode older than the page does not know `"page"` and treats it as a mistake in the file.
+All are optional, and a change takes effect the next time Lillignode is started. `billing` does nothing without `cost`, and `cost_warning_tokens` without it is reported as a mistake; so is `page_port`, `page_can_type`, `page_can_act` or `board_adapter` without `page`. A Lillignode older than the page does not know `"page"` and treats it as a mistake in the file.
 
 **The file is strict.** One mistake in it and none of it is used: every setting is at its default until it is fixed. Lillignode never changes the file. It tells you when it starts, beginning with how to fix it ("To fix your settings file: ...") and naming the line and column where it can.
 

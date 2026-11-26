@@ -152,11 +152,14 @@ pub type Acting = Arc<dyn Fn(Acted) -> bool + Send + Sync>;
 pub struct Ways {
     pub typing: Option<Typing>,
     pub acting: Option<Acting>,
+    /// Where the Board comes from when an adapter keeps it; otherwise the
+    /// Board's file.
+    pub adapter: Option<crate::adapter::Link>,
 }
 
 impl From<Option<Typing>> for Ways {
     fn from(typing: Option<Typing>) -> Self {
-        Ways { typing, acting: None }
+        Ways { typing, acting: None, adapter: None }
     }
 }
 
@@ -323,6 +326,8 @@ struct Serving {
     token: Option<Arc<Mutex<String>>>,
     /// Where the Board's file is read: the folder Lillignode saves in.
     folder: Option<PathBuf>,
+    /// The Board's adapter, where one keeps the Board.
+    adapter: Option<crate::adapter::Link>,
 }
 
 impl Serving {
@@ -349,7 +354,7 @@ pub fn serve(
     folder: Option<&Path>,
     ways: impl Into<Ways>,
 ) -> Result<Served, String> {
-    let Ways { typing, acting } = ways.into();
+    let Ways { typing, acting, adapter } = ways.into();
     let sends = typing.is_some() || acting.is_some();
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, port)).map_err(|e| e.to_string())?;
     let address = listener.local_addr().map_err(|e| e.to_string())?;
@@ -375,6 +380,7 @@ pub fn serve(
         acting,
         token,
         folder: folder.map(Path::to_path_buf),
+        adapter,
     });
     let open = Arc::new(AtomicUsize::new(0));
     let accept = move || {
@@ -696,8 +702,14 @@ fn answer(stream: &TcpStream, serving: &Serving) -> std::io::Result<()> {
                 Ok(waiting) => (waiting, None),
                 Err(why) => (Vec::new(), Some(why)),
             };
-            let mut shown = board::read(folder).to_json(&waiting);
+            let mut shown = match &serving.adapter {
+                Some(adapter) => adapter.board().to_json(&waiting),
+                None => board::read(folder).to_json(&waiting),
+            };
             shown["acting_off"] = json!(acting_off);
+            if let Some(adapter) = &serving.adapter {
+                shown["adapter"] = adapter.to_json(SystemTime::now());
+            }
             let shown = json!({ "board": shown });
             send(stream, "200 OK", "application/json", &shown.to_string())
         }
@@ -1549,7 +1561,8 @@ mod tests {
             passed.lock().unwrap().send(acted).is_ok()
         });
         let (publisher, reader) = channel();
-        let served = serve(reader, 0, None, Ways { typing: None, acting: Some(acting) }).unwrap();
+        let served =
+            serve(reader, 0, None, Ways { typing: None, acting: Some(acting), adapter: None }).unwrap();
         assert!(served.can_act && !served.can_type);
         let word: &'static str = Box::leak(word_now(&served.word).into_boxed_str());
         let at = At { address: served.address, word };
@@ -1704,7 +1717,10 @@ mod tests {
         let start = |acting: bool| {
             let (publisher, reader) = channel();
             let acting: Option<Acting> = acting.then(|| Arc::new(|_: Acted| false) as Acting);
-            (publisher, serve(reader, 0, Some(&folder), Ways { typing: None, acting }).unwrap())
+            (
+                publisher,
+                serve(reader, 0, Some(&folder), Ways { typing: None, acting, adapter: None }).unwrap(),
+            )
         };
         let (_p, reading) = start(false);
         let kept = word_now(&reading.word);

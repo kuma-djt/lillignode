@@ -24,6 +24,12 @@
     <h2 id="agents-title">Agents</h2>
     <ul id="agents"></ul>
     <p id="no-agents" class="quiet" hidden>No agents are open in Lillignode.</p>
+    <!-- Shown only where the settings name a Board adapter and it reports agents of its own. -->
+    <section id="reporting" hidden aria-labelledby="reporting-title">
+      <h2 id="reporting-title">Reporting through the adapter</h2>
+      <p class="quiet">Not running in Lillignode. Each one's newest line, as the adapter heard it.</p>
+      <ul id="reporting-list"></ul>
+    </section>
   </section>
 
   <section id="middle" aria-labelledby="terminal-title">
@@ -51,6 +57,8 @@
     <h2 id="board-title">Board</h2>
     <p id="board-note" class="quiet">Reading the Board.</p>
     <p id="board-said" role="status" hidden></p>
+    <!-- Where an adapter keeps the Board: what came of each action sent to it. -->
+    <ul id="board-sent-on" hidden></ul>
     <section id="board-decide" hidden>
       <h3>Decide</h3>
       <ul id="board-decide-list"></ul>
