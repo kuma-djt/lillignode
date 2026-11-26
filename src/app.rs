@@ -739,6 +739,12 @@ impl<B: AgentBackend> App<B> {
         }
     }
 
+    /// The folder a new agent works in when none is typed: where
+    /// Lillignode was started.
+    pub fn launch_dir(&self) -> &std::path::Path {
+        &self.launch_dir
+    }
+
     /// The settings name a program to keep the Board: said in the status
     /// report beside the page's address, so what runs is never a surprise.
     pub fn adapter_named(&mut self, command: &str, args: &[String]) {
@@ -1535,7 +1541,20 @@ impl<B: AgentBackend> App<B> {
         }
     }
 
+    /// What Enter alone starts at "Agent to start": claude, unless it was
+    /// looked for and not found while another agent Lillignode knows was;
+    /// then that one. The first screen says the same.
+    pub fn default_command(&self) -> &'static str {
+        match self.found_agents.as_deref() {
+            Some(found) if !found.iter().any(|(c, _)| *c == DEFAULT_COMMAND) => {
+                found.first().map_or(DEFAULT_COMMAND, |(c, _)| *c)
+            }
+            _ => DEFAULT_COMMAND,
+        }
+    }
+
     fn new_agent_key(&mut self, key: KeyEvent) {
+        let default = self.default_command();
         let Mode::NewAgent(form) = &mut self.mode else { return };
         let plain = !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
         match (form.step, key.code) {
@@ -1561,7 +1580,7 @@ impl<B: AgentBackend> App<B> {
             (_, KeyCode::Char(c)) if plain => form.input.push(c),
             (Step::Program, KeyCode::Enter) => {
                 let typed = form.input.trim().trim_matches('"');
-                let command = if typed.is_empty() { DEFAULT_COMMAND } else { typed }.to_string();
+                let command = if typed.is_empty() { default } else { typed }.to_string();
                 if command != form.command {
                     // A kind chosen for another program does not carry over.
                     form.kind = None;
@@ -1742,7 +1761,11 @@ impl<B: AgentBackend> App<B> {
             // What is being typed comes first and the hint after it, so a
             // long folder path cannot push the typing off the screen.
             Mode::NewAgent(form @ NewAgent { step: Step::Program, .. }) => {
-                format!("{AGENT_PROMPT}{}   (Enter alone: {DEFAULT_COMMAND}   Esc: cancel)", form.input)
+                format!(
+                    "{AGENT_PROMPT}{}   (Enter alone: {}   Esc: cancel)",
+                    form.input,
+                    self.default_command()
+                )
             }
             Mode::NewAgent(form @ NewAgent { step: Step::Options, .. }) => format!(
                 "{}{}   (Enter alone: none   Tab: start it as {}   Esc: cancel)",
@@ -4381,43 +4404,49 @@ Cost",
     fn the_first_screen_says_how_to_start_an_agent_which_are_here_and_that_no_settings_is_fine() {
         let words = |app: &App<Fake>| -> String {
             let rows = screen(app, 160, 30);
-            rows.iter().map(|r| part(r, 28, 160).trim().to_string()).collect::<Vec<_>>().join(" ")
+            rows.iter().map(|r| part(r, 43, 160).trim().to_string()).collect::<Vec<_>>().join(" ")
         };
         let mut app = app_with_claude_agents(0);
         let text = words(&app);
         assert!(
-            text.contains("Your first agent: press n. Lillignode asks which agent (Enter alone: claude)"),
+            text.contains("n asks which agent (Enter alone: claude), any options for it (Enter alone: none)"),
             "{text}"
         );
+        // The folder an agent would work in, named, and the way out.
+        let folder = app.launch_dir().display().to_string();
+        assert!(text.contains(&format!("(Enter alone: {folder})")), "{text}");
+        assert!(text.contains("Esc stops at any point."), "{text}");
         assert!(!text.contains("Found on this machine"), "not looked for: nothing said: {text}");
-        assert!(!text.contains("There is no settings file"), "{text}");
+        assert!(!text.contains("No settings file"), "{text}");
         app.found_agents = Some(vec![("claude", "Claude Code"), ("codex", "Codex")]);
         app.no_settings_file = true;
         let text = words(&app);
         assert!(text.contains("Found on this machine: claude (Claude Code), codex (Codex)."), "{text}");
-        assert!(text.contains("There is no settings file. None is needed"), "{text}");
+        assert!(text.contains("No settings file: none is needed"), "{text}");
+        // None found: one way forward, not two.
         app.found_agents = Some(vec![]);
         let text = words(&app);
+        assert!(text.contains("No agents yet, and none Lillignode knows was found here."), "{text}");
         assert!(
-            text.contains("No agent Lillignode knows by name (claude, codex) was found when it started"),
+            text.contains("then start Lillignode again. Or press n to start any other program by its name."),
             "{text}"
         );
-        assert!(text.contains("then start Lillignode again"), "{text}");
-        assert!(
-            text.contains("asks which agent (its command)"),
-            "no claude: Enter alone is not offered: {text}"
-        );
+        assert!(!text.contains("Press n to start one."), "{text}");
         app.found_agents = Some(vec![("codex", "Codex")]);
         let text = words(&app);
-        assert!(text.contains("asks which agent (type codex)"), "{text}");
+        assert!(text.contains("n asks which agent (Enter alone: codex)"), "{text}");
         assert!(!text.contains("Enter alone: claude"), "{text}");
+        // And n then offers what the screen said.
+        app.on_key(press(KeyCode::Char('n')));
+        assert!(app.bar().starts_with("Agent to start:    (Enter alone: codex"), "{}", app.bar());
+        app.on_key(press(KeyCode::Esc));
 
-        // The narrowest window: the way forward and the menu keys, whole.
+        // The narrowest window: what this is, the way forward, whole.
         app.found_agents = Some(vec![("claude", "Claude Code")]);
         let rows = screen(&app, crate::ui::MIN_COLS, crate::ui::MIN_ROWS);
-        // The text column, beside the gnome, as the welcome test reads it.
         let text: String =
             rows.iter().map(|r| part(r, 43, 80).trim().to_string()).collect::<Vec<_>>().join(" ");
+        assert!(text.contains("runs AI coding agents side by side"), "{text}");
         assert!(text.contains("No agents yet. Press n to start one."), "{text}");
         assert!(text.contains("Found on this machine: claude (Claude Code)."), "{text}");
         // The menu keys: on the bar, at all times.
@@ -4434,10 +4463,13 @@ Cost",
             assert!(agent_area[1 + i].starts_with(&format!("  {line}")), "{:?}", agent_area[1 + i]);
         }
         let text = agent_area.join("\n");
-        assert!(agent_area[1].contains("No agents yet. Press n to start one."), "{text}");
-        assert!(text.contains("Lillignode runs several AI coding agents at once"), "{text}");
-        assert!(text.contains("never asks for your keys."), "{text}");
-        assert!(text.contains("Ctrl+Q or F12 opens Lillignode's menu."), "{text}");
+        assert!(agent_area[1].contains("Lillignode runs AI coding agents side by side"), "{text}");
+        // The text column beside the gnome, read as one.
+        let column: String =
+            rows.iter().map(|r| part(r, 43, 100).trim().to_string()).collect::<Vec<_>>().join(" ");
+        assert!(column.contains("No agents yet. Press n to start one."), "{column}");
+        assert!(column.contains("never asks for your API keys or passwords."), "{column}");
+        assert!(column.contains("Ctrl+Q or F12 opens Lillignode's menu."), "{column}");
         assert_eq!(part(&rows[1], 0, 27), " No agents yet. Press n.");
 
         // The narrowest window: the key to start is still whole, and first.

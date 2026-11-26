@@ -86,6 +86,21 @@ pub fn can_run(program: &Path) -> bool {
     }
 }
 
+#[cfg(all(test, unix))]
+mod can_run_tests {
+    #[test]
+    fn a_file_without_permission_to_run_cannot_be_run() {
+        use std::os::unix::fs::PermissionsExt;
+        let file = std::env::temp_dir().join(format!("lillignode-can-run-{}", std::process::id()));
+        std::fs::write(&file, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(!super::can_run(&file));
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(super::can_run(&file));
+        let _ = std::fs::remove_file(&file);
+    }
+}
+
 fn is_batch(program: &Path) -> bool {
     program
         .extension()

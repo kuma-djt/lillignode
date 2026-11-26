@@ -857,8 +857,9 @@
   function emptyBoardWords() {
     if (board.adapter) return "Nothing on the Board at " + board.adapter.name + ".";
     if (!board.no_file) return "Nothing open on the Board.";
-    return "Nothing on the Board. Cards come from a file, board.json, in the folder Lillignode saves in " +
-      "(lillignode --where says where), or from a program your settings name. Until then this column stays empty.";
+    return "Nothing on the Board. The Board shows things to decide and to do, from a file you keep " +
+      "(board.json, beside your workspace: lillignode --where says where) or from a program your settings name. " +
+      "None is needed to run agents.";
   }
 
   function readBoard() {

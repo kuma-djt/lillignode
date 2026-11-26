@@ -981,6 +981,22 @@ mod tests {
         from_text(&json!({ "cards": cards }).to_string())
     }
 
+    #[test]
+    fn no_file_is_told_from_a_file_with_nothing_open() {
+        let none = std::env::temp_dir().join(format!("lillignode-board-{}-no-file", std::process::id()));
+        let _ = std::fs::remove_dir_all(&none);
+        std::fs::create_dir_all(&none).unwrap();
+        let read_none = read(Some(&none));
+        assert!(read_none.no_file && read_none.is_empty());
+        assert_eq!(read_none.to_json(&[])["no_file"], true);
+        std::fs::write(none.join(FILE), r#"{"cards": [{"id": "c1", "owner": "x", "kind": "do", "tier": "now", "title": "t", "status": "done"}]}"#)
+            .unwrap();
+        let finished = read(Some(&none));
+        assert!(!finished.no_file && finished.is_empty(), "a file with nothing open is not a missing file");
+        assert_eq!(finished.to_json(&[])["no_file"], false);
+        let _ = std::fs::remove_dir_all(&none);
+    }
+
     fn ids(cards: &[Card]) -> Vec<&str> {
         cards.iter().map(|c| c.id.as_str()).collect()
     }

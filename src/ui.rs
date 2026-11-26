@@ -404,33 +404,23 @@ fn draw_welcome<B: AgentBackend>(frame: &mut Frame, area: Rect, app: &App<B>, p:
             Rect::new(area.x + 2, area.y + 1, gnome_width, look::GNOME.len() as u16),
         );
     }
-    let bold = Style::default().add_modifier(Modifier::BOLD);
-    // In order of need: a short window keeps the way forward and the menu
-    // keys, and loses the pitch first.
+    // In order of need: what this is, the one step to take, how it goes,
+    // the menu keys; then the rest. A short window loses the rest first.
     let mut text = vec![Line::from(vec![
-        Span::styled("No agents yet. ", bold),
-        Span::raw("Press "),
-        Span::styled("n", p.key()),
-        Span::raw(" to start one."),
+        Span::styled("Lillignode", p.copper()),
+        Span::raw(" runs AI coding agents side by side and shows what each one is doing."),
     ])];
     text.extend(first_agent_lines(app, p));
+    text.push(Line::from(Span::raw(format!("{} opens Lillignode's menu.", app.config.menu_keys_label()))));
+    text.push(Line::default());
     text.push(Line::from(Span::styled(
-        format!("{} opens Lillignode's menu.", app.config.menu_keys_label()),
+        "Each agent works in its own folder with the account it already has. Lillignode never asks \
+         for your API keys or passwords.",
         p.dim(),
     )));
-    text.push(Line::default());
-    text.push(Line::from(vec![
-        Span::styled("Lillignode", p.copper()),
-        Span::raw(
-            " runs several AI coding agents at once in one terminal window and shows what each \
-             one is doing. Each agent works in its own folder with the account it already has; \
-             Lillignode never asks for your keys.",
-        ),
-    ]));
     if app.no_settings_file {
         text.push(Line::from(Span::styled(
-            "There is no settings file. None is needed: everything here works without one \
-             (lillignode --where says where it would go).",
+            "No settings file: none is needed (lillignode --where says where one would go).",
             p.dim(),
         )));
     }
@@ -441,43 +431,48 @@ fn draw_welcome<B: AgentBackend>(frame: &mut Frame, area: Rect, app: &App<B>, p:
     );
 }
 
-/// How to start the first agent, and which agents are on this machine.
+/// The one step to take, which agents are on this machine, and what `n`
+/// asks, naming the folder an agent would work in.
 fn first_agent_lines<B: AgentBackend>(app: &App<B>, p: Palette) -> Vec<Line<'static>> {
     let bold = Style::default().add_modifier(Modifier::BOLD);
-    // Enter alone starts claude: said so only where claude is there to start.
     let found = app.found_agents.as_deref();
-    let which = match found {
-        Some(found) if !found.iter().any(|(c, _)| *c == "claude") => match found.first() {
-            Some((command, _)) => format!("which agent (type {command})"),
-            None => "which agent (its command)".to_string(),
-        },
-        _ => "which agent (Enter alone: claude)".to_string(),
-    };
-    let how = Line::from(vec![
-        Span::styled("Your first agent: ", bold),
-        Span::raw("press "),
-        Span::styled("n", p.key()),
-        Span::raw(format!(
-            ". Lillignode asks {which}, any options for it, and which folder it works in (Enter alone: \
-             this one)."
-        )),
-    ]);
-    // What is here comes first: it is short, so a short window keeps it whole.
     let mut lines = Vec::new();
     match found {
-        None => {}
-        Some([]) => lines.push(Line::from(Span::raw(
-            "No agent Lillignode knows by name (claude, codex) was found when it started. Install \
-             one, for example Claude Code, then start Lillignode again. Any other program can be \
-             started by its name.",
-        ))),
+        // None found: one path, not two.
+        Some([]) => {
+            lines.push(Line::from(vec![
+                Span::styled("No agents yet, and none Lillignode knows was found here. ", bold),
+                Span::raw("Install one, for example Claude Code, then start Lillignode again. Or press "),
+                Span::styled("n", p.key()),
+                Span::raw(" to start any other program by its name."),
+            ]));
+            return lines;
+        }
         Some(found) => {
+            lines.push(Line::from(vec![
+                Span::styled("No agents yet. ", bold),
+                Span::raw("Press "),
+                Span::styled("n", p.key()),
+                Span::raw(" to start one."),
+            ]));
             let names: Vec<String> =
                 found.iter().map(|(command, name)| format!("{command} ({name})")).collect();
             lines.push(Line::from(Span::raw(format!("Found on this machine: {}.", names.join(", ")))));
         }
+        None => lines.push(Line::from(vec![
+            Span::styled("No agents yet. ", bold),
+            Span::raw("Press "),
+            Span::styled("n", p.key()),
+            Span::raw(" to start one."),
+        ])),
     }
-    lines.push(how);
+    // What Enter alone starts, as the "Agent to start" question will offer it.
+    let which = format!("Enter alone: {}", app.default_command());
+    let folder = fit::clip(&app.launch_dir().display().to_string(), 60);
+    lines.push(Line::from(Span::raw(format!(
+        "n asks which agent ({which}), any options for it (Enter alone: none), and the folder it \
+         works in (Enter alone: {folder}). Esc stops at any point."
+    ))));
     lines
 }
 
