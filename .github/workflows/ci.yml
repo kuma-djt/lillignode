@@ -53,6 +53,8 @@ jobs:
         run: cargo build --all-targets --locked
       - name: Unit tests
         run: cargo test --locked
+      - name: The tape player's own tests
+        run: cargo test --locked --example standin
       - name: Lint
         run: cargo clippy --all-targets --locked -- -D warnings
       - name: Format

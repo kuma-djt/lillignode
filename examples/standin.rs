@@ -35,6 +35,9 @@
 //!   standin status-echo     ask the status question the way Claude Code
 //!                           does, then take pastes and report input as
 //!                           `echo` does
+//!   standin play <tape>     replay a tape: what a real agent wrote, at the
+//!                           pace it wrote it, waiting at each key a person
+//!                           pressed until that key arrives (see `tape`)
 //!
 //! Ctrl+D ends it. What it prints:
 //!   ENTER                    an Enter press that was not inside a paste
@@ -43,6 +46,8 @@
 
 use std::io::{Read, Write};
 use std::path::PathBuf;
+
+mod tape;
 
 #[cfg(windows)]
 mod console {
@@ -596,6 +601,13 @@ fn main() {
         "parts" => {
             say("STANDIN READY parts");
             parts_mode();
+        }
+        "play" => {
+            let Some(path) = args.get(1) else {
+                println!("standin: play needs a tape");
+                std::process::exit(2);
+            };
+            tape::play(path);
         }
         "status-silent" => {
             say("STANDIN READY status-silent");

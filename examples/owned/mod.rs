@@ -69,9 +69,13 @@ impl Session {
     /// Starts Lillignode without Claude Code's status off switch or
     /// `TERM_PROGRAM`, whatever this run inherited, then with `env` on top.
     pub fn start_with(sb: &Sandbox, state: &Path, env: &[(&str, &str)]) -> Session {
-        let pair = native_pty_system()
-            .openpty(PtySize { rows: ROWS, cols: COLS, pixel_width: 0, pixel_height: 0 })
-            .unwrap();
+        Session::start_sized(sb, state, env, COLS, ROWS)
+    }
+
+    /// As `start_with`, in a window of this size from the first moment.
+    pub fn start_sized(sb: &Sandbox, state: &Path, env: &[(&str, &str)], cols: u16, rows: u16) -> Session {
+        let pair =
+            native_pty_system().openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 }).unwrap();
         let mut cmd = CommandBuilder::new(&sb.exe);
         cmd.cwd(&sb.work);
         cmd.env_remove(lillignode::status::OFF_SWITCH);
@@ -106,7 +110,7 @@ impl Session {
         let writer = pair.master.take_writer().unwrap();
         Session {
             rx,
-            term: Terminal::new(ROWS, COLS),
+            term: Terminal::new(rows, cols),
             writer,
             master: pair.master,
             raw: Vec::new(),
