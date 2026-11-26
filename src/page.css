@@ -256,6 +256,38 @@ li.gone .agent-name { color: var(--cream-quiet); }
 .sent-on { font-size: 12px; padding: 2px 0; }
 .sent-on-refused, .sent-on-late { font-weight: 700; }
 
+/* At phone width: one thing at a time (the list, or one agent), the Board
+   sliding in from the right, and who is blocking always on top. */
+.phone-only { display: none; }
+/* The whole page scrolls at phone width, so what is pinned stays on top. */
+html:has(body.phone), body.phone { height: auto; min-height: 100%; }
+body.phone main { overflow: visible; }
+body.phone main > section { overflow: visible; }
+body.phone .phone-only:not([hidden]) { display: block; }
+body.phone header { position: sticky; top: 0; z-index: 30; background: var(--navy); }
+body.phone #blocking { position: sticky; top: 0; z-index: 25; }
+body.phone #blocking li { cursor: pointer; text-decoration: underline; text-underline-offset: 3px; }
+body.phone[data-view="list"] #middle { display: none; }
+body.phone[data-view="agent"] #agents-column { display: none; }
+body.phone #board-open {
+  margin-left: auto; padding: 8px 14px; font-size: 15px; font-weight: 700;
+  background: var(--cream); color: var(--navy); border: 0; border-radius: 3px;
+}
+body.phone #back-to-agents, body.phone #board-close {
+  margin: 10px 16px 4px; padding: 10px 14px; font-size: 15px; font-weight: 600;
+  background: transparent; color: var(--cream); border: 1px solid var(--cream-quiet); border-radius: 3px;
+}
+body.phone #board {
+  position: fixed; top: 0; right: 0; bottom: 0; width: min(92vw, 420px); z-index: 40;
+  background: var(--navy); border-left: 1px solid var(--rule); overflow: auto;
+  transform: translateX(100%); transition: transform 0.22s ease-out; visibility: hidden;
+}
+body.phone.board-open #board { transform: translateX(0); visibility: visible; }
+#board-shade { position: fixed; top: 0; right: 0; bottom: 0; left: 0; z-index: 35; background: rgba(0, 0, 0, 0.45); }
+body.phone #agents button { padding-top: 14px; padding-bottom: 14px; }
+body.phone #terminal { font-size: 12px; }
+@media (prefers-reduced-motion: reduce) { body.phone #board { transition: none; } }
+
 /* Read by a screen reader, not shown. */
 #announce { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 /* What is on the page is from before contact was lost. */

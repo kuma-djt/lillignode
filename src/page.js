@@ -206,7 +206,18 @@
       ...waiting.map((agent) => {
         const waited = since(agent.needs_you_since);
         const what = agent.needs ? " needs you: " + agent.needs + "." : " needs you.";
-        return text("li", "", agent.label + what + (waited === null ? "" : " Waiting " + ago(waited) + "."));
+        const li = text("li", "", agent.label + what + (waited === null ? "" : " Waiting " + ago(waited) + "."));
+        // A tap on who is waiting opens that agent.
+        li.tabIndex = 0;
+        li.setAttribute("role", "button");
+        li.addEventListener("click", () => choose(agent.key));
+        li.addEventListener("keydown", (e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            choose(agent.key);
+          }
+        });
+        return li;
       }),
     );
     document.title = waiting.length ? "(" + waiting.length + " need you) Lillignode" : "Lillignode";
@@ -420,12 +431,72 @@
     drawContact();
     drawBlocking();
     drawAgents();
+    drawPhone();
     drawTerminal();
     drawTyping();
     say();
   }
 
+  // At phone width the page is one thing at a time: the list of agents, or
+  // one agent's terminal; the Board slides in over either. Same page, same
+  // data: only what is shown changes.
+  const phoneWidth = window.matchMedia("(max-width: 760px)");
+  let phoneView = "list";
+  let boardOpen = false;
+  function drawPhone() {
+    const phone = phoneWidth.matches;
+    document.body.classList.toggle("phone", phone);
+    document.body.dataset.view = phone ? phoneView : "";
+    document.body.classList.toggle("board-open", phone && boardOpen);
+    // The Board opens below the header and who is blocking, so they stay
+    // in sight while it is open.
+    const blockingShown = !blocking.hidden;
+    const under = phone ? (blockingShown ? blocking : document.querySelector("header")).getBoundingClientRect().bottom : 0;
+    const boardEl = el("board");
+    boardEl.style.top = phone ? Math.max(0, Math.round(under)) + "px" : "";
+    el("board-shade").style.top = boardEl.style.top;
+    el("board-shade").hidden = !(phone && boardOpen);
+    el("board-open").setAttribute("aria-expanded", phone && boardOpen ? "true" : "false");
+    const open = board ? (board.decide || []).length + (board.yours || []).length : 0;
+    el("board-open").textContent = open ? "Board (" + open + ")" : "Board";
+    const agent = state && state.agents.find((s) => s.key === shownKey());
+    el("back-to-agents").textContent = "\u2190 All agents" + (state && state.agents.length > 1 ? " (" + state.agents.length + ")" : "");
+    if (phone && phoneView === "agent" && !agent) phoneView = "list";
+  }
+  function showAgentView() {
+    if (!phoneWidth.matches) return;
+    if (phoneView !== "agent") history.pushState({ lillignode: "agent" }, "");
+    phoneView = "agent";
+    drawPhone();
+    window.scrollTo(0, 0);
+  }
+  function showList() {
+    phoneView = "list";
+    drawPhone();
+    window.scrollTo(0, 0);
+  }
+  function setBoard(open) {
+    boardOpen = open;
+    drawPhone();
+    if (open) el("board-close").focus();
+    else el("board-open").focus();
+  }
+  el("board-open").addEventListener("click", () => setBoard(!boardOpen));
+  el("board-close").addEventListener("click", () => setBoard(false));
+  el("board-shade").addEventListener("click", () => setBoard(false));
+  el("back-to-agents").addEventListener("click", () => {
+    if (history.state && history.state.lillignode === "agent") history.back();
+    else showList();
+  });
+  // The phone's own Back takes the agent's terminal back to the list.
+  window.addEventListener("popstate", () => showList());
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && boardOpen) setBoard(false);
+  });
+  phoneWidth.addEventListener("change", () => drawPhone());
+
   function choose(key) {
+    showAgentView();
     chosen = key;
     // The reader's own choice is the one thing that changes whom the text
     // in the box is for; the label beside it says so.
