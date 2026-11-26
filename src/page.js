@@ -206,17 +206,14 @@
       ...waiting.map((agent) => {
         const waited = since(agent.needs_you_since);
         const what = agent.needs ? " needs you: " + agent.needs + "." : " needs you.";
-        const li = text("li", "", agent.label + what + (waited === null ? "" : " Waiting " + ago(waited) + "."));
-        // A tap on who is waiting opens that agent.
-        li.tabIndex = 0;
-        li.setAttribute("role", "button");
-        li.addEventListener("click", () => choose(agent.key));
-        li.addEventListener("keydown", (e) => {
-          if (e.key === "Enter" || e.key === " ") {
-            e.preventDefault();
-            choose(agent.key);
-          }
-        });
+        // A tap on who is waiting opens that agent: a real button, in a list.
+        const li = document.createElement("li");
+        const open = document.createElement("button");
+        open.type = "button";
+        open.className = "blocking-open";
+        open.textContent = agent.label + what + (waited === null ? "" : " Waiting " + ago(waited) + ".");
+        open.addEventListener("click", () => choose(agent.key));
+        li.append(open);
         return li;
       }),
     );
@@ -445,23 +442,36 @@
   let boardOpen = false;
   function drawPhone() {
     const phone = phoneWidth.matches;
+    const agent = state && state.agents.find((s) => s.key === shownKey());
+    // An agent that has gone leaves its view, and its history entry.
+    if (phone && phoneView === "agent" && state && !agent) {
+      phoneView = "list";
+      if (history.state && history.state.lillignode === "agent") history.back();
+    }
     document.body.classList.toggle("phone", phone);
     document.body.dataset.view = phone ? phoneView : "";
     document.body.classList.toggle("board-open", phone && boardOpen);
-    // The Board opens below the header and who is blocking, so they stay
-    // in sight while it is open.
-    const blockingShown = !blocking.hidden;
-    const under = phone ? (blockingShown ? blocking : document.querySelector("header")).getBoundingClientRect().bottom : 0;
-    const boardEl = el("board");
-    boardEl.style.top = phone ? Math.max(0, Math.round(under)) + "px" : "";
-    el("board-shade").style.top = boardEl.style.top;
+    // The header, and who is blocking under it, are pinned at the top: their
+    // heights, from the layout (not where they happen to be scrolled to), so
+    // the strip sits below the header and the Board opens below both.
+    const header = document.querySelector("header");
+    const headerHeight = phone ? Math.round(header.offsetHeight) : 0;
+    const blockingHeight = phone && !blocking.hidden ? Math.round(blocking.offsetHeight) : 0;
+    const root = document.documentElement.style;
+    root.setProperty("--pinned-header", headerHeight + "px");
+    root.setProperty("--pinned-all", headerHeight + blockingHeight + "px");
     el("board-shade").hidden = !(phone && boardOpen);
+    // While the Board is open it is the only thing that takes the keyboard.
+    for (const behind of [document.querySelector("main > #agents-column"), el("middle"), blocking, header]) {
+      if (behind) behind.inert = phone && boardOpen && behind !== header;
+    }
+    el("board").setAttribute("role", phone ? "dialog" : "region");
+    if (phone) el("board").setAttribute("aria-modal", boardOpen ? "true" : "false");
+    else el("board").removeAttribute("aria-modal");
     el("board-open").setAttribute("aria-expanded", phone && boardOpen ? "true" : "false");
     const open = board ? (board.decide || []).length + (board.yours || []).length : 0;
     el("board-open").textContent = open ? "Board (" + open + ")" : "Board";
-    const agent = state && state.agents.find((s) => s.key === shownKey());
     el("back-to-agents").textContent = "\u2190 All agents" + (state && state.agents.length > 1 ? " (" + state.agents.length + ")" : "");
-    if (phone && phoneView === "agent" && !agent) phoneView = "list";
   }
   function showAgentView() {
     if (!phoneWidth.matches) return;
@@ -493,7 +503,16 @@
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape" && boardOpen) setBoard(false);
   });
-  phoneWidth.addEventListener("change", () => drawPhone());
+  // From phone width to wider: the Board is a column again, not a drawer,
+  // and nothing waits to open by itself when the width comes back.
+  phoneWidth.addEventListener("change", () => {
+    if (!phoneWidth.matches) boardOpen = false;
+    drawPhone();
+  });
+  window.addEventListener("resize", () => drawPhone());
+  // A reload while an agent was open starts at the list, with no entry left
+  // over for Back to land on.
+  if (history.state && history.state.lillignode === "agent") history.replaceState(null, "");
 
   function choose(key) {
     showAgentView();

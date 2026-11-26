@@ -265,8 +265,15 @@ body.phone main { overflow: visible; }
 body.phone main > section { overflow: visible; }
 body.phone .phone-only:not([hidden]) { display: block; }
 body.phone header { position: sticky; top: 0; z-index: 30; background: var(--navy); }
-body.phone #blocking { position: sticky; top: 0; z-index: 25; }
-body.phone #blocking li { cursor: pointer; text-decoration: underline; text-underline-offset: 3px; }
+/* Pinned under the header, never behind it. */
+body.phone #blocking { position: sticky; top: var(--pinned-header, 0); z-index: 25; }
+/* Whatever the page scrolls to (the message box, a card) lands below both. */
+html:has(body.phone) { scroll-padding-top: calc(var(--pinned-all, 0px) + 8px); }
+#blocking .blocking-open {
+  display: block; width: 100%; text-align: left; font: inherit; color: inherit;
+  background: none; border: 0; padding: 2px 0; cursor: pointer;
+  text-decoration: underline; text-underline-offset: 3px;
+}
 body.phone[data-view="list"] #middle { display: none; }
 body.phone[data-view="agent"] #agents-column { display: none; }
 body.phone #board-open {
@@ -278,12 +285,15 @@ body.phone #back-to-agents, body.phone #board-close {
   background: transparent; color: var(--cream); border: 1px solid var(--cream-quiet); border-radius: 3px;
 }
 body.phone #board {
-  position: fixed; top: 0; right: 0; bottom: 0; width: min(92vw, 420px); z-index: 40;
+  position: fixed; top: var(--pinned-all, 0); right: 0; bottom: 0; width: min(92vw, 420px); z-index: 40;
   background: var(--navy); border-left: 1px solid var(--rule); overflow: auto;
   transform: translateX(100%); transition: transform 0.22s ease-out; visibility: hidden;
 }
 body.phone.board-open #board { transform: translateX(0); visibility: visible; }
-#board-shade { position: fixed; top: 0; right: 0; bottom: 0; left: 0; z-index: 35; background: rgba(0, 0, 0, 0.45); }
+#board-shade { position: fixed; top: var(--pinned-all, 0); right: 0; bottom: 0; left: 0; z-index: 35; background: rgba(0, 0, 0, 0.45); }
+/* Slides out before it is hidden, so the closing is seen too. */
+body.phone #board { transition: transform 0.22s ease-out, visibility 0s linear 0.22s; }
+body.phone.board-open #board { transition: transform 0.22s ease-out, visibility 0s; }
 body.phone #agents button { padding-top: 14px; padding-bottom: 14px; }
 body.phone #terminal { font-size: 12px; }
 @media (prefers-reduced-motion: reduce) { body.phone #board { transition: none; } }
