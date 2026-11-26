@@ -31,43 +31,11 @@ pub enum AgentKind {
 /// offered: each command and what it is called.
 pub const KNOWN: &[(&str, &str)] = &[("claude", "Claude Code"), ("codex", "Codex")];
 
-/// Which of the agents Lillignode knows by name are on this machine, by
-/// looking for their program in each folder of `path` (as the `PATH`
-/// variable has it), with any of `extensions` (`PATHEXT` on Windows; none
-/// elsewhere). Nothing is started: a program found is only a file seen.
-/// `exists` says whether a file is there, so this can be tried without a
-/// real disk.
-pub fn found_on_path(
-    path: &std::ffi::OsStr,
-    extensions: &[String],
-    exists: impl Fn(&Path) -> bool,
-) -> Vec<(&'static str, &'static str)> {
-    let folders: Vec<std::path::PathBuf> = std::env::split_paths(path).collect();
-    KNOWN
-        .iter()
-        .copied()
-        .filter(|(command, _)| {
-            folders.iter().any(|folder| {
-                exists(&folder.join(command))
-                    || extensions.iter().any(|ext| exists(&folder.join(format!("{command}{ext}"))))
-            })
-        })
-        .collect()
-}
-
-/// The file endings a program may have on this system, as `found_on_path`
-/// wants them.
-pub fn program_extensions() -> Vec<String> {
-    if cfg!(windows) {
-        std::env::var("PATHEXT")
-            .unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string())
-            .split(';')
-            .filter(|e| !e.is_empty())
-            .map(|e| e.to_lowercase())
-            .collect()
-    } else {
-        Vec::new()
-    }
+/// Which of the agents Lillignode knows by name are on this machine:
+/// those `resolve` finds a program for. Given the same lookup Lillignode
+/// starts programs with, "found" means "would start". Nothing is run.
+pub fn found(resolve: impl Fn(&str) -> Option<std::path::PathBuf>) -> Vec<(&'static str, &'static str)> {
+    KNOWN.iter().copied().filter(|(command, _)| resolve(command).is_some()).collect()
 }
 
 impl AgentKind {
@@ -209,18 +177,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_known_agents_found_on_the_path_are_named_and_nothing_else() {
-        let sep = if cfg!(windows) { ";" } else { ":" };
-        let path = std::ffi::OsString::from(format!("/a{sep}/b"));
-        let on_disk =
-            |files: &'static [&'static str]| move |p: &Path| files.iter().any(|f| Path::new(f) == p);
-        let exts = vec![".cmd".to_string(), ".exe".to_string()];
-        assert_eq!(found_on_path(&path, &exts, on_disk(&["/b/claude.cmd"])), [("claude", "Claude Code")]);
-        assert_eq!(
-            found_on_path(&path, &[], on_disk(&["/a/codex", "/b/claude"])),
-            [("claude", "Claude Code"), ("codex", "Codex")]
-        );
-        assert!(found_on_path(&path, &exts, on_disk(&["/a/claudette.exe", "/c/claude.exe"])).is_empty());
+    fn the_known_agents_found_are_those_the_lookup_finds() {
+        let only = |names: &'static [&'static str]| {
+            move |c: &str| names.contains(&c).then(|| std::path::PathBuf::from(format!("/bin/{c}")))
+        };
+        assert_eq!(found(only(&["claude"])), [("claude", "Claude Code")]);
+        assert_eq!(found(only(&["codex", "claude"])), [("claude", "Claude Code"), ("codex", "Codex")]);
+        assert!(found(only(&["claudette"])).is_empty());
     }
 
     #[test]

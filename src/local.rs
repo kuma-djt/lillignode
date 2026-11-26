@@ -72,6 +72,20 @@ pub fn resolve_command(command: &str) -> Option<PathBuf> {
     std::env::split_paths(&paths).find_map(|dir| candidates(&dir.join(command)))
 }
 
+/// Whether a file found by `resolve_command` can be started: on Unix, only
+/// with permission to run it. (On Windows its ending already says so.)
+pub fn can_run(program: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(program).is_ok_and(|m| m.permissions().mode() & 0o111 != 0)
+    }
+    #[cfg(not(unix))]
+    {
+        program.is_file()
+    }
+}
+
 fn is_batch(program: &Path) -> bool {
     program
         .extension()

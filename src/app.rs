@@ -4398,8 +4398,31 @@ Cost",
         assert!(text.contains("There is no settings file. None is needed"), "{text}");
         app.found_agents = Some(vec![]);
         let text = words(&app);
-        assert!(text.contains("No agent Lillignode knows by name was found on this machine"), "{text}");
-        assert!(text.contains("Any other program can be started by its name."), "{text}");
+        assert!(
+            text.contains("No agent Lillignode knows by name (claude, codex) was found when it started"),
+            "{text}"
+        );
+        assert!(text.contains("then start Lillignode again"), "{text}");
+        assert!(
+            text.contains("asks which agent (its command)"),
+            "no claude: Enter alone is not offered: {text}"
+        );
+        app.found_agents = Some(vec![("codex", "Codex")]);
+        let text = words(&app);
+        assert!(text.contains("asks which agent (type codex)"), "{text}");
+        assert!(!text.contains("Enter alone: claude"), "{text}");
+
+        // The narrowest window: the way forward and the menu keys, whole.
+        app.found_agents = Some(vec![("claude", "Claude Code")]);
+        let rows = screen(&app, crate::ui::MIN_COLS, crate::ui::MIN_ROWS);
+        // The text column, beside the gnome, as the welcome test reads it.
+        let text: String =
+            rows.iter().map(|r| part(r, 43, 80).trim().to_string()).collect::<Vec<_>>().join(" ");
+        assert!(text.contains("No agents yet. Press n to start one."), "{text}");
+        assert!(text.contains("Found on this machine: claude (Claude Code)."), "{text}");
+        // The menu keys: on the bar, at all times.
+        let bar = &rows[crate::ui::MIN_ROWS as usize - 1];
+        assert!(bar.starts_with("Ctrl+Q or F12: menu"), "{bar}");
     }
 
     #[test]

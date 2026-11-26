@@ -221,6 +221,8 @@ pub struct Board {
     pub not_read_count: usize,
     /// The whole file could not be read: why.
     pub problem: Option<String>,
+    /// There is no Board's file at all (as against one with nothing open).
+    pub no_file: bool,
 }
 
 #[derive(Deserialize)]
@@ -403,7 +405,7 @@ pub fn read(folder: Option<&Path>) -> Board {
     let Some(folder) = folder else { return Board::default() };
     match read_file(&folder.join(FILE)) {
         Ok(Some(text)) => from_text(&text),
-        Ok(None) => Board::default(),
+        Ok(None) => Board { no_file: true, ..Board::default() },
         Err(why) => unreadable(&why),
     }
 }
@@ -602,6 +604,7 @@ impl Board {
             "yours": list(&self.yours),
             "know": list(&self.know),
             "empty": self.is_empty(),
+            "no_file": self.no_file,
             "not_read": not_read,
             "problem": self.problem,
         })

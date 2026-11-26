@@ -162,7 +162,9 @@
     noAgents.hidden = !state || state.agents.length > 0;
     // With no agents: what Lillignode is and the one next step, in place of
     // an empty terminal.
-    const none = !!state && state.agents.length === 0;
+    // Not while contact is lost or the page has stopped: what it would
+    // promise ("it appears here at once") would not be so.
+    const none = !!state && state.agents.length === 0 && lostAt === null && !movedOn;
     el("first-run").hidden = !none;
     terminal.hidden = none;
     const rows = state ? state.agents : [];
@@ -854,6 +856,7 @@
   // none yet knows how they would appear.
   function emptyBoardWords() {
     if (board.adapter) return "Nothing on the Board at " + board.adapter.name + ".";
+    if (!board.no_file) return "Nothing open on the Board.";
     return "Nothing on the Board. Cards come from a file, board.json, in the folder Lillignode saves in " +
       "(lillignode --where says where), or from a program your settings name. Until then this column stays empty.";
   }
