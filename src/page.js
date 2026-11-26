@@ -160,6 +160,11 @@
   function drawAgents() {
     const shown = shownKey();
     noAgents.hidden = !state || state.agents.length > 0;
+    // With no agents: what Lillignode is and the one next step, in place of
+    // an empty terminal.
+    const none = !!state && state.agents.length === 0;
+    el("first-run").hidden = !none;
+    terminal.hidden = none;
     const rows = state ? state.agents : [];
     // Rows are kept and changed in place, so a row keeps the keyboard's
     // place while its words change.
@@ -782,7 +787,7 @@
     }
     const focused = document.activeElement && document.activeElement.classList.contains("note");
     boardNote.hidden = !(board.problem || board.empty);
-    boardNote.textContent = board.problem || (board.empty ? "Nothing on the Board." : "");
+    boardNote.textContent = board.problem || (board.empty ? emptyBoardWords() : "");
     const part = (id, cards, row) => {
       el(id).hidden = cards.length === 0;
       el(id + "-list").replaceChildren(...cards.map(row));
@@ -843,6 +848,14 @@
       boardNote.textContent = said;
     }
     boardNote.classList.toggle("board-trouble", !!said);
+  }
+
+  // What an empty Board says: where cards come from, so a reader who has
+  // none yet knows how they would appear.
+  function emptyBoardWords() {
+    if (board.adapter) return "Nothing on the Board at " + board.adapter.name + ".";
+    return "Nothing on the Board. Cards come from a file, board.json, in the folder Lillignode saves in " +
+      "(lillignode --where says where), or from a program your settings name. Until then this column stays empty.";
   }
 
   function readBoard() {

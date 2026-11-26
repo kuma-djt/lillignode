@@ -405,7 +405,7 @@ fn draw_welcome<B: AgentBackend>(frame: &mut Frame, area: Rect, app: &App<B>, p:
         );
     }
     let bold = Style::default().add_modifier(Modifier::BOLD);
-    let text = vec![
+    let mut text = vec![
         Line::from(vec![
             Span::styled("No agents yet. ", bold),
             Span::raw("Press "),
@@ -422,16 +422,52 @@ fn draw_welcome<B: AgentBackend>(frame: &mut Frame, area: Rect, app: &App<B>, p:
             ),
         ]),
         Line::default(),
-        Line::from(Span::styled(
-            format!("{} opens Lillignode's menu.", app.config.menu_keys_label()),
-            p.dim(),
-        )),
     ];
+    text.extend(first_agent_lines(app, p));
+    text.push(Line::default());
+    text.push(Line::from(Span::styled(
+        format!("{} opens Lillignode's menu.", app.config.menu_keys_label()),
+        p.dim(),
+    )));
+    if app.no_settings_file {
+        text.push(Line::from(Span::styled(
+            "There is no settings file. None is needed: everything here works without one.",
+            p.dim(),
+        )));
+    }
     let width = (area.x + area.width).saturating_sub(text_x + 2);
     frame.render_widget(
         Paragraph::new(text).wrap(Wrap { trim: false }),
         Rect::new(text_x, area.y + 1, width, area.height.saturating_sub(1)),
     );
+}
+
+/// How to start the first agent, and which agents are on this machine.
+fn first_agent_lines<B: AgentBackend>(app: &App<B>, p: Palette) -> Vec<Line<'static>> {
+    let bold = Style::default().add_modifier(Modifier::BOLD);
+    let mut lines = vec![Line::from(vec![
+        Span::styled("Your first agent: ", bold),
+        Span::raw("press "),
+        Span::styled("n", p.key()),
+        Span::raw(
+            ". Lillignode asks which agent (Enter alone: claude), any options for it, and which folder \
+             it works in (Enter alone: this one).",
+        ),
+    ])];
+    match app.found_agents.as_deref() {
+        None => {}
+        Some([]) => lines.push(Line::from(Span::raw(
+            "No agent Lillignode knows by name was found on this machine (it looks for claude and \
+             codex). Install one, for example Claude Code, then press n. Any other program can be \
+             started by its name.",
+        ))),
+        Some(found) => {
+            let names: Vec<String> =
+                found.iter().map(|(command, name)| format!("{command} ({name})")).collect();
+            lines.push(Line::from(Span::raw(format!("Found on this machine: {}.", names.join(", ")))));
+        }
+    }
+    lines
 }
 
 /// What an agent that was not started shows in place of its screen. A

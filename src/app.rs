@@ -280,6 +280,13 @@ pub struct App<B: AgentBackend> {
     pub board_adapter: Option<crate::adapter::Link>,
     /// The program named, as said in the status report.
     board_adapter_named: Option<String>,
+    /// The agents Lillignode knows by name that were found on this
+    /// machine's PATH when it started, for the first screen: each command
+    /// and what it is called. None: not looked for.
+    pub found_agents: Option<Vec<(&'static str, &'static str)>>,
+    /// There is no settings file: said on the first screen, so a reader
+    /// knows nothing is wrong with that.
+    pub no_settings_file: bool,
     /// Why the page's address will not be the same next start, if it will
     /// not.
     page_word_not_kept: Option<String>,
@@ -533,6 +540,8 @@ impl<B: AgentBackend> App<B> {
             board_folder,
             board_adapter: None,
             board_adapter_named: None,
+            found_agents: None,
+            no_settings_file: false,
             page_word_not_kept: None,
         };
         app.say_events();
@@ -4366,6 +4375,31 @@ Cost",
         assert!(app.bar().starts_with("Folder to work in: C:\\workapi   (Enter alone"), "{}", app.bar());
         // The cursor sits where the typing is, not past it.
         assert_eq!(app.bar_cursor(), Some("Folder to work in: C:\\workapi".chars().count()));
+    }
+
+    #[test]
+    fn the_first_screen_says_how_to_start_an_agent_which_are_here_and_that_no_settings_is_fine() {
+        let words = |app: &App<Fake>| -> String {
+            let rows = screen(app, 160, 30);
+            rows.iter().map(|r| part(r, 28, 160).trim().to_string()).collect::<Vec<_>>().join(" ")
+        };
+        let mut app = app_with_claude_agents(0);
+        let text = words(&app);
+        assert!(
+            text.contains("Your first agent: press n. Lillignode asks which agent (Enter alone: claude)"),
+            "{text}"
+        );
+        assert!(!text.contains("Found on this machine"), "not looked for: nothing said: {text}");
+        assert!(!text.contains("There is no settings file"), "{text}");
+        app.found_agents = Some(vec![("claude", "Claude Code"), ("codex", "Codex")]);
+        app.no_settings_file = true;
+        let text = words(&app);
+        assert!(text.contains("Found on this machine: claude (Claude Code), codex (Codex)."), "{text}");
+        assert!(text.contains("There is no settings file. None is needed"), "{text}");
+        app.found_agents = Some(vec![]);
+        let text = words(&app);
+        assert!(text.contains("No agent Lillignode knows by name was found on this machine"), "{text}");
+        assert!(text.contains("Any other program can be started by its name."), "{text}");
     }
 
     #[test]

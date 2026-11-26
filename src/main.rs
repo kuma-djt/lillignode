@@ -193,6 +193,14 @@ fn main() -> ExitCode {
     let mut app =
         App::launch(backend, ui::agent_size(window, false), state_dir, launch_dir, config, config_problem);
     app.set_window(window);
+    // For the first screen: which agents are on this machine (looked for,
+    // not started), and whether there is a settings file at all.
+    app.found_agents = Some(lillignode::kind::found_on_path(
+        &std::env::var_os("PATH").unwrap_or_default(),
+        &lillignode::kind::program_extensions(),
+        |p| p.is_file(),
+    ));
+    app.no_settings_file = matches!(&page_folder, Some(dir) if !dir.join(lillignode::config::FILE).exists());
     // Cost is read from Claude Code's own records, and only when the user
     // has asked for it. Where the records are is found here, in the real
     // program only.

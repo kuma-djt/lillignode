@@ -269,7 +269,15 @@ fn agent<'a>(state: &'a serde_json::Value, name: &str) -> &'a serde_json::Value 
 }
 
 fn serve(sb: &Sandbox, port: u16, can_type: bool, can_act: bool) {
-    let (mut s, page) = if can_act {
+    // With nothing at all: the page on, no agent, no Board.
+    let empty = std::env::args().any(|a| a == "--empty");
+    let (mut s, page) = if empty {
+        settings(sb, &format!("{{\"page\": true, \"page_port\": {port}}}"));
+        let mut s = Session::start(sb);
+        let page = page_on_screen(&mut s, port);
+        s.expect("no agents yet", "No agents yet.");
+        (s, page)
+    } else if can_act {
         let and_type = if can_type { ", \"page_can_type\": true" } else { "" };
         // A Board adapter, for a check that brings its own: the settings'
         // `board_adapter` as JSON, from the environment.

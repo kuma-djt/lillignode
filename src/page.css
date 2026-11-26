@@ -268,3 +268,9 @@ body.stale main { opacity: 0.55; }
   #typing { margin: 0 8px 12px; }
   #contact { margin-left: 0; }
 }
+
+/* What the page says before any agent is open. */
+#first-run { margin: 4px 16px 16px; max-width: 46em; }
+#first-run h3 { margin: 6px 0 8px; font-size: 15px; }
+#first-run p { margin: 0 0 10px; line-height: 1.45; }
+#first-run kbd { font-family: inherit; font-weight: 700; border: 1px solid var(--rule); border-radius: 3px; padding: 0 5px; }

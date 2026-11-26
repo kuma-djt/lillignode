@@ -35,6 +35,12 @@
   <section id="middle" aria-labelledby="terminal-title">
     <h2 id="terminal-title">Terminal<span id="terminal-name"></span></h2>
     <p id="terminal-note" class="quiet">Choose an agent to see its terminal.</p>
+    <!-- Shown only while Lillignode has no agents: what it is, and the one next step. -->
+    <section id="first-run" hidden>
+      <h3>Nothing is running yet</h3>
+      <p>Lillignode runs AI coding agents side by side, each in its own folder with the account it already has, and shows what each one is doing. This page shows the same, as it happens.</p>
+      <p><strong>Next: start your first agent in Lillignode's own window.</strong> Press <kbd>n</kbd> there. It asks which agent (Enter alone starts claude), any options, and which folder it works in. The agent appears here at once.</p>
+    </section>
     <pre id="terminal" aria-label="The selected agent's terminal, read only" tabindex="0"></pre>
     <!-- Shown only where Lillignode's settings let this page type to agents. -->
     <div id="typing" hidden>
