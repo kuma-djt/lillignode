@@ -1227,7 +1227,7 @@ fn adapter_section(sb: &Sandbox, port: u16) {
     check(
         "an action is held for its ten seconds, and the reader is told so",
         outcome == "sent"
-            && words == "Approve goes to the Board's adapter in ten seconds, unless you undo it.",
+            && words == "Approve goes to the stand-in Hub in ten seconds, unless you undo it on the card.",
         &words,
     );
     std::thread::sleep(Duration::from_secs(2));

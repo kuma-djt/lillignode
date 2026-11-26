@@ -602,6 +602,14 @@
         }
         boardSaid.hidden = false;
         boardSaid.textContent = heard.words;
+        // Where a program keeps the Board, the card itself says what became
+        // of it from here; the sentence would soon be out of date.
+        if (board && board.adapter) {
+          const said = heard.words;
+          setTimeout(() => {
+            if (boardSaid.textContent === said) boardSaid.hidden = true;
+          }, UNDO_MS + 1000);
+        }
         readBoard();
         drawBoard();
       })
@@ -621,13 +629,19 @@
     // Where a program keeps the Board: held for its ten seconds first.
     const onward = board && board.adapter ? (board.adapter.actions || []).filter((a) => a.card === card.id).pop() : null;
     const keeper = board && board.adapter ? board.adapter.name : null;
+    const left = Math.max(1, Math.ceil((UNDO_MS - (Date.now() - card.sent.at)) / 1000));
+    const gone = " It leaves this list when " + keeper + " closes it.";
+    const state = onward ? onward.state : "earlier";
     const said = !keeper
       ? "Sent, waiting: " + did + "."
-      : onward && onward.state === "held"
-        ? "Held for ten seconds: " + did + ". Then it goes to " + keeper + "."
-        : onward && onward.state === "unsure"
-          ? "Not known whether " + keeper + " has it: " + did + "."
-          : "Sent to " + keeper + ", waiting: " + did + ".";
+      : {
+          held: "Held: " + did + " goes to " + keeper + " in " + left + " s.",
+          sent: "Sent to " + keeper + ": " + did + ". Waiting for its answer.",
+          late: "No answer from " + keeper + " yet: " + did + ".",
+          taken: "Taken by " + keeper + ": " + did + "." + gone,
+          unsure: "Not known whether " + keeper + " has it: " + did + ". Look there before acting again.",
+          earlier: "Sent to " + keeper + " earlier: " + did + "." + gone,
+        }[state] || "Sent to " + keeper + ": " + did + ".";
     const line = text("p", "card-sent", said);
     if (canAct() && undoable(card)) {
       line.append(" ", button("Undo", "undo", () => act(card, card.sent.action, "", true)));
@@ -752,7 +766,10 @@
     if (!board) return;
     // Drawn again only when what it would show has changed, so text a
     // reader has selected, or a note being written, is left alone.
-    const now = [...board.decide, ...board.yours, ...board.know].filter(undoable).map((c) => c.id);
+    // The seconds left to undo each card: so a countdown is drawn again.
+    const now = [...board.decide, ...board.yours, ...board.know]
+      .filter(undoable)
+      .map((c) => c.id + ":" + Math.ceil((UNDO_MS - (Date.now() - c.sent.at)) / 1000));
     const from = JSON.stringify([board, canAct(), now, revising, actingNow, lostAt !== null, movedOn, [...opened]]);
     if (from === boardDrawn) return;
     boardDrawn = from;
@@ -815,11 +832,17 @@
       ? "The Board was last heard from " + adapter.name + " " + ago(adapter.board_quiet_secs * 1000) + " ago" +
         (adapter.board_quiet_secs >= 60 ? "; nothing on it can be acted on until it is heard from again." : ".")
       : null;
-    const said = adapter && [adapter.stopped, adapter.problem, quiet].filter(Boolean).join(" ");
+    const trouble = adapter && adapter.problem
+      ? adapter.problem + " The Board below is as it last came" +
+        (adapter.board_quiet_secs !== null ? ", " + ago(adapter.board_quiet_secs * 1000) + " ago" : "") +
+        "; nothing on it can be acted on until it comes through again."
+      : quiet;
+    const said = adapter && [adapter.stopped, trouble].filter(Boolean).join(" ");
     if (said && !board.problem) {
       boardNote.hidden = false;
       boardNote.textContent = said;
     }
+    boardNote.classList.toggle("board-trouble", !!said);
   }
 
   function readBoard() {

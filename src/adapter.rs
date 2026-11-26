@@ -170,10 +170,6 @@ fn at_ms(value: &Value) -> Option<u64> {
     board::parse_time(text).and_then(|secs| u64::try_from(secs).ok()).map(|secs| secs * 1000)
 }
 
-fn ms_now() -> u64 {
-    SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
-}
-
 impl Shared {
     fn new(folder: Option<&Path>, inner: Inner) -> Shared {
         Shared {
@@ -329,6 +325,12 @@ impl Link {
             return Err(format!("{} So this cannot be sent.", stopped_words(why, &inner.last_words)));
         }
         let name = inner.name.clone().unwrap_or_else(|| "the adapter".to_string());
+        if let Some(problem) = &inner.problem {
+            return Err(format!(
+                "{name} cannot be reached just now ({problem}), so nothing can be acted on until its Board comes \
+                 through again."
+            ));
+        }
         match inner.board_at {
             None => return Err(format!("No Board has come from {name} yet, so nothing can be acted on.")),
             Some(at) if at.elapsed() >= BOARD_STALE => {
@@ -580,7 +582,9 @@ fn speak(shared: &Shared, stdin: &mut impl Write, asked: &Receiver<Out>, started
         for (id, entry) in due {
             {
                 let _kept = lock(&shared.sent_lock);
-                let sent = Sent::new(&entry.card, &entry.action, ms_now(), entry.line());
+                // The time of the press, not of the sending: the ten
+                // seconds to undo it are over, and must not start again.
+                let sent = Sent::new(&entry.card, &entry.action, entry.at_ms, entry.line());
                 let _ = board::keep_sent(shared.folder.as_deref(), &sent);
             }
             let action: Value = serde_json::from_str(entry.line()).unwrap_or(Value::Null);

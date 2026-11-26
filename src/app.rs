@@ -888,8 +888,12 @@ impl<B: AgentBackend> App<B> {
                         format!("Undone: {}. Nothing is waiting for that card.", acted.action.name())
                     }
                     (false, _) if self.board_adapter.is_some() => format!(
-                        "{} goes to the Board's adapter in ten seconds, unless you undo it.",
-                        acted.action.name()
+                        "{} goes to {} in ten seconds, unless you undo it on the card.",
+                        acted.action.name(),
+                        self.board_adapter
+                            .as_ref()
+                            .and_then(|l| l.name())
+                            .unwrap_or_else(|| "the adapter".into())
                     ),
                     (false, _) => format!(
                         "Sent: {}. It waits until the Board no longer lists the card.",
