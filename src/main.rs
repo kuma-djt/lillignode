@@ -221,10 +221,13 @@ fn main() -> ExitCode {
         // the app (which sends it what was done to a card).
         let adapter = app.config.board_adapter.clone().map(|named| {
             let folder = page_folder.clone().unwrap_or_else(|| std::path::PathBuf::from("."));
-            lillignode::adapter::Link::start(&named.command, &named.args, &folder, page_folder.as_deref())
+            lillignode::adapter::Link::start(&named.command, &named.args, &named.env, &folder)
                 .unwrap_or_else(|why| lillignode::adapter::Link::failed(&why))
         });
         app.board_adapter = adapter.clone();
+        if let Some(named) = app.config.board_adapter.clone() {
+            app.adapter_named(&named.command, &named.args);
+        }
         let ways = page::Ways { typing, acting, adapter };
         match page::serve(reader, app.config.page_port, page_folder.as_deref(), ways) {
             Ok(served) => {

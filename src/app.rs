@@ -278,6 +278,8 @@ pub struct App<B: AgentBackend> {
     /// The Board's adapter, when the settings name one (running, or saying
     /// why not). With one, nothing goes to the outbox file.
     pub board_adapter: Option<crate::adapter::Link>,
+    /// The program named, as said in the status report.
+    board_adapter_named: Option<String>,
     /// Why the page's address will not be the same next start, if it will
     /// not.
     page_word_not_kept: Option<String>,
@@ -530,6 +532,7 @@ impl<B: AgentBackend> App<B> {
             page_acts: false,
             board_folder,
             board_adapter: None,
+            board_adapter_named: None,
             page_word_not_kept: None,
         };
         app.say_events();
@@ -727,6 +730,19 @@ impl<B: AgentBackend> App<B> {
         }
     }
 
+    /// The settings name a program to keep the Board: said in the status
+    /// report beside the page's address, so what runs is never a surprise.
+    pub fn adapter_named(&mut self, command: &str, args: &[String]) {
+        let shown: String = std::iter::once(command)
+            .chain(args.iter().map(String::as_str))
+            .collect::<Vec<_>>()
+            .join(" ")
+            .chars()
+            .filter(|c| !c.is_control())
+            .collect();
+        self.board_adapter_named = Some(fit::clip(&shown, 80));
+    }
+
     /// Give the page a new address. The one before stops working at once.
     fn new_page_address(&mut self) {
         let menu = self.config.menu_keys.first().map(|k| k.label()).unwrap_or_default();
@@ -838,15 +854,28 @@ impl<B: AgentBackend> App<B> {
         let done = match &self.board_adapter {
             None if undo => board::undo(folder, card, now),
             None => board::act(folder, card, action, note, seen, now),
+            // Only what is still held can be taken back: once sent on, the
+            // adapter has it.
+            Some(link) if undo => match link.withdraw(card) {
+                Some((title, entry)) => Ok(board::Acted {
+                    card: entry.card.clone(),
+                    title,
+                    action: board::Action::parse(&entry.action).unwrap_or(board::Action::Hold),
+                    warning: None,
+                    line: entry.line().to_string(),
+                }),
+                None => Err(
+                    "There is nothing held for that card to undo: it has gone on to the Board's adapter, \
+                     or was never sent. Nothing was changed."
+                        .to_string(),
+                ),
+            },
             Some(link) => {
                 let shown = link.board();
-                if undo {
-                    board::undo_on(folder, &shown, card, now, Some(&|line: &str| link.withdraw(line)))
-                } else {
-                    let title = seen.title.clone();
-                    let hold = |line: &str| link.hold(card, &title, action, line);
-                    board::act_on(folder, &shown, card, action, note, seen, now, Some(&hold))
-                }
+                let title = seen.title.clone();
+                let hold = |entry: &board::Sent| link.hold(&title, entry);
+                let held = board::Held { hold: &hold, waiting: link.held() };
+                board::act_on(folder, &shown, card, action, note, seen, now, Some(held))
             }
         };
         match done {
@@ -2331,9 +2360,16 @@ impl<B: AgentBackend> App<B> {
             None => "The address stays the same from one start to the next.".to_string(),
             Some(why) => format!("The address could not be kept ({why}), so the next start makes another."),
         };
+        let keeper = match &self.board_adapter_named {
+            Some(program) => format!(
+                "\nThe Board comes from a program your settings name (\"board_adapter\"): {program}. It runs as \
+                 you, and what you press on a card goes to it.\n"
+            ),
+            None => String::new(),
+        };
         format!(
             "\nThe page: {address}\nAnyone with this address can see every agent's name, status and screen \
-             while Lillignode is open.{types}{acts} {lasts} For a new address now: {menu}, then w.\n"
+             while Lillignode is open.{types}{acts} {lasts} For a new address now: {menu}, then w.\n{keeper}"
         )
     }
 

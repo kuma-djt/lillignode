@@ -246,6 +246,10 @@ struct CardShape {
     due_at: Option<String>,
     #[serde(default)]
     amount_cents: Option<Value>,
+    /// The field's earlier name, still honoured: a card a reader already
+    /// has with it must not become approvable from the page.
+    #[serde(default)]
+    amount: Option<Value>,
     #[serde(default)]
     risk: Option<Value>,
 }
@@ -259,7 +263,7 @@ fn has_amount(amount_cents: &Option<Value>) -> bool {
         None | Some(Value::Null) => false,
         Some(Value::Number(n)) => n.as_f64().is_some_and(|n| n > 0.0),
         Some(Value::String(text)) if text.trim().is_empty() => false,
-        Some(Value::String(text)) => text.trim().parse::<f64>().map_or(true, |n| n > 0.0),
+        Some(Value::String(text)) => text.trim().parse::<f64>().map_or(true, |n| n.is_nan() || n > 0.0),
         Some(_) => true,
     }
 }
@@ -505,7 +509,10 @@ pub fn from_text(text: &str) -> Board {
             created_at,
             due_at,
             due_whole_day: shape.due_at.as_deref().is_some_and(|text| !text.trim().contains(['T', 't', ' '])),
-            hub_only: kind == Kind::Fire || has_amount(&shape.amount_cents) || risk_is_high(&shape.risk),
+            hub_only: kind == Kind::Fire
+                || has_amount(&shape.amount_cents)
+                || has_amount(&shape.amount)
+                || risk_is_high(&shape.risk),
         });
     }
     for card in cards {
@@ -612,6 +619,17 @@ pub struct Sent {
     /// The line added to the outbox, whole: undoing it takes out exactly
     /// this line.
     line: String,
+}
+
+impl Sent {
+    pub fn new(card: &str, action: &str, at_ms: u64, line: &str) -> Sent {
+        Sent { card: card.to_string(), action: action.to_string(), at_ms, line: line.to_string() }
+    }
+
+    /// The action's line, whole.
+    pub fn line(&self) -> &str {
+        &self.line
+    }
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -766,9 +784,15 @@ pub fn act(
     act_on(folder, &board, card, action, note, seen, now, None)
 }
 
-/// Where an action's line goes when it is not added to the outbox file:
-/// held, to be sent on later by whoever holds it. Says why if it cannot be.
-pub type Hold<'a> = &'a dyn Fn(&str) -> Result<(), String>;
+/// Where an action goes when it is not added to the outbox file: held by
+/// whoever keeps the Board for it, to be sent on later. `hold` says why if
+/// it cannot be. `waiting` is what that keeper already holds or has sent,
+/// so a card is not acted on twice. Nothing is written to `SENT` here:
+/// the keeper writes there only what it has really sent on.
+pub struct Held<'a> {
+    pub hold: &'a dyn Fn(&Sent) -> Result<(), String>,
+    pub waiting: Vec<Sent>,
+}
 
 /// As `act`, on `board` as given (from the Board's file or from an
 /// adapter), and with the line given to `hold` in place of the outbox
@@ -782,7 +806,7 @@ pub fn act_on(
     note: &str,
     seen: &Seen,
     now: SystemTime,
-    hold: Option<Hold>,
+    held: Option<Held>,
 ) -> Result<Acted, String> {
     let Some(folder) = folder else { return Err(NOWHERE.to_string()) };
     if let Some(problem) = &board.problem {
@@ -825,7 +849,8 @@ pub fn act_on(
         .into_iter()
         .filter(|s| board.cards().any(|c| c.id == s.card))
         .collect();
-    if let Some(earlier) = waiting.iter().find(|s| s.card == card) {
+    let also = held.as_ref().map(|h| h.waiting.clone()).unwrap_or_default();
+    if let Some(earlier) = waiting.iter().chain(also.iter()).find(|s| s.card == card) {
         let did = Action::parse(&earlier.action).map_or("an action", Action::name);
         return Err(format!(
             "{did} was already sent for that card, and it is waiting. Nothing more was sent."
@@ -840,6 +865,12 @@ pub fn act_on(
         "title": found.title,
     })
     .to_string();
+    if let Some(held) = held {
+        let entry =
+            Sent { card: card.to_string(), action: action.word().to_string(), at_ms, line: line.clone() };
+        (held.hold)(&entry).map_err(|why| format!("{why} Nothing was sent."))?;
+        return Ok(Acted { card: card.to_string(), title: found.title.clone(), action, warning: None, line });
+    }
     let could_not =
         |e: std::io::Error| format!("The Board's outbox could not be written ({e}). Nothing was sent.");
     // Kept as waiting first: if the line then cannot be added, the keeping
@@ -852,15 +883,22 @@ pub fn act_on(
         line: line.clone(),
     });
     write_sent(folder, waiting).map_err(could_not)?;
-    let added = match hold {
-        Some(hold) => hold(&line).map_err(|why| format!("{why} Nothing was sent.")),
-        None => add_line(folder, &line).map_err(could_not),
-    };
-    if let Err(why) = added {
+    if let Err(e) = add_line(folder, &line) {
         let _ = write_sent(folder, before);
-        return Err(why);
+        return Err(could_not(e));
     }
     Ok(Acted { card: card.to_string(), title: found.title.clone(), action, warning: None, line })
+}
+
+/// Keeps that this action was really sent on, so the card shows as waiting
+/// and is not acted on twice, also after Lillignode is started again. The
+/// caller keeps this and `forget_sent` from running at the same time.
+pub fn keep_sent(folder: Option<&Path>, entry: &Sent) -> Result<(), String> {
+    let Some(folder) = folder else { return Ok(()) };
+    let mut waiting = sent(Some(folder))?;
+    waiting.retain(|s| s.card != entry.card);
+    waiting.push(entry.clone());
+    write_sent(folder, waiting).map_err(|e| format!("{SENT} could not be written ({e})"))
 }
 
 /// The card whose action's line this is waits no longer: what it was
@@ -879,22 +917,11 @@ pub fn forget_sent(folder: Option<&Path>, line: &str) {
 /// then nothing was changed.
 pub fn undo(folder: Option<&Path>, card: &str, now: SystemTime) -> Result<Acted, String> {
     let board = read(folder);
-    undo_on(folder, &board, card, now, None)
+    undo_on(folder, &board, card, now)
 }
 
-/// Takes a held line back: true if it was still held, false if it has
-/// already gone on.
-pub type Withdraw<'a> = &'a dyn Fn(&str) -> bool;
-
-/// As `undo`, on `board` as given, taking the line back from whoever
-/// holds it (`withdraw`) in place of the outbox file, if there is one.
-pub fn undo_on(
-    folder: Option<&Path>,
-    board: &Board,
-    card: &str,
-    now: SystemTime,
-    withdraw: Option<Withdraw>,
-) -> Result<Acted, String> {
+/// As `undo`, on `board` as given.
+pub fn undo_on(folder: Option<&Path>, board: &Board, card: &str, now: SystemTime) -> Result<Acted, String> {
     let Some(folder) = folder else { return Err(NOWHERE.to_string()) };
     let mut waiting = sent(Some(folder)).map_err(|why| format!("{why} Nothing was changed."))?;
     let Some(at) = waiting.iter().position(|s| s.card == card) else {
@@ -911,16 +938,7 @@ pub fn undo_on(
             UNDO_FOR.as_secs()
         ));
     }
-    let taken = match withdraw {
-        Some(withdraw) if withdraw(&was.line) => Ok(true),
-        Some(_) => {
-            return Err(
-                "It has already been sent on, so it cannot be undone. Nothing was changed.".to_string()
-            )
-        }
-        None => take_line(folder, &was.line),
-    };
-    match taken {
+    match take_line(folder, &was.line) {
         Ok(true) => {}
         Ok(false) => {
             return Err(
@@ -1451,6 +1469,7 @@ mod tests {
             with("zero-text", "decide", "amount_cents", json!("0")),
             with("below", "decide", "amount_cents", json!(-5)),
             with("old-field", "decide", "amount", json!(1200)),
+            with("not-a-number", "decide", "amount_cents", json!("NaN")),
             with("high", "decide", "risk", json!("High")),
             with("high-said", "question", "risk", json!("high: two callers break")),
             with("high-know", "know", "risk", json!("HIGH")),
@@ -1463,7 +1482,20 @@ mod tests {
         let hub: Vec<&str> = b.cards().filter(|c| c.hub_only).map(|c| c.id.as_str()).collect();
         let mut hub = hub;
         hub.sort_unstable();
-        assert_eq!(hub, ["fire", "high", "high-know", "high-said", "money", "money-text", "money-words"]);
+        assert_eq!(
+            hub,
+            [
+                "fire",
+                "high",
+                "high-know",
+                "high-said",
+                "money",
+                "money-text",
+                "money-words",
+                "not-a-number",
+                "old-field"
+            ]
+        );
         // The page is told, and offered no action for them.
         let shown = b.to_json(&[]);
         let of = |id: &str| -> Value {

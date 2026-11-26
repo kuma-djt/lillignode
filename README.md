@@ -197,15 +197,17 @@ Instead of the two files, Lillignode can start one program of your choosing and 
 
 ```json
 { "page": true, "page_can_act": true,
-  "board_adapter": { "command": "python", "args": ["C:/tools/my_adapter.py"] } }
+  "board_adapter": { "command": "C:/Python/python.exe", "args": ["C:/tools/my_adapter.py"],
+                     "env": ["MY_SERVICE_URL", "MY_SERVICE_KEY"] } }
 ```
 
-- **Off unless named.** Without `board_adapter`, the files are used as above.
-- **What it sends** (one JSON object a line on its output): `{"hello": 1, "name": "…"}`, then `{"cards": [ … ]}` (the whole Board, each card as in `board.json`) as often as it likes, and, if it has them, `{"reporting": [ {"agent": "…", "line": "…", "at": "…"} ]}`: agents that run elsewhere and report through it, each with its newest line. The page lists those under "Reporting through" and the name it gave, apart from Lillignode's own agents.
-- **What it is sent** (on its input): `{"hello": 1}`, then each action as `{"id": "a1", "action": { …the line that would have gone to the outbox… }}`. It answers `{"took": "a1"}` or `{"refused": "a1", "why": "…"}`; both are shown under the Board, and a refused card can be acted on again.
-- **Sent only after ten seconds.** An action is held for the ten seconds Undo lasts and sent only if it was not undone. Only actions Lillignode wrote on your press are ever held, so only those are ever sent. Quitting inside the ten seconds sends nothing.
-- **Nothing goes to the outbox file instead.** If the program cannot be started, says nothing for ten seconds, or stops, the Board says so and nothing can be acted on until Lillignode is started again. It is not started again by itself.
-- **It runs as you**, with your environment, in the folder Lillignode saves in. Whatever it needs to reach a service (an address, a key) it takes from there; Lillignode never sees it.
+- **Off unless named.** Without `board_adapter`, the files are used as above. Lillignode's status report (the menu key, then `s`) names the program while one is set.
+- **Only what you name reaches it.** It is given its path, its temporary folder and your user folders, the environment variables listed in `env`, and nothing else of Lillignode's environment. It runs as you, in the folder Lillignode saves in. Give `command` as a full path.
+- **What it sends** (one JSON object a line on its output): `{"hello": 1, "name": "…"}`, then `{"cards": [ … ]}` (the whole Board, each card as in `board.json`) as often as it likes, and, if it has them, `{"reporting": [ {"agent": "…", "line": "…", "at": "…"} ]}`: agents that run elsewhere and report through it, each with its newest line. The page lists those under "Reporting through" and the name it gave, apart from Lillignode's own agents. `{"problem": "…"}` is shown under the Board until the next Board arrives.
+- **What it is sent** (on its input): `{"hello": 1}`, then each action as `{"id": "a1", "action": { …the line that would have gone to the outbox… }}`. It answers `{"took": "a1"}`, `{"refused": "a1", "why": "…"}`, or `{"unsure": "a1", "why": "…"}` when it cannot tell whether the service has it. All three are shown under the Board. A refused card can be acted on again; one it took, or is unsure of, waits.
+- **Sent only after ten seconds.** An action is held for the ten seconds Undo lasts and sent only if it was not undone. Only actions Lillignode wrote on your press are ever held, so only those are ever sent. Only once it is really sent is the card kept as waiting; if Lillignode quits or the program stops inside the ten seconds, it is not sent and nothing says it was.
+- **An old Board is not acted on.** If no Board has come from the program for a minute, the page says how long ago it last did, and nothing on it can be acted on until one comes.
+- **Nothing goes to the outbox file instead.** If the program cannot be started, says nothing for ten seconds, speaks another version of the pipe, or stops, the Board says so and nothing can be acted on until Lillignode is started again. It is not started again by itself.
 
 ## Settings
 

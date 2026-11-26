@@ -300,10 +300,11 @@
     standing.textContent = token && acts ? CAN_BOTH : token ? CAN_TYPE : acts ? CAN_ACT : READ_ONLY;
     // Where a program keeps the Board, a press goes to it, not to a file.
     if (acts && board && board.adapter) {
-      standing.textContent = standing.textContent.replace(
-        "the Board's outbox.",
-        board.adapter.name + ", ten seconds later unless you undo it.",
-      ).replace("which adds it to " + board.adapter.name, "which sends it to " + board.adapter.name);
+      const onward = board.adapter.name + ", ten seconds later unless you undo it.";
+      standing.textContent = token
+        ? "This page can type to your agents and act on your Board. Text goes to the agent named under the " +
+          "terminal; what you press on a card goes to " + onward
+        : "This page can act on your Board: what you press on a card is passed to Lillignode, which sends it to " + onward;
     }
     standing.className = token || acts ? "can-type" : "";
     const key = target();
@@ -619,9 +620,14 @@
     const did = word(ACTION_WORDS, card.sent.action) || "something";
     // Where a program keeps the Board: held for its ten seconds first.
     const onward = board && board.adapter ? (board.adapter.actions || []).filter((a) => a.card === card.id).pop() : null;
-    const said = onward && onward.state === "held"
-      ? "Held for ten seconds: " + did + ". Then it goes to " + board.adapter.name + "."
-      : onward ? "Sent to " + board.adapter.name + ": " + did + "." : "Sent, waiting: " + did + ".";
+    const keeper = board && board.adapter ? board.adapter.name : null;
+    const said = !keeper
+      ? "Sent, waiting: " + did + "."
+      : onward && onward.state === "held"
+        ? "Held for ten seconds: " + did + ". Then it goes to " + keeper + "."
+        : onward && onward.state === "unsure"
+          ? "Not known whether " + keeper + " has it: " + did + "."
+          : "Sent to " + keeper + ", waiting: " + did + ".";
     const line = text("p", "card-sent", said);
     if (canAct() && undoable(card)) {
       line.append(" ", button("Undo", "undo", () => act(card, card.sent.action, "", true)));
@@ -783,8 +789,9 @@
   }
 
   // Where an adapter keeps the Board: who reports through it, and what came
-  // of each action. Ages are counted from the adapter's own clock reading,
-  // so a page on another machine with its clock wrong still says them right.
+  // of each action. Ages are counted against Lillignode's clock, not the
+  // page's, so a page whose own clock is wrong still says them right; the
+  // times themselves are the service's.
   function drawAdapter() {
     const adapter = board.adapter;
     const reporting = adapter ? adapter.reporting || [] : [];
@@ -804,7 +811,11 @@
       const did = word(ACTION_WORDS, a.action) || a.action;
       return text("li", "sent-on sent-on-" + a.state, did + " on “" + a.title + "”: " + a.words);
     }));
-    const said = adapter && (adapter.stopped || adapter.problem);
+    const quiet = adapter && adapter.board_quiet_secs !== null && adapter.board_quiet_secs >= 15
+      ? "The Board was last heard from " + adapter.name + " " + ago(adapter.board_quiet_secs * 1000) + " ago" +
+        (adapter.board_quiet_secs >= 60 ? "; nothing on it can be acted on until it is heard from again." : ".")
+      : null;
+    const said = adapter && [adapter.stopped, adapter.problem, quiet].filter(Boolean).join(" ");
     if (said && !board.problem) {
       boardNote.hidden = false;
       boardNote.textContent = said;

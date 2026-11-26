@@ -168,6 +168,11 @@ pub struct BoardAdapter {
     pub command: String,
     #[serde(default)]
     pub args: Vec<String>,
+    /// The names of the environment variables it is given, besides what
+    /// any program needs to run (its path, its temporary folder, the
+    /// user's folders). Nothing else of Lillignode's environment reaches it.
+    #[serde(default)]
+    pub env: Vec<String>,
 }
 
 /// How the user pays, which decides whether a dollar figure means anything
@@ -397,7 +402,7 @@ mod tests {
             parse(r#"{"page": true, "board_adapter": {"command": "python", "args": ["hub.py"]}}"#).unwrap();
         assert_eq!(
             adapter.board_adapter,
-            Some(BoardAdapter { command: "python".into(), args: vec!["hub.py".into()] })
+            Some(BoardAdapter { command: "python".into(), args: vec!["hub.py".into()], env: vec![] })
         );
         assert_eq!(parse(r#"{"page": true}"#).unwrap().board_adapter, None);
         assert!(parse(r#"{"board_adapter": {"command": "python"}}"#).unwrap_err().contains("\"page\": true"));

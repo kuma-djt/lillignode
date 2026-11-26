@@ -698,10 +698,14 @@ fn answer(stream: &TcpStream, serving: &Serving) -> std::io::Result<()> {
             let folder = serving.folder.as_deref();
             // If which cards were acted on cannot be read, the page is told
             // why, and offers no button: a card must not be acted on twice.
-            let (waiting, acting_off) = match board::sent(folder) {
+            let (mut waiting, acting_off) = match board::sent(folder) {
                 Ok(waiting) => (waiting, None),
                 Err(why) => (Vec::new(), Some(why)),
             };
+            // Held by the adapter for their ten seconds: waiting too.
+            if let Some(adapter) = &serving.adapter {
+                waiting.extend(adapter.held());
+            }
             let mut shown = match &serving.adapter {
                 Some(adapter) => adapter.board().to_json(&waiting),
                 None => board::read(folder).to_json(&waiting),

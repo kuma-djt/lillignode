@@ -1197,6 +1197,13 @@ fn adapter_section(sb: &Sandbox, port: u16) {
     settings(sb, &named.to_string());
     let mut s = Session::start(sb);
     let page = page_on_screen(&mut s, port);
+    s.raw(CTRL_Q);
+    s.keys(b"s");
+    s.expect(
+        "the status report names the program that keeps the Board",
+        "The Board comes from a program your",
+    );
+    s.keys(ESC);
     let shown = board_until(&page, 10, |b| !card_on(b, "c1").is_null());
     check("the cards come from the adapter", !card_on(&shown, "c1").is_null(), &shown.to_string());
     check(
@@ -1249,10 +1256,14 @@ fn adapter_section(sb: &Sandbox, port: u16) {
     let said = |card: &str| {
         actions.iter().find(|a| a["card"] == card).map(|a| a["words"].clone()).unwrap_or_default()
     };
-    check("what the adapter took is said", said("c3") == "Taken by the adapter.", &said("c3").to_string());
+    check(
+        "what the adapter took is said",
+        said("c3") == "Taken by the stand-in Hub.",
+        &said("c3").to_string(),
+    );
     check(
         "what it refused is said, with its reason",
-        said("c5") == "Refused by the adapter: that card was closed at the service",
+        said("c5") == "Refused by the stand-in Hub: that card was closed at the service",
         &said("c5").to_string(),
     );
     check(
@@ -1265,7 +1276,7 @@ fn adapter_section(sb: &Sandbox, port: u16) {
     check(
         "what went on to the adapter cannot be undone, and says why",
         outcome == "refused"
-            && words == "It has already been sent on, so it cannot be undone. Nothing was changed.",
+            && words.starts_with("There is nothing held for that card to undo: it has gone on"),
         &words,
     );
     drop(s.quit("quit", true));
@@ -1291,9 +1302,10 @@ fn adapter_section(sb: &Sandbox, port: u16) {
     drop(s.quit("quit", true));
 
     // One that says nothing: stopped after its ten seconds, and said.
-    let silent = sb.root.join("silent");
-    std::fs::create_dir_all(&silent).unwrap();
-    settings(sb, &named.to_string());
+    // Only what the settings name reaches it: the variable is given by name.
+    let mut quiet = named.clone();
+    quiet["board_adapter"]["env"] = serde_json::json!(["ADAPTER_STANDIN_SILENT"]);
+    settings(sb, &quiet.to_string());
     let mut s = Session::start_with(sb, &sb.state, &[("ADAPTER_STANDIN_SILENT", "1")]);
     let page = page_on_screen(&mut s, port);
     let shown = board_until(&page, 14, |b| b["problem"].as_str().is_some_and(|p| p.contains("said nothing")));
