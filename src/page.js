@@ -298,6 +298,13 @@
     const token = state ? state.typing : null;
     const acts = !!(state && state.acting);
     standing.textContent = token && acts ? CAN_BOTH : token ? CAN_TYPE : acts ? CAN_ACT : READ_ONLY;
+    // Where a program keeps the Board, a press goes to it, not to a file.
+    if (acts && board && board.adapter) {
+      standing.textContent = standing.textContent.replace(
+        "the Board's outbox.",
+        board.adapter.name + ", ten seconds later unless you undo it.",
+      ).replace("which adds it to " + board.adapter.name, "which sends it to " + board.adapter.name);
+    }
     standing.className = token || acts ? "can-type" : "";
     const key = target();
     typing.hidden = !token || key === null;
@@ -609,7 +616,13 @@
   // What stands where a card's buttons would: that it was sent and waits,
   // with Undo while there is still time.
   function sentLine(card) {
-    const line = text("p", "card-sent", "Sent, waiting: " + (word(ACTION_WORDS, card.sent.action) || "something") + ".");
+    const did = word(ACTION_WORDS, card.sent.action) || "something";
+    // Where a program keeps the Board: held for its ten seconds first.
+    const onward = board && board.adapter ? (board.adapter.actions || []).filter((a) => a.card === card.id).pop() : null;
+    const said = onward && onward.state === "held"
+      ? "Held for ten seconds: " + did + ". Then it goes to " + board.adapter.name + "."
+      : onward ? "Sent to " + board.adapter.name + ": " + did + "." : "Sent, waiting: " + did + ".";
+    const line = text("p", "card-sent", said);
     if (canAct() && undoable(card)) {
       line.append(" ", button("Undo", "undo", () => act(card, card.sent.action, "", true)));
     }
@@ -788,7 +801,8 @@
     const actions = adapter ? adapter.actions || [] : [];
     el("board-sent-on").hidden = actions.length === 0;
     el("board-sent-on").replaceChildren(...actions.slice(-5).reverse().map((a) => {
-      return text("li", "sent-on sent-on-" + a.state, a.action + " on “" + a.title + "”: " + a.words);
+      const did = word(ACTION_WORDS, a.action) || a.action;
+      return text("li", "sent-on sent-on-" + a.state, did + " on “" + a.title + "”: " + a.words);
     }));
     const said = adapter && (adapter.stopped || adapter.problem);
     if (said && !board.problem) {
