@@ -284,7 +284,7 @@ fn broken(what: &str) -> ! {
 
 /// Hex that is not two hex digits a byte is a broken tape.
 fn unhex_strict(text: &str, line: usize) -> Vec<u8> {
-    if text.len() % 2 != 0 || !text.bytes().all(|b| b.is_ascii_hexdigit()) {
+    if !text.len().is_multiple_of(2) || !text.bytes().all(|b| b.is_ascii_hexdigit()) {
         broken(&format!("line {line} has bytes that are not hex"));
     }
     unhex(text)
