@@ -393,7 +393,7 @@ type DrawFrom = Box<dyn Fn(&mut Frame, u16) -> u16>;
 
 /// The key drawn on the welcome screen: its rows and columns.
 const KEY_H: u16 = look::START_KEY.len() as u16;
-const KEY_W: u16 = 7;
+const KEY_W: u16 = 9;
 
 /// No agents are open. Seen in this order, without reading: the gnome, the
 /// name drawn large, and the key that starts an agent, drawn as a key. All

@@ -5122,7 +5122,7 @@ Cost",
                 let wide = look == WelcomeLook::Wide && cols >= 140;
                 let name = find(&rows, if wide { name_wide } else { name_single })
                     .unwrap_or_else(|| panic!("{look:?} {cols}: no large name\n{all}"));
-                let key = find(&rows, "│  n  │   start an agent")
+                let key = find(&rows, "│   n   │   start an agent")
                     .unwrap_or_else(|| panic!("{look:?} {cols}: no key\n{all}"));
                 // Gnome, name, key: in that order, down or across.
                 match look {
@@ -5147,12 +5147,12 @@ Cost",
             let rows = screen(&app, crate::ui::MIN_COLS, crate::ui::MIN_ROWS);
             let all = rows.join("\n");
             assert!(!all.contains('█'), "{look:?}: the large name is dropped first\n{all}");
-            assert!(all.contains("│  n  │   start an agent"), "{look:?}: the key stays\n{all}");
+            assert!(all.contains("│   n   │   start an agent"), "{look:?}: the key stays\n{all}");
             assert!(rows[11].starts_with("Ctrl+Q or F12: menu   n new agent   q quit"), "{}", rows[11]);
             // Short but wide: no large name, the key whole.
             let rows = screen(&app, 140, 14);
             let all = rows.join("\n");
-            assert!(all.contains("│  n  │   start an agent"), "{look:?}: the key stays\n{all}");
+            assert!(all.contains("│   n   │   start an agent"), "{look:?}: the key stays\n{all}");
         }
         // Every size from the smallest up to 100 by 30: the key whole, and
         // nothing of the small text on the key's rows or above it.
@@ -5162,9 +5162,9 @@ Cost",
                 for height in (12u16..=30).step_by(3) {
                     let rows = screen(&app, cols, height);
                     let all = rows.join("\n");
-                    let key = find(&rows, "│  n  │   start an agent")
+                    let key = find(&rows, "│   n   │   start an agent")
                         .unwrap_or_else(|| panic!("{look:?} {cols}x{height}: no key\n{all}"));
-                    let bottom = rows.iter().rposition(|r| r.contains("└─────┘")).unwrap_or(0);
+                    let bottom = rows.iter().rposition(|r| r.contains("└───────┘")).unwrap_or(0);
                     assert!(bottom > key.0, "{look:?} {cols}x{height}: the key is whole\n{all}");
                     if let Some(small) = find(&rows, "Lillignode runs AI coding agents") {
                         assert!(small.0 > bottom, "{look:?} {cols}x{height}: small text over the key\n{all}");
