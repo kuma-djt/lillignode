@@ -27,7 +27,8 @@ const BLOCK_LETTERS: [(char, [&str; 5]); 7] = [
     ('L', ["#   ", "#   ", "#   ", "#   ", "####"]),
     ('I', ["###", " # ", " # ", " # ", "###"]),
     ('G', [" ###", "#   ", "# ##", "#  #", " ###"]),
-    ('N', ["#  #", "## #", "# ##", "#  #", "#  #"]),
+    // A diagonal, so it is never read as H.
+    ('N', ["#   #", "##  #", "# # #", "#  ##", "#   #"]),
     ('O', [" ## ", "#  #", "#  #", "#  #", " ## "]),
     ('D', ["### ", "#  #", "#  #", "#  #", "### "]),
     ('E', ["####", "#   ", "### ", "#   ", "####"]),
@@ -56,8 +57,9 @@ pub fn block_name(wide: bool) -> [String; 5] {
 }
 
 /// The key a person presses to start an agent, drawn as a large key.
-// Nine columns by five rows: about square in a terminal's tall cells.
-pub const START_KEY: [&str; 5] = ["┌───────┐", "│       │", "│   n   │", "│       │", "└───────┘"];
+// Nine columns by five rows, about square in a terminal's tall cells, and
+// drawn filled (in reverse), so it reads as a key to press, not a box to fill.
+pub const START_KEY: [&str; 5] = ["         ", "         ", "    n    ", "         ", "         "];
 
 /// The hat every gnome mark wears.
 pub const HAT: &str = "/\\";
