@@ -2142,6 +2142,19 @@ mod tests {
     }
 
     #[test]
+    fn a_look_is_served_only_when_one_is_chosen_and_changes_nothing_but_style() {
+        assert_eq!(look_css(None), "");
+        assert_eq!(look_css(Some("neon")), "");
+        for (name, css) in LOOKS {
+            assert_eq!(look_css(Some(name)), css);
+            // Styling only: no script, nothing fetched, the four colours by name.
+            assert!(!css.contains("<script") && !css.contains("url(") && !css.contains("@import"), "{name}");
+            assert!(css.contains("var(--orange)") && css.contains("var(--teal)"), "{name}");
+        }
+        assert!(HTML.contains(r#"<link rel="stylesheet" href="look.css">"#));
+    }
+
+    #[test]
     fn a_request_that_is_not_a_plain_read_from_this_address_is_refused() {
         let (publisher, address) = served();
         publisher.publish(published(1));

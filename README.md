@@ -256,6 +256,8 @@ If the colours come out wrong, add `"colors"` with `"full"`, `"256"`, `"16"` or 
 
 The first screen, before any agent is open, can be laid out three ways while one is chosen: `"welcome_look"` with `"beside"` (the gnome on the left, the name drawn large beside it, the key under the name; the default), `"stacked"` (the three one under another, in the middle) or `"wide"` (down the left, the name twice as wide where there is room). A window too small for all of it drops the large name first and always keeps the key.
 
+The page can be given one of three looks while one is chosen: `"page_look"` with `"soft"`, `"cards"` or `"bold"`. Each changes only how the page looks (spacing, type, card shapes, a picture slot with each agent's initials, larger buttons, a shorter header on a phone); the colours keep their meanings. Without it, or with `"plain"`, the page is as before.
+
 All are optional, and a change takes effect the next time Lillignode is started. `billing` does nothing without `cost`, and `cost_warning_tokens` without it is reported as a mistake; so is `page_port`, `page_can_type`, `page_can_act`, `page_can_start` or `board_adapter` without `page`. A Lillignode older than the page does not know `"page"` and treats it as a mistake in the file.
 
 **The file is strict.** One mistake in it and none of it is used: every setting is at its default until it is fixed. Lillignode never changes the file. It tells you when it starts, beginning with how to fix it ("To fix your settings file: ...") and naming the line and column where it can.
