@@ -356,7 +356,8 @@ fn parse(text: &str) -> Result<Config, String> {
         }
         helper => helper,
     };
-    config.welcome_look = match file.welcome_look.as_deref() {
+    // In any case: "Stacked" is meant as "stacked".
+    config.welcome_look = match file.welcome_look.as_deref().map(str::to_lowercase).as_deref() {
         None | Some("beside") => WelcomeLook::Beside,
         Some("stacked") => WelcomeLook::Stacked,
         Some("wide") => WelcomeLook::Wide,
@@ -453,6 +454,7 @@ mod tests {
         assert_eq!(parse(r#"{"welcome_look": "wide"}"#).unwrap().welcome_look, WelcomeLook::Wide);
         assert_eq!(parse(r#"{"welcome_look": "beside"}"#).unwrap().welcome_look, WelcomeLook::Beside);
         assert!(parse(r#"{"welcome_look": "big"}"#).unwrap_err().contains("\"welcome_look\""));
+        assert_eq!(parse(r#"{"welcome_look": "Stacked"}"#).unwrap().welcome_look, WelcomeLook::Stacked);
     }
 
     #[test]

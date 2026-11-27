@@ -5154,6 +5154,26 @@ Cost",
             let all = rows.join("\n");
             assert!(all.contains("│  n  │   start an agent"), "{look:?}: the key stays\n{all}");
         }
+        // Every size from the smallest up to 100 by 30: the key whole, and
+        // nothing of the small text on the key's rows or above it.
+        for look in [WelcomeLook::Beside, WelcomeLook::Stacked, WelcomeLook::Wide] {
+            app.config.welcome_look = look;
+            for cols in (80u16..=100).step_by(4) {
+                for height in (12u16..=30).step_by(3) {
+                    let rows = screen(&app, cols, height);
+                    let all = rows.join("\n");
+                    let key = find(&rows, "│  n  │   start an agent")
+                        .unwrap_or_else(|| panic!("{look:?} {cols}x{height}: no key\n{all}"));
+                    let bottom = rows.iter().rposition(|r| r.contains("└─────┘")).unwrap_or(0);
+                    assert!(bottom > key.0, "{look:?} {cols}x{height}: the key is whole\n{all}");
+                    if let Some(small) = find(&rows, "Lillignode runs AI coding agents") {
+                        assert!(small.0 > bottom, "{look:?} {cols}x{height}: small text over the key\n{all}");
+                    }
+                    // Wide below 140 columns uses the single-width name, if any.
+                    assert!(!all.contains(name_wide), "{look:?} {cols}x{height}\n{all}");
+                }
+            }
+        }
         // The sidebar says the way forward at every size.
         let rows = screen(&app, 100, 20);
         assert_eq!(part(&rows[1], 0, 27), " No agents yet. Press n.");

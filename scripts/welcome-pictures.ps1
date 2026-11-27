@@ -81,7 +81,14 @@ foreach ($look in 'beside', 'stacked', 'wide') {
         $stem = Join-Path $Out ('{0:00}-{1}-{2}' -f $n, $look, $cols)
         $text | Set-Content -Encoding utf8 "$stem.txt"
         Save-Picture $hwnd "$stem.png"
-        if ($text.Contains('start an agent')) { Write-Host "PASS  $look $cols" } else { Write-Host "FAIL  $look $cols : no key on screen"; $failed = $true }
+        # The key, the large name, and a window as wide as asked (its widest
+        # line is near the column count).
+        $widest = ($text -split "`n" | ForEach-Object { $_.TrimEnd().Length } | Measure-Object -Maximum).Maximum
+        $why = @()
+        if (-not $text.Contains('start an agent')) { $why += 'no key on screen' }
+        if (-not $text.Contains([string][char]0x2588)) { $why += 'no large name' }
+        if ($widest -lt $cols - 30) { $why += "the window is narrower than asked ($widest of $cols)" }
+        if ($why.Count -eq 0) { Write-Host "PASS  $look $cols" } else { Write-Host ("FAIL  $look $cols : " + ($why -join '; ')); $failed = $true }
         Get-Process lillignode -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
         Get-Process WindowsTerminal -ErrorAction SilentlyContinue | Where-Object { $before -notcontains $_.Id } | Stop-Process -Force -ErrorAction SilentlyContinue
         Start-Sleep -Seconds 1

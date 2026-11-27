@@ -113,14 +113,14 @@ jobs:
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
-          curl.exe -sSL -o "$env:RUNNER_TEMP\wt.zip" 'https://github.com/microsoft/terminal/releases/download/v1.25.3131.0/Microsoft.WindowsTerminal_1.25.3131.0_x64.zip'
+          curl.exe --fail -sSL -o "$env:RUNNER_TEMP\wt.zip" 'https://github.com/microsoft/terminal/releases/download/v1.25.3131.0/Microsoft.WindowsTerminal_1.25.3131.0_x64.zip'
           $h = (Get-FileHash "$env:RUNNER_TEMP\wt.zip" -Algorithm SHA256).Hash.ToLower()
           if ($h -ne '273d6f1502eca1b5bd95c43f5d4d7ec72cc503df340102f8659717e5bead3437') { throw "wt.zip has hash $h" }
           Expand-Archive "$env:RUNNER_TEMP\wt.zip" "$env:RUNNER_TEMP\wt"
       - name: The pictures
         shell: powershell
         run: |
-          Set-DisplayResolution -Width 1920 -Height 1080 -Force
+          Set-DisplayResolution -Width 1920 -Height 1080 -Force -ErrorAction Stop
           $t = (Get-ChildItem "$env:RUNNER_TEMP\wt" -Recurse -Filter WindowsTerminal.exe).FullName
           powershell -ExecutionPolicy Bypass -File scripts\welcome-pictures.ps1 -Program "$PWD\target\release\lillignode.exe" -Terminal $t -Out "$env:RUNNER_TEMP\welcome"
       - name: Keep the pictures
