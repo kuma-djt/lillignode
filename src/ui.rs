@@ -393,7 +393,7 @@ type DrawFrom = Box<dyn Fn(&mut Frame, u16) -> u16>;
 
 /// The key drawn on the welcome screen: its rows and columns.
 const KEY_H: u16 = look::START_KEY.len() as u16;
-const KEY_W: u16 = 7;
+const KEY_W: u16 = 9;
 
 /// No agents are open. Seen in this order, without reading: the gnome, the
 /// name drawn large, and the key that starts an agent, drawn as a key. All
@@ -427,12 +427,12 @@ fn draw_welcome<B: AgentBackend>(frame: &mut Frame, area: Rect, app: &App<B>, p:
                 h,
                 Box::new(move |frame: &mut Frame, y: u16| {
                     if gnome {
-                        draw_gnome(frame, area.x, y, p);
+                        draw_gnome(frame, area.x, y, area, p);
                     }
                     // The name and key level with the gnome's middle.
                     let top = y + h.saturating_sub(stack) / 2;
                     let under = draw_name_or_word(frame, right_x, top, room, big, false, p);
-                    draw_key(frame, right_x, under + 1, p);
+                    draw_key(frame, right_x, under + 1, area, p);
                     y + h
                 }),
             )
@@ -447,12 +447,12 @@ fn draw_welcome<B: AgentBackend>(frame: &mut Frame, area: Rect, app: &App<B>, p:
                 h,
                 Box::new(move |frame: &mut Frame, mut y: u16| {
                     if gnome {
-                        draw_gnome(frame, centre(gnome_w), y, p);
+                        draw_gnome(frame, centre(gnome_w), y, area, p);
                         y += gnome_h + 1;
                     }
                     let w = if big { name_w(false) } else { "Lillignode".len() as u16 };
                     let under = draw_name_or_word(frame, centre(w), y, area.width, big, false, p);
-                    draw_key(frame, centre(key_w), under + 1, p)
+                    draw_key(frame, centre(key_w), under + 1, area, p)
                 }),
             )
         }
@@ -468,11 +468,11 @@ fn draw_welcome<B: AgentBackend>(frame: &mut Frame, area: Rect, app: &App<B>, p:
                 h,
                 Box::new(move |frame: &mut Frame, mut y: u16| {
                     if gnome {
-                        draw_gnome(frame, area.x, y, p);
+                        draw_gnome(frame, area.x, y, area, p);
                         y += gnome_h + 1;
                     }
                     let under = draw_name_or_word(frame, area.x, y, area.width, big, wide, p);
-                    draw_key(frame, area.x, under + 1, p)
+                    draw_key(frame, area.x, under + 1, area, p)
                 }),
             )
         }
@@ -503,10 +503,12 @@ fn wrapped_height(lines: &[Line], width: u16) -> u16 {
                 let w = fit::width(word);
                 if col > 0 && col + 1 + w > width {
                     rows += 1;
-                    col = w;
-                } else {
-                    col += if col > 0 { 1 } else { 0 } + w;
+                    col = 0;
                 }
+                // A word wider than the line is split across rows.
+                let at = col + if col > 0 { 1 } else { 0 } + w;
+                rows += at.saturating_sub(1) / width;
+                col = if at > width { at % width } else { at };
             }
             rows as u16
         })
@@ -514,7 +516,7 @@ fn wrapped_height(lines: &[Line], width: u16) -> u16 {
 }
 
 /// The gnome, its hat in copper.
-fn draw_gnome(frame: &mut Frame, x: u16, y: u16, p: Palette) {
+fn draw_gnome(frame: &mut Frame, x: u16, y: u16, bounds: Rect, p: Palette) {
     let width = look::GNOME.iter().map(|row| row.len()).max().unwrap_or(0) as u16;
     let rows: Vec<Line> = look::GNOME
         .iter()
@@ -526,7 +528,7 @@ fn draw_gnome(frame: &mut Frame, x: u16, y: u16, p: Palette) {
             ))
         })
         .collect();
-    let room = frame.area();
+    let room = bounds;
     let height = (look::GNOME.len() as u16).min((room.y + room.height).saturating_sub(y));
     frame.render_widget(Paragraph::new(rows), Rect::new(x, y, width, height));
 }
@@ -552,7 +554,7 @@ fn draw_name_or_word(frame: &mut Frame, x: u16, y: u16, room: u16, big: bool, wi
 
 /// The key that starts an agent, drawn as a large key, and what it does
 /// beside its middle row. Returns the row under it.
-fn draw_key(frame: &mut Frame, x: u16, y: u16, p: Palette) -> u16 {
+fn draw_key(frame: &mut Frame, x: u16, y: u16, bounds: Rect, p: Palette) -> u16 {
     let bold = Style::default().add_modifier(Modifier::BOLD);
     let rows: Vec<Line> = look::START_KEY
         .iter()
@@ -566,7 +568,7 @@ fn draw_key(frame: &mut Frame, x: u16, y: u16, p: Palette) -> u16 {
             Line::from(spans)
         })
         .collect();
-    let room = frame.area();
+    let room = bounds;
     let height = KEY_H.min((room.y + room.height).saturating_sub(y));
     let width = (KEY_W + 3 + "start an agent".len() as u16).min((room.x + room.width).saturating_sub(x));
     frame.render_widget(Paragraph::new(rows), Rect::new(x, y, width, height));

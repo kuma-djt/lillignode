@@ -56,7 +56,8 @@ pub fn block_name(wide: bool) -> [String; 5] {
 }
 
 /// The key a person presses to start an agent, drawn as a large key.
-pub const START_KEY: [&str; 5] = ["┌─────┐", "│     │", "│  n  │", "│     │", "└─────┘"];
+// Nine columns by five rows: about square in a terminal's tall cells.
+pub const START_KEY: [&str; 5] = ["┌───────┐", "│       │", "│   n   │", "│       │", "└───────┘"];
 
 /// The hat every gnome mark wears.
 pub const HAT: &str = "/\\";
