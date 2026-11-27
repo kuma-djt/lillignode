@@ -1274,8 +1274,17 @@ impl<B: AgentBackend> App<B> {
         };
         match crate::teams::find(&teams, &name) {
             Some(team) => {
-                // An earlier answer is not left above a new question.
-                self.notice = None;
+                // What would run, in full, where there is room for it: the
+                // notice above the question. Nothing earlier is left there.
+                let (runs, open) = self.team_runs(team);
+                let mut said = Vec::new();
+                if !runs.is_empty() {
+                    said.push(format!("Runs: {}.", runs.join("; ")));
+                }
+                if !open.is_empty() {
+                    said.push(format!("Already open, left as they are: {}.", open.join(", ")));
+                }
+                self.notice = Some(said.join("  "));
                 self.team_asked = team.name.clone();
                 self.team_digest = crate::teams::digest(team);
                 self.mode = Mode::Confirm(Confirm::StartTeam);
@@ -1289,6 +1298,19 @@ impl<B: AgentBackend> App<B> {
                 self.mode = Mode::Confirm(Confirm::SaveTeam);
             }
         }
+    }
+
+    /// A team's agents that would start, each as it runs and where, in
+    /// full; and those already open, by name.
+    fn team_runs(&self, team: &crate::teams::Team) -> (Vec<String>, Vec<String>) {
+        let open = self.engine.already_open(team);
+        let pairs = team.agents.iter().zip(open);
+        let runs = pairs
+            .clone()
+            .filter(|(_, open)| !open)
+            .map(|(a, _)| format!("{} in {}", a.runs(), a.folder.display()));
+        let already = pairs.filter(|(_, open)| *open).map(|(a, _)| a.label());
+        (runs.collect(), already.collect())
     }
 
     /// Keep the agents open now as a team, and say so.
@@ -2055,50 +2077,22 @@ impl<B: AgentBackend> App<B> {
             Mode::Confirm(Confirm::StartTeam) => {
                 let name = &self.team_asked;
                 let teams = crate::teams::read(self.board_folder.as_deref()).unwrap_or_default();
-                let team = crate::teams::find(&teams, name);
-                // What runs, each in full: the program, its options and its
-                // folder, as the team's file has them.
-                let (runs, open): (Vec<String>, Vec<String>) = match team {
-                    Some(t) => {
-                        let open = self.engine.already_open(t);
-                        let runs = t
-                            .agents
-                            .iter()
-                            .zip(&open)
-                            .filter(|(_, open)| !**open)
-                            .map(|(a, _)| format!("{} in {}", a.runs(), a.folder.display()))
-                            .collect();
-                        let already = t
-                            .agents
-                            .iter()
-                            .zip(&open)
-                            .filter(|(_, open)| **open)
-                            .map(|(a, _)| a.label())
-                            .collect();
-                        (runs, already)
-                    }
-                    None => (Vec::new(), Vec::new()),
-                };
-                let runs_count = runs.len();
-                let runs =
-                    if runs.is_empty() { String::new() } else { format!("   Runs: {}.", runs.join("; ")) };
-                let already = if open.is_empty() {
-                    String::new()
-                } else {
-                    format!("   Already open, left as they are: {}.", open.join(", "))
-                };
+                let (runs, _) =
+                    crate::teams::find(&teams, name).map(|t| self.team_runs(t)).unwrap_or_default();
                 let running = self.engine.ws.entries().iter().filter(|e| e.is_running()).count();
                 // What each key does is beside the keys, so the one key
-                // that writes is never the one cut off at the edge.
+                // that writes is never the one cut off at the edge. What
+                // runs is in the notice above, which has two rows for it.
                 let save =
                     format!("(s saves the {} running now over it)", plural(running, "agent", "agents"));
                 if runs.is_empty() {
                     // Nothing would start: y is not offered.
-                    format!("The team \"{name}\" is already running: nothing to start. n / s {save}{already}",)
+                    format!("The team \"{name}\" is already running: nothing to start. n / s {save}")
                 } else {
                     format!(
-                        "Start the team \"{name}\": {}, in new conversations? y / n / s {save}{runs}{already}",
-                        plural(runs_count, "agent", "agents"),
+                        "Start the team \"{name}\": {}, in new conversations? y / n / s {save}   What runs is \
+                         above.",
+                        plural(runs.len(), "agent", "agents"),
                     )
                 }
             }
@@ -3300,7 +3294,13 @@ mod tests {
             bar.starts_with("The team \"web\" is already running: nothing to start. n / s (s saves the 2 agents running now over it)"),
             "{bar}"
         );
-        assert!(bar.contains("Already open, left as they are: Claude Code (a), Claude Code (b)."), "{bar}");
+        assert!(
+            app.notice
+                .clone()
+                .unwrap_or_default()
+                .contains("Already open, left as they are: Claude Code (a), Claude Code (b)."),
+            "{bar}"
+        );
         app.on_key(press(KeyCode::Char('y')));
         let said = app.notice.clone().unwrap();
         assert!(said.starts_with("Started nothing from the team \"web\"."), "{said}");
@@ -3342,6 +3342,7 @@ mod tests {
             bar.starts_with("Start the team \"docs\": 2 agents, in new conversations? y / n / s"),
             "{bar}"
         );
+        let bar = app.notice.clone().unwrap_or_default();
         assert!(
             bar.contains(&format!(
                 "Runs: codex in {}; claude --session-id <new-id> in {}.",
