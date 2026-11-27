@@ -23,17 +23,20 @@ header { padding: 10px 18px; }
   width: 46px; height: 46px;
   border-radius: 8px;
   display: grid; place-items: center;
-  background: var(--cream);
-  color: var(--navy);
+  background: var(--navy-raised);
+  color: var(--cream);
+  box-shadow: inset 0 0 0 2px var(--cream-quiet);
   font-weight: 800; font-size: 17px;
 }
 #agents li.working button { border-left-color: var(--teal); }
 #agents li.needs-you button { border-left-color: var(--orange); }
-#agents li.needs-you button::before { background: var(--orange); }
-#agents li.working button::before { background: var(--teal); }
+#agents li.needs-you button::before { background: var(--orange); color: var(--navy); box-shadow: none; }
+#agents li.working button::before { background: var(--teal); color: var(--navy); box-shadow: none; }
 #agents button[aria-pressed="true"] { background: var(--navy-raised); }
 .agent-name { font-size: 18px; font-weight: 800; }
 .agent-state { font-size: 14px; text-transform: uppercase; letter-spacing: 0.06em; font-weight: 700; }
+/* Only working and needs-you are loud; anything else is quiet. */
+#agents li:not(.working):not(.needs-you) .agent-state .word { color: var(--cream-quiet); font-weight: 600; }
 .agent-state .age { text-transform: none; letter-spacing: 0; font-weight: 400; }
 
 #terminal { border-width: 2px; }

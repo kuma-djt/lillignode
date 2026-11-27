@@ -82,6 +82,14 @@ main {
   grid-template-columns: minmax(230px, 300px) minmax(0, 1fr) minmax(300px, 440px);
 }
 main > section { min-height: 0; overflow: auto; }
+/* A tablet or a small laptop: the Board goes under the agent and its
+   terminal, so the terminal keeps its width. */
+@media (min-width: 761px) and (max-width: 1199px) {
+  main { grid-template-columns: minmax(200px, 260px) minmax(0, 1fr); grid-template-rows: minmax(0, 3fr) minmax(0, 2fr); }
+  #agents-column { grid-row: 1 / span 2; }
+  #board { grid-column: 2; border-top: 1px solid var(--rule); }
+  #middle { border-right: 0; }
+}
 #agents-column, #middle { border-right: 1px solid var(--rule); }
 
 #agents li { border-top: 1px solid var(--rule); }
