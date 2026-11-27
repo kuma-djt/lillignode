@@ -1231,7 +1231,8 @@ impl<B: AgentBackend> App<B> {
             KeyCode::Char('t') => match crate::teams::read(self.board_folder.as_deref()) {
                 Ok(_) => self.mode = Mode::TeamName(String::new()),
                 Err(why) => self.refuse(format!(
-                    "{why}. No team can be saved or started until it is put right or deleted; it is left as it is."
+                    "{why}. Lillignode has not changed it, and saves or starts no team until it can read it: fix \
+                     it, or move it out of the folder lillignode --where names."
                 )),
             },
             _ => {}
@@ -1273,6 +1274,8 @@ impl<B: AgentBackend> App<B> {
         };
         match crate::teams::find(&teams, &name) {
             Some(team) => {
+                // An earlier answer is not left above a new question.
+                self.notice = None;
                 self.team_asked = team.name.clone();
                 self.team_digest = crate::teams::digest(team);
                 self.mode = Mode::Confirm(Confirm::StartTeam);
@@ -1281,6 +1284,7 @@ impl<B: AgentBackend> App<B> {
                 "There is no team called \"{name}\", and no agents are open to save as one. Nothing was saved."
             )),
             None => {
+                self.notice = None;
                 self.team_asked = name;
                 self.mode = Mode::Confirm(Confirm::SaveTeam);
             }
@@ -2027,7 +2031,8 @@ impl<B: AgentBackend> App<B> {
             }
             Mode::Confirm(Confirm::SaveTeam) => {
                 let name = &self.team_asked;
-                let open = self.engine.ws.entries().len();
+                // Only running agents are saved, so only they are counted.
+                let open = self.engine.ws.entries().iter().filter(|e| e.is_running()).count();
                 format!(
                     "Save the {} open now as the team \"{name}\"? y / n   Each one's program, options and folder are \
                      kept; not its conversation.",
@@ -2051,7 +2056,6 @@ impl<B: AgentBackend> App<B> {
                 let name = &self.team_asked;
                 let teams = crate::teams::read(self.board_folder.as_deref()).unwrap_or_default();
                 let team = crate::teams::find(&teams, name);
-                let agents = team.map_or(0, |t| t.agents.len());
                 // What runs, each in full: the program, its options and its
                 // folder, as the team's file has them.
                 let (runs, open): (Vec<String>, Vec<String>) = match team {
@@ -2075,6 +2079,7 @@ impl<B: AgentBackend> App<B> {
                     }
                     None => (Vec::new(), Vec::new()),
                 };
+                let runs_count = runs.len();
                 let runs =
                     if runs.is_empty() { String::new() } else { format!("   Runs: {}.", runs.join("; ")) };
                 let already = if open.is_empty() {
@@ -2083,12 +2088,19 @@ impl<B: AgentBackend> App<B> {
                     format!("   Already open, left as they are: {}.", open.join(", "))
                 };
                 let running = self.engine.ws.entries().iter().filter(|e| e.is_running()).count();
-                format!(
-                    "Start the team \"{name}\": {}, in new conversations? y / n / s{runs}{already}   s: save over \
-                     it with the {} running now.",
-                    plural(agents, "agent", "agents"),
-                    plural(running, "agent", "agents")
-                )
+                // What each key does is beside the keys, so the one key
+                // that writes is never the one cut off at the edge.
+                let save =
+                    format!("(s saves the {} running now over it)", plural(running, "agent", "agents"));
+                if runs.is_empty() {
+                    // Nothing would start: y is not offered.
+                    format!("The team \"{name}\" is already running: nothing to start. n / s {save}{already}",)
+                } else {
+                    format!(
+                        "Start the team \"{name}\": {}, in new conversations? y / n / s {save}{runs}{already}",
+                        plural(runs_count, "agent", "agents"),
+                    )
+                }
             }
             Mode::Confirm(Confirm::NewAddress) => "Give the page a new address? y / n   The address it has \
                                                    now stops working at once, for bookmarks and open pages \
@@ -3285,7 +3297,7 @@ mod tests {
         app.on_key(press(KeyCode::Enter));
         let bar = app.bar();
         assert!(
-            bar.starts_with("Start the team \"web\": 2 agents, in new conversations? y / n / s"),
+            bar.starts_with("The team \"web\" is already running: nothing to start. n / s (s saves the 2 agents running now over it)"),
             "{bar}"
         );
         assert!(bar.contains("Already open, left as they are: Claude Code (a), Claude Code (b)."), "{bar}");
@@ -3315,7 +3327,7 @@ mod tests {
                 crate::teams::TeamAgent {
                     name: "Claude Code".into(),
                     command: "claude".into(),
-                    kind: None,
+                    kind: Some("claude-code".into()),
                     args: vec![],
                     folder: folder.join("gone"),
                 },
@@ -3332,7 +3344,7 @@ mod tests {
         );
         assert!(
             bar.contains(&format!(
-                "Runs: codex in {}; claude in {}.",
+                "Runs: codex in {}; claude --session-id <new-id> in {}.",
                 here.display(),
                 folder.join("gone").display()
             )),
@@ -3450,7 +3462,11 @@ mod tests {
         app.on_key(press(KeyCode::Char('t')));
         assert!(matches!(app.mode, Mode::Normal), "no name is asked for");
         let said = app.notice.clone().unwrap_or_default();
-        assert!(said.contains("is not what Lillignode wrote") && said.contains("left as it is"), "{said}");
+        assert!(
+            said.contains("is not what Lillignode wrote") && said.contains("has not changed it"),
+            "{said}"
+        );
+        assert!(said.contains("lillignode --where") && !said.contains("delete"), "{said}");
         assert_eq!(std::fs::read_to_string(folder.join(crate::teams::FILE)).unwrap(), "{ not json");
         let _ = std::fs::remove_dir_all(&folder);
     }

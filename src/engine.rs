@@ -626,7 +626,11 @@ impl<B: AgentBackend> Engine<B> {
             .map(|e| TeamAgent {
                 name: e.saved.name.clone(),
                 command: e.saved.command.clone(),
-                kind: e.saved.kind.clone(),
+                // Always the kind it runs as, even for an agent saved before
+                // kinds were kept.
+                kind: Some(
+                    AgentKind::of_saved(e.saved.kind.as_deref(), &e.saved.command).saved_word().to_string(),
+                ),
                 args: e.saved.args.clone(),
                 folder: e.saved.folder.clone(),
             })
@@ -1083,10 +1087,21 @@ fn same_program(a: &str, b: &str) -> bool {
 }
 
 /// The same folder, written either way: on Windows in any case and with
-/// either slash; anywhere, with or without a separator at the end.
+/// either slash; anywhere, with or without a separator at the end, and with
+/// `.` and `..` worked out. Nothing on disk is read.
 fn same_folder(a: &std::path::Path, b: &std::path::Path) -> bool {
     let plain = |p: &std::path::Path| {
-        let mut text = p.to_string_lossy().to_string();
+        let mut worked = std::path::PathBuf::new();
+        for part in p.components() {
+            match part {
+                std::path::Component::CurDir => {}
+                std::path::Component::ParentDir => {
+                    worked.pop();
+                }
+                other => worked.push(other),
+            }
+        }
+        let mut text = worked.to_string_lossy().to_string();
         if cfg!(windows) {
             text = text.replace('/', "\\").to_lowercase();
         }

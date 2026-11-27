@@ -965,22 +965,43 @@
   // with the list.
   let teams = null;
   let startingNow = false;
+  // The team whose Start was pressed once and waits for "Yes, start", and
+  // what the last start of each team came to, with when.
+  let askingFor = null;
+  const teamSaid = new Map();
+  // How many of a team's agents are running now, as the agents' list has them.
+  function runningOf(team) {
+    if (!state) return 0;
+    const free = state.agents.filter((a) => a.running).map((a) => a.label);
+    let n = 0;
+    for (const agent of team.agents) {
+      const at = free.indexOf(agent.label);
+      if (at >= 0) { free.splice(at, 1); n += 1; }
+    }
+    return n;
+  }
   function drawTeams() {
     const section = el("teams");
     const list = teams ? teams.teams || [] : [];
     section.hidden = list.length === 0 && !(teams && teams.problem);
+    if (askingFor && !list.some((t) => t.name === askingFor)) askingFor = null;
     const rows = list.map((team) => {
       const li = text("li", "team-row", "");
       const head = text("div", "team-head", "");
       head.append(text("span", "team-name", team.name));
-      if (teams.starting) {
+      const running = runningOf(team);
+      head.append(text("span", "team-running quiet", running === team.agents.length
+        ? "running"
+        : running + " of " + team.agents.length + " running"));
+      const off = startingNow || lostAt !== null || movedOn;
+      if (teams.starting && askingFor !== team.name) {
         const b = document.createElement("button");
         b.type = "button";
         b.className = "team-start";
         b.textContent = "Start";
-        b.disabled = startingNow || lostAt !== null || movedOn;
+        b.disabled = off;
         b.setAttribute("aria-label", "Start the team " + team.name);
-        b.addEventListener("click", () => startTeam(team));
+        b.addEventListener("click", () => { askingFor = team.name; drawTeams(); });
         head.append(b);
       }
       // What each agent runs, in full, and where: what Start starts.
@@ -989,20 +1010,48 @@
       for (const agent of team.agents) {
         const line = text("li", "team-agent", "");
         line.append(text("code", "team-runs", agent.runs));
-        if (agent.folder) line.append(text("span", "quiet", " in " + agent.folder));
+        if (agent.folder) line.append(text("span", "quiet", " in the folder " + agent.folder));
         agents.append(line);
       }
       li.append(head, agents);
+      // Start asks first, here, under the team: one tap never starts programs.
+      if (teams.starting && askingFor === team.name) {
+        const toStart = team.agents.length - running;
+        const ask = text("div", "team-ask", "");
+        ask.append(text("p", "", toStart === 0
+          ? "All of it is running already: nothing would start."
+          : "Start " + (toStart === 1 ? "1 program" : toStart + " programs") + " as listed above, each in a new conversation?"));
+        const yes = document.createElement("button");
+        yes.type = "button";
+        yes.className = "team-yes";
+        yes.textContent = "Yes, start";
+        yes.disabled = off || toStart === 0;
+        yes.addEventListener("click", () => startTeam(team));
+        const no = document.createElement("button");
+        no.type = "button";
+        no.className = "team-no";
+        no.textContent = "Cancel";
+        no.addEventListener("click", () => { askingFor = null; drawTeams(); });
+        ask.append(yes, no);
+        li.append(ask);
+      }
+      const said = teamSaid.get(team.name);
+      if (said) {
+        const line = text("p", "team-said", said.words + " (" + clock(said.at) + ")");
+        line.setAttribute("role", "status");
+        li.append(line);
+      }
       return li;
     });
     if (teams && teams.problem) rows.push(text("li", "team-problem", teams.problem));
     el("teams-list").replaceChildren(...rows);
   }
   function startTeam(team) {
-    if (!teams || !teams.starting || !state) return;
+    if (!teams || !teams.starting || !state || startingNow) return;
     startingNow = true;
+    askingFor = null;
     drawTeams();
-    const said = el("teams-said");
+    const say = (words) => teamSaid.set(team.name, { words, at: new Date() });
     fetch("start", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1010,16 +1059,11 @@
       signal: AbortSignal.timeout(15000),
     })
       .then((answer) => (answer.ok ? answer.json() : answer.text().then((words) => ({ outcome: "refused", words }))))
-      .then((heard) => {
-        said.hidden = false;
-        said.textContent = heard.words;
-      })
-      .catch(() => {
-        said.hidden = false;
-        said.textContent = "No answer from Lillignode, so it is not known whether the team was started. Look at the agents before pressing it again.";
-      })
+      .then((heard) => say(heard.words))
+      .catch(() => say("No answer from Lillignode, so it is not known whether the team was started. Look at the agents before pressing it again."))
       .finally(() => {
         startingNow = false;
+        drawTeams();
         readTeams();
       });
   }

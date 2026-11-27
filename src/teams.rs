@@ -36,8 +36,19 @@ pub const MOST_AGENTS: usize = 20;
 /// A teams' file larger than this is not read.
 pub const MOST_BYTES: u64 = 256 * 1024;
 
+/// No more options than this for one agent, and none longer than
+/// `LONGEST_TEXT`: what runs must fit where it is shown before it runs.
+pub const MOST_ARGS: usize = 32;
+
+/// The longest program, option, agent name or kind, in characters.
+pub const LONGEST_TEXT: usize = 260;
+
+/// The kinds Lillignode writes, as the workspace keeps them.
+pub const KINDS: [&str; 3] = ["claude-code", "codex", "program"];
+
 /// One agent of a team, as it is started.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TeamAgent {
     pub name: String,
     pub command: String,
@@ -52,7 +63,9 @@ pub struct TeamAgent {
 
 impl TeamAgent {
     /// What is run: the program and its options, as typed at a prompt. An
-    /// option with a space, or nothing in it, is quoted.
+    /// option with a space, or nothing in it, is quoted. A Claude Code
+    /// agent is also given a new conversation's id when it starts; that is
+    /// said too (`kind.rs`, `conversation_args`, is what adds it).
     pub fn runs(&self) -> String {
         let mut words = vec![self.command.clone()];
         for arg in &self.args {
@@ -62,6 +75,9 @@ impl TeamAgent {
                 words.push(arg.clone());
             }
         }
+        if self.kind.as_deref() == Some("claude-code") {
+            words.push("--session-id <new-id>".to_string());
+        }
         words.join(" ")
     }
 
@@ -69,6 +85,19 @@ impl TeamAgent {
     fn problem(&self) -> Option<String> {
         if self.command.trim().is_empty() {
             return Some("an agent has no program".to_string());
+        }
+        if !self.kind.as_deref().is_some_and(|k| KINDS.contains(&k)) {
+            return Some(format!("\"{}\" has a kind Lillignode does not write", self.name.escape_debug()));
+        }
+        if self.args.len() > MOST_ARGS {
+            return Some(format!("\"{}\" has more than {MOST_ARGS} options", self.name.escape_debug()));
+        }
+        let long = |t: &String| t.chars().count() > LONGEST_TEXT;
+        if [&self.name, &self.command].into_iter().chain(self.args.iter()).any(long) {
+            return Some(format!(
+                "\"{}\" has a name, program or option longer than {LONGEST_TEXT} characters",
+                cut_name(&self.name)
+            ));
         }
         let texts = [&self.name, &self.command].into_iter().chain(self.args.iter());
         if texts.clone().any(|t| t.chars().any(hidden)) {
@@ -95,12 +124,14 @@ impl TeamAgent {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Team {
     pub name: String,
     pub agents: Vec<TeamAgent>,
 }
 
 #[derive(Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct TeamsFile {
     teams: Vec<Team>,
 }
@@ -112,9 +143,18 @@ pub fn hidden(c: char) -> bool {
     c.is_control()
         || matches!(c,
             '\u{00AD}' | '\u{034F}' | '\u{061C}' | '\u{115F}' | '\u{1160}' | '\u{17B4}' | '\u{17B5}'
-            | '\u{180B}'..='\u{180F}' | '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}'
+            | '\u{180B}'..='\u{180F}' | '\u{200B}'..='\u{200F}' | '\u{2028}'..='\u{202E}'
             | '\u{2060}'..='\u{206F}' | '\u{3164}' | '\u{FE00}'..='\u{FE0F}' | '\u{FEFF}' | '\u{FFA0}'
-            | '\u{FFF0}'..='\u{FFFB}' | '\u{E0000}'..='\u{E0FFF}')
+            | '\u{FFF0}'..='\u{FFFB}' | '\u{E0000}'..='\u{E0FFF}'
+            // Marks drawn over the letter before them, striking it through.
+            | '\u{0334}'..='\u{0338}' | '\u{20D2}' | '\u{20D3}' | '\u{20D8}'..='\u{20DA}' | '\u{20E5}' | '\u{20E6}'
+            | '\u{20EA}' | '\u{20EB}')
+}
+
+/// A name cut short to be shown inside a sentence.
+fn cut_name(name: &str) -> String {
+    let short: String = name.chars().take(40).collect();
+    short.escape_debug().to_string()
 }
 
 /// Two team names are the same name in any case.
@@ -224,7 +264,10 @@ pub fn save(folder: Option<&Path>, team: Team) -> Result<(), String> {
         return Err(format!("It cannot be saved as it is: {why}."));
     }
     let mut teams = read(Some(folder)).map_err(|why| {
-        format!("{why}. It is left as it is: put it right or delete it, then save the team again")
+        format!(
+            "{why}. Lillignode has not changed it: fix it, or move it out of the folder lillignode --where names, \
+             then save the team again"
+        )
     })?;
     match teams.iter().position(|t| same_name(&t.name, &team.name)) {
         Some(at) => teams[at] = team,
@@ -259,7 +302,7 @@ mod tests {
         TeamAgent {
             name: name.into(),
             command: name.to_lowercase(),
-            kind: None,
+            kind: Some("program".into()),
             args: vec![],
             folder: full(folder),
         }
@@ -299,12 +342,40 @@ mod tests {
             ),
             (vec![team("web", (0..=MOST_AGENTS).map(|i| agent(&format!("A{i}"), "/a")).collect())], "agents"),
             ((0..=MOST).map(|i| team(&format!("t{i}"), vec![agent("A", "/a")])).collect(), "more than"),
+            (
+                vec![team(
+                    "web",
+                    vec![TeamAgent { args: vec!["x".into(); MOST_ARGS + 1], ..agent("A", "/a") }],
+                )],
+                "options",
+            ),
+            (
+                vec![team(
+                    "web",
+                    vec![TeamAgent { args: vec!["x".repeat(LONGEST_TEXT + 1)], ..agent("A", "/a") }],
+                )],
+                "longer than",
+            ),
+            (vec![team("we\u{2028}b", vec![agent("A", "/a")])], "cannot be used"),
+            (
+                vec![team("web", vec![TeamAgent { args: vec!["a\u{0338}".into()], ..agent("A", "/a") }])],
+                "cannot be shown",
+            ),
+            (vec![team("web", vec![TeamAgent { kind: None, ..agent("A", "/a") }])], "kind"),
+            (vec![team("web", vec![TeamAgent { kind: Some("claude".into()), ..agent("A", "/a") }])], "kind"),
         ];
         for (teams, why) in cases {
             write(&dir, &teams);
             let said = read(Some(&dir)).unwrap_err();
             assert!(said.contains("is not what Lillignode wrote") && said.contains(why), "{why}: {said}");
         }
+        // A field Lillignode does not write.
+        let extra = format!(
+            r#"{{"teams":[{{"name":"web","agents":[{{"name":"A","command":"a","kind":"program","args":[],"folder":{},"env":{{}}}}]}}]}}"#,
+            serde_json::to_string(&full("/a")).unwrap()
+        );
+        std::fs::write(dir.join(FILE), extra).unwrap();
+        assert!(read(Some(&dir)).unwrap_err().contains("unknown field"));
         std::fs::write(dir.join(FILE), " ".repeat(MOST_BYTES as usize + 1)).unwrap();
         assert!(read(Some(&dir)).unwrap_err().contains("larger than"));
         let _ = std::fs::remove_dir_all(&dir);
@@ -315,6 +386,9 @@ mod tests {
         let a =
             TeamAgent { args: vec!["--model".into(), "a b".into(), String::new()], ..agent("Claude", "/w") };
         assert_eq!(a.runs(), "claude --model \"a b\" \"\"");
+        // What Lillignode adds for Claude Code is said too.
+        let c = TeamAgent { kind: Some("claude-code".into()), args: vec![], ..agent("Claude", "/w") };
+        assert_eq!(c.runs(), "claude --session-id <new-id>");
         let team = Team { name: "web".into(), agents: vec![a.clone()] };
         let same = digest(&team);
         assert_eq!(same, digest(&team.clone()));
@@ -357,7 +431,7 @@ mod tests {
         let dir = folder("broken");
         std::fs::write(dir.join(FILE), "{ not json").unwrap();
         let why = save(Some(&dir), Team { name: "web".into(), agents: vec![agent("A", "/a")] }).unwrap_err();
-        assert!(why.contains("is not what Lillignode wrote") && why.contains("left as it is"), "{why}");
+        assert!(why.contains("is not what Lillignode wrote") && why.contains("has not changed it"), "{why}");
         assert_eq!(std::fs::read_to_string(dir.join(FILE)).unwrap(), "{ not json");
         let _ = std::fs::remove_dir_all(&dir);
     }

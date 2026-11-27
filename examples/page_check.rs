@@ -1464,6 +1464,21 @@ fn teams_section(sb: &Sandbox, port: u16) {
     );
     s.expect("the agent is running", "STANDIN READY echo-plain");
     s.expect("and the terminal says the page started it", "From the page: Started the team");
+    // Lillignode's own window asking for a team's name: a start from the
+    // page waits its turn, and what is typed there is left as it was.
+    s.raw(CTRL_Q);
+    s.keys(b"t");
+    s.expect("the window asks for a team's name", "Team:");
+    s.keys(b"we");
+    let (outcome, words) = start_team(&page, &token, &run, "web", &print);
+    check(
+        "a start from the page while the window is asking is refused",
+        outcome == "refused" && words.contains("asking something"),
+        &words,
+    );
+    s.expect("and the name being typed is still there", "Team: we");
+    s.raw(b"");
+    s.expect("Esc leaves it", "No team was saved or started.");
     let (outcome, words) = start_team(&page, &token, &run, "web", &print);
     check(
         "started again, an agent already open is not started twice",
