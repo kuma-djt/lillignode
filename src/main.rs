@@ -222,9 +222,9 @@ fn main() -> ExitCode {
         match lillignode::helper::Helper::start(&named.command, &named.args, &named.env, &folder) {
             Ok(helper) => {
                 app.engine.set_helper(helper);
-                app.helper_started(Ok(()));
+                app.helper_started(&named.command, Ok(()));
             }
-            Err(why) => app.helper_started(Err(why)),
+            Err(why) => app.helper_started(&named.command, Err(why)),
         }
     }
     let publisher = app.config.page.then(snapshot::channel).and_then(|(publisher, reader)| {

@@ -26,7 +26,7 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -46,6 +46,13 @@ const MOST_LINES: usize = 200;
 
 /// A line from the helper longer than this stops it.
 const LINE_MAX: usize = 16 * 1024;
+
+/// No more questions than this wait to be written to it. A helper that
+/// reads none of them is stopped, not queued for.
+const QUEUE: usize = 8;
+
+/// No more answers than this are kept waiting to be taken.
+const MOST_ANSWERS: usize = 64;
 
 /// What of this machine's environment the helper is given, besides the
 /// names its settings list: what a program needs to run at all.
@@ -98,6 +105,9 @@ pub enum Answer {
 #[derive(Default)]
 struct Inner {
     answers: HashMap<u64, (Answer, Instant)>,
+    /// The questions asked and not yet answered: an answer to any other
+    /// is passed over, so none can come before its question.
+    open: Vec<u64>,
     /// Why it stopped, once it has.
     stopped: Option<String>,
 }
@@ -105,9 +115,19 @@ struct Inner {
 /// A running helper.
 pub struct Helper {
     inner: Arc<Mutex<Inner>>,
-    out: Sender<String>,
+    out: SyncSender<String>,
     child: Arc<Mutex<Option<Child>>>,
     command: String,
+}
+
+/// Marks it stopped, with why (the first why stands), and ends its
+/// program, so nothing of it is left running once it is not listened to.
+fn give_up(inner: &Mutex<Inner>, child: &Mutex<Option<Child>>, why: String) {
+    lock(inner).stopped.get_or_insert(why);
+    if let Some(mut child) = lock(child).take() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -136,9 +156,9 @@ impl Helper {
         let mut stdin = child.stdin.take().ok_or("no pipe to the helper")?;
         let inner = Arc::new(Mutex::new(Inner::default()));
         let child = Arc::new(Mutex::new(Some(child)));
-        let (out, out_rx): (Sender<String>, Receiver<String>) = mpsc::channel();
+        let (out, out_rx): (SyncSender<String>, Receiver<String>) = mpsc::sync_channel(QUEUE);
 
-        let heard = inner.clone();
+        let (heard, its) = (inner.clone(), child.clone());
         std::thread::Builder::new()
             .name("helper-in".into())
             .spawn(move || {
@@ -152,16 +172,22 @@ impl Helper {
                         }
                         Ok(_) => {
                             if let Some((ask, answer)) = read_answer(&String::from_utf8_lossy(&line)) {
-                                lock(&heard).answers.insert(ask, (answer, Instant::now()));
+                                let mut inner = lock(&heard);
+                                // Only to a question asked and still open,
+                                // and never more than can be taken.
+                                if inner.open.contains(&ask) && inner.answers.len() < MOST_ANSWERS {
+                                    inner.open.retain(|open| *open != ask);
+                                    inner.answers.insert(ask, (answer, Instant::now()));
+                                }
                             }
                         }
                         Err(e) => break format!("its words could not be read ({e})"),
                     }
                 };
-                lock(&heard).stopped.get_or_insert(why);
+                give_up(&heard, &its, why);
             })
             .map_err(|e| format!("The helper ({command}) could not be listened to: {e}."))?;
-        let said = inner.clone();
+        let (said, its) = (inner.clone(), child.clone());
         std::thread::Builder::new()
             .name("helper-out".into())
             .spawn(move || {
@@ -172,14 +198,14 @@ impl Helper {
                         .and_then(|_| stdin.flush())
                         .is_err()
                     {
-                        lock(&said).stopped.get_or_insert("it stopped taking questions".to_string());
+                        give_up(&said, &its, "it stopped taking questions".to_string());
                         return;
                     }
                 }
             })
             .map_err(|e| format!("The helper ({command}) could not be spoken to: {e}."))?;
         let helper = Helper { inner, out, child, command: command.to_string() };
-        let _ = helper.out.send(json!({ "hello": VERSION }).to_string());
+        let _ = helper.out.try_send(json!({ "hello": VERSION }).to_string());
         Ok(helper)
     }
 
@@ -200,7 +226,18 @@ impl Helper {
         }
         let from = lines.len().saturating_sub(MOST_LINES);
         let line = json!({ "ask": ask, "agent": agent, "screen": &lines[from..] }).to_string();
-        let _ = self.out.send(line);
+        lock(&self.inner).open.push(ask);
+        // A helper that has not read the questions before it is not
+        // reading: stopped, so nothing piles up for it.
+        match self.out.try_send(line) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => {
+                give_up(&self.inner, &self.child, "it stopped reading questions".to_string())
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                give_up(&self.inner, &self.child, "it stopped taking questions".to_string())
+            }
+        }
     }
 
     /// The answer to question `ask`, once it has come, with when it came.
@@ -209,9 +246,11 @@ impl Helper {
         lock(&self.inner).answers.remove(&ask)
     }
 
-    /// Answers to questions no longer waited for are let go.
+    /// Questions no longer waited for, and their answers, are let go.
     pub fn forget_all_but(&self, keep: &[u64]) {
-        lock(&self.inner).answers.retain(|ask, _| keep.contains(ask));
+        let mut inner = lock(&self.inner);
+        inner.answers.retain(|ask, _| keep.contains(ask));
+        inner.open.retain(|ask| keep.contains(ask));
     }
 
     /// Why it stopped, once it has. Nothing more is asked.
@@ -221,11 +260,7 @@ impl Helper {
 
     /// Stops it. Its answers are no longer taken.
     pub fn stop(&self) {
-        lock(&self.inner).stopped.get_or_insert("Lillignode stopped it".to_string());
-        if let Some(mut child) = lock(&self.child).take() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
+        give_up(&self.inner, &self.child, "Lillignode stopped it".to_string());
     }
 }
 
@@ -234,7 +269,7 @@ impl Helper {
     /// A helper with no program, for tests: what it is asked comes out of
     /// the receiver, and `answered` puts in what it says.
     pub fn detached() -> (Helper, Receiver<String>) {
-        let (out, asked) = mpsc::channel();
+        let (out, asked) = mpsc::sync_channel(QUEUE * 4);
         let helper = Helper {
             inner: Arc::new(Mutex::new(Inner::default())),
             out,
@@ -244,9 +279,14 @@ impl Helper {
         (helper, asked)
     }
 
-    /// As if the helper had answered `ask` at `at`.
+    /// As if the helper had answered `ask` at `at`, by the same rule as a
+    /// real answer: only to a question asked and still open.
     pub fn answered(&self, ask: u64, answer: Answer, at: Instant) {
-        lock(&self.inner).answers.insert(ask, (answer, at));
+        let mut inner = lock(&self.inner);
+        if inner.open.contains(&ask) {
+            inner.open.retain(|open| *open != ask);
+            inner.answers.insert(ask, (answer, at));
+        }
     }
 
     /// As if it had ended.

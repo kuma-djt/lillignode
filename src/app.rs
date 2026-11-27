@@ -403,6 +403,13 @@ fn plural(n: usize, one: &str, many: &str) -> String {
 
 /// How long a part has said it is waiting: "waiting since 52 minutes ago".
 /// A waiting part is not ended by a clock, so its age is always said.
+/// A program named in the settings, made safe to show inside a sentence:
+/// no control character or hidden character, and at most 80 columns.
+fn shown_command(command: &str) -> String {
+    let clean: String = command.chars().map(|c| if crate::teams::hidden(c) { ' ' } else { c }).collect();
+    fit::clip(clean.trim(), 80)
+}
+
 fn waiting_since(at: SystemTime) -> String {
     format!("waiting since {}", ago(Some(at)))
 }
@@ -823,15 +830,22 @@ impl<B: AgentBackend> App<B> {
     /// The helper the settings name was started, or not: said once, with
     /// what it is shown, so nobody is surprised that an agent's screen
     /// leaves Lillignode for it.
-    pub fn helper_started(&mut self, started: Result<(), String>) {
+    pub fn helper_started(&mut self, command: &str, started: Result<(), String>) {
+        // Its program's own name, short: the page's address may follow in
+        // the same rows. The whole command is in the status report.
+        let name = std::path::Path::new(command)
+            .file_name()
+            .map_or_else(|| command.to_string(), |n| n.to_string_lossy().to_string());
         self.say_first(match started {
-            // Short: the page's address may follow it in the same rows.
-            Ok(()) => "The helper is on: it is shown the screen of an agent that reports nothing, and its \
-                       answers show as guesses."
-                .to_string(),
+            Ok(()) => format!(
+                "The helper {} is on: it is sent the screen of any agent that reports nothing. Its answers \
+                 show as guesses.",
+                fit::clip(&shown_command(&name), 30)
+            ),
             Err(why) => format!(
-                "{why} No guesses are shown; agents work as before. Put \"helper\" right in the settings \
-                 file, or take it out."
+                "{} No guesses are shown; agents work as before. Put \"helper\" right in the settings file, \
+                 or take it out.",
+                why.chars().map(|c| if crate::teams::hidden(c) { ' ' } else { c }).collect::<String>()
             ),
         });
     }
@@ -2264,8 +2278,10 @@ impl<B: AgentBackend> App<B> {
         if let (false, Some((command, Some(why)))) = (self.helper_stop_said, self.engine.helper_state()) {
             self.helper_stop_said = true;
             self.say_first(format!(
-                "The helper ({}) has stopped: {why}. No guesses are shown now; agents work as before. Start                  Lillignode again to start it again.",
-                fit::clip(&command, 60)
+                "The helper ({}) has stopped: {}. No guesses are shown now; agents work as before. Start \
+                 Lillignode again to start it again.",
+                shown_command(&command),
+                fit::clip(&why, 80)
             ));
         }
         began && self.config.bell
@@ -2772,8 +2788,12 @@ impl<B: AgentBackend> App<B> {
                 if let AgentStatus::Unknown(why) = shown {
                     out += &format!(". {}", status::why_long(why, expected));
                 }
-                out += &format!(". The sidebar shows it as {}.\n", shown.short());
-                if let (AgentStatus::Unknown(_), Some(guess)) = (&shown, self.engine.guess(e.key())) {
+                let guessed = self.engine.guess(e.key()).filter(|_| matches!(shown, AgentStatus::Unknown(_)));
+                match guessed {
+                    Some(guess) => out += &format!(". The sidebar shows it as Guess: {}?\n", guess.word()),
+                    None => out += &format!(". The sidebar shows it as {}.\n", shown.short()),
+                }
+                if let (AgentStatus::Unknown(_), Some(guess)) = (&shown, guessed) {
                     out += &format!(
                         "The helper your settings name guesses it is {}, from the text on its screen. That is a \
                          guess, not the agent's own report: it ends when the screen changes or the agent \
@@ -2781,13 +2801,19 @@ impl<B: AgentBackend> App<B> {
                         guess.word()
                     );
                 }
-                if let (AgentStatus::Unknown(_), Some((command, Some(why)))) =
-                    (&shown, self.engine.helper_state())
-                {
+                // Whenever a helper is named: who it is, and what it is sent.
+                if let Some((command, stopped)) = self.engine.helper_state() {
                     out += &format!(
-                        "The helper ({command}) has stopped ({why}): no guess is shown.
-"
+                        "Helper: {}. Lillignode sends it the name and screen text of any agent that reports \
+                         nothing, once the text is still; what it does with them is up to that program.",
+                        shown_command(&command)
                     );
+                    out += &match stopped {
+                        Some(why) => {
+                            format!(" It has stopped ({}): no guesses are shown.\n", fit::clip(&why, 80))
+                        }
+                        None => "\n".to_string(),
+                    };
                 }
                 // Said when a part, not the program itself, is why.
                 let (waiting, own) = (e.waiting_parts(), e.own_status());

@@ -1558,7 +1558,8 @@ fn helper_section(sb: &Sandbox, port: u16, standin: &std::path::Path) {
     let (mut s, page, said) = start(sb);
     check(
         "the start says the helper is on, and what it is shown",
-        said.contains("The helper is on: it is shown the screen of an agent that reports nothing"),
+        said.contains("is on: it is sent the screen of any agent that reports nothing")
+            && said.contains("helper_standin"),
         &said,
     );
     // The agent's last line ends with a question: the stand-in guesses waiting.
@@ -1589,6 +1590,10 @@ fn helper_section(sb: &Sandbox, port: u16, standin: &std::path::Path) {
         "the status report says it is a guess, not the agent's report",
         "That is a guess, not the agent's own report",
     );
+    s.expect(
+        "and names the helper and what it is sent, whenever one is named",
+        "Lillignode sends it the name and screen text of any agent that reports nothing",
+    );
     s.keys(ESC);
     // The screen changes: the guess goes.
     s.keys(b".");
@@ -1618,7 +1623,7 @@ fn helper_section(sb: &Sandbox, port: u16, standin: &std::path::Path) {
     s.pump_for(Duration::from_millis(500));
     s.raw(CTRL_Q);
     s.keys(b"s");
-    s.expect("and the status report keeps saying it", "has stopped (it ended): no guess is shown");
+    s.expect("and the status report keeps saying it", "It has stopped (it ended): no guesses are shown.");
     s.keys(ESC);
     quit_either_way(s);
 

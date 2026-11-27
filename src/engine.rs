@@ -428,6 +428,8 @@ impl<B: AgentBackend> Engine<B> {
     /// What the helper guesses this agent is doing, if it has guessed for
     /// the screen the agent shows now and the agent still says nothing.
     pub fn guess(&self, agent: AgentKey) -> Option<Guess> {
+        // A helper that has stopped stands behind no guess.
+        self.helper.as_ref().filter(|h| h.stopped().is_none())?;
         self.asking.get(&agent).and_then(|a| a.answer.flatten())
     }
 
@@ -462,7 +464,10 @@ impl<B: AgentBackend> Engine<B> {
         for a in self.asking.values_mut().filter(|a| a.answer.is_none()) {
             a.answer = match helper.answer(a.ask) {
                 // In time: a guess, or unsure. Late: no guess.
-                Some((answer, came)) if came.duration_since(a.asked_at) <= crate::helper::ANSWER_WITHIN => {
+                Some((answer, came))
+                    if came >= a.asked_at
+                        && came.duration_since(a.asked_at) <= crate::helper::ANSWER_WITHIN =>
+                {
                     Some(match answer {
                         Answer::Guess(guess) => Some(guess),
                         Answer::Unsure => None,
@@ -2006,8 +2011,40 @@ mod tests {
         let _ = e.ws.focused_mut().unwrap().term.feed_at(b"\r\nnow?", SystemTime::now());
         e.settle();
         assert!(last_question(&asked).is_none(), "not still long enough");
-        // A helper that has stopped is asked nothing.
+        // An answer to a question not asked is passed over, and one that
+        // came before its question is no guess.
+        e.helper.as_ref().unwrap().answered(9999, Answer::Guess(Guess::Done), std::time::Instant::now());
+        let early = std::time::Instant::now();
+        report(&mut e, 1, "state=pondering");
+        let _ =
+            e.ws.focused_mut()
+                .unwrap()
+                .term
+                .feed_at(b"\r\nsoon?", SystemTime::now() - std::time::Duration::from_secs(10));
+        e.settle();
+        let ask = last_question(&asked).unwrap()["ask"].as_u64().unwrap();
+        assert_ne!(ask, 9999);
+        e.helper.as_ref().unwrap().answered(
+            ask,
+            Answer::Guess(Guess::Waiting),
+            early - std::time::Duration::from_secs(1),
+        );
+        e.settle();
+        assert_eq!(e.guess(agent), None, "an answer from before the question is no guess");
+        // A guess held when the helper stops is no longer shown.
+        let _ =
+            e.ws.focused_mut()
+                .unwrap()
+                .term
+                .feed_at(b"\r\nheld?", SystemTime::now() - std::time::Duration::from_secs(11));
+        e.settle();
+        let ask = last_question(&asked).unwrap()["ask"].as_u64().unwrap();
+        e.helper.as_ref().unwrap().answered(ask, Answer::Guess(Guess::Waiting), std::time::Instant::now());
+        e.settle();
+        assert_eq!(e.guess(agent), Some(Guess::Waiting));
+        // A helper that has stopped is asked nothing, and stands behind no guess.
         e.helper.as_ref().unwrap().ended("it ended");
+        assert_eq!(e.guess(agent), None, "a stopped helper's guess is not shown");
         let _ =
             e.ws.focused_mut()
                 .unwrap()
