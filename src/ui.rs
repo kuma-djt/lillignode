@@ -440,8 +440,15 @@ fn draw_welcome<B: AgentBackend>(frame: &mut Frame, area: Rect, app: &App<B>, p:
         WelcomeLook::Stacked => {
             // One column in the middle: gnome, name, key.
             let centre = move |w: u16| area.x + area.width.saturating_sub(w) / 2;
-            let big = area.width >= name_w(false) && fits_tall(5 + 1 + KEY_H);
-            let gnome = big && fits_tall(gnome_h + 1 + 5 + 1 + KEY_H);
+            // What fits, giving up the large name first, then the gnome.
+            let room_for_name = area.width >= name_w(false);
+            let (gnome, big) = if room_for_name && fits_tall(gnome_h + 1 + 5 + 1 + KEY_H) {
+                (true, true)
+            } else if fits_tall(gnome_h + 1 + 1 + 1 + KEY_H) && area.width >= gnome_w {
+                (true, false)
+            } else {
+                (false, false)
+            };
             let h = if gnome { gnome_h + 1 } else { 0 } + if big { 5 } else { 1 } + 1 + KEY_H;
             (
                 h,
@@ -459,8 +466,10 @@ fn draw_welcome<B: AgentBackend>(frame: &mut Frame, area: Rect, app: &App<B>, p:
         WelcomeLook::Wide => {
             // Down the left, read top to bottom: the gnome, the name twice
             // as wide where there is room, then the key.
-            let wide = area.width >= name_w(true) && fits_tall(gnome_h + 1 + 5 + 1 + KEY_H);
-            let big = wide || (area.width >= name_w(false) && fits_tall(5 + 1 + KEY_H));
+            // What fits, giving up the large name first, then the gnome.
+            let with_gnome = fits_tall(gnome_h + 1 + 5 + 1 + KEY_H);
+            let wide = area.width >= name_w(true) && with_gnome;
+            let big = wide || (area.width >= name_w(false) && with_gnome);
             let name_h = if big { 5 } else { 1 };
             let gnome = fits_tall(gnome_h + 1 + name_h + 1 + KEY_H) && area.width >= gnome_w;
             let h = if gnome { gnome_h + 1 } else { 0 } + name_h + 1 + KEY_H;
@@ -560,7 +569,8 @@ fn draw_key(frame: &mut Frame, x: u16, y: u16, bounds: Rect, p: Palette) -> u16 
         .iter()
         .enumerate()
         .map(|(i, row)| {
-            let mut spans = vec![Span::styled(*row, p.key())];
+            let mut spans =
+                vec![Span::styled(*row, p.key().add_modifier(Modifier::REVERSED | Modifier::BOLD))];
             if i == look::START_KEY.len() / 2 {
                 spans.push(Span::raw("   "));
                 spans.push(Span::styled("start an agent", bold));
@@ -582,7 +592,8 @@ fn small_lines<B: AgentBackend>(app: &App<B>, p: Palette) -> Vec<Line<'static>> 
     text.extend(first_agent_lines(app, p).into_iter().skip_while(|l| {
         // The key above says "start an agent"; the sentence that says the
         // same is not said twice.
-        l.spans.iter().map(|s| s.content.as_ref()).collect::<String>().starts_with("No agents yet. Press n")
+        l.spans.iter().map(|s| s.content.as_ref()).collect::<String>()
+            == "No agents yet. Press n to start one."
     }));
     text.push(Line::from(Span::raw(format!("{} opens Lillignode's menu.", app.config.menu_keys_label()))));
     text.push(Line::default());
@@ -610,10 +621,13 @@ fn first_agent_lines<B: AgentBackend>(app: &App<B>, p: Palette) -> Vec<Line<'sta
         // None found: one path, not two.
         Some([]) => {
             lines.push(Line::from(vec![
-                Span::styled("No agents yet, and none Lillignode knows was found here. ", bold),
-                Span::raw("Install one, for example Claude Code, then start Lillignode again. Or press "),
+                Span::styled("No agents yet. ", bold),
+                Span::raw("Press "),
                 Span::styled("n", p.key()),
-                Span::raw(" to start any other program by its name."),
+                Span::raw(
+                    " to start any program by its name. No coding agent Lillignode knows by name was found on this \
+                     machine; to use one, for example Claude Code, install it and start Lillignode again.",
+                ),
             ]));
             return lines;
         }
