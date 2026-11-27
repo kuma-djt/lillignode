@@ -1051,6 +1051,7 @@ fn agent_json(agent: &AgentCopy, front: bool) -> Value {
         Some(AgentStatus::Done) => "done",
         Some(AgentStatus::Idle) => "idle",
         Some(AgentStatus::Error(_)) => "error",
+        Some(AgentStatus::UsageLimit(_)) => "usage-limit",
         Some(AgentStatus::Unknown(_)) => "unknown",
         None => match &agent.program {
             Status::Running => "unknown",
@@ -1078,6 +1079,12 @@ fn agent_json(agent: &AgentCopy, front: bool) -> Value {
         "needs": agent.needs_you.flatten().map(|kind| kind.word()),
         "needs_you_since": agent.needs_you_since.map(millis),
         "reported_at": agent.reported_at.map(millis),
+        // When the agent said its usage limit resets, for the page to say
+        // in the reader's own time; null when it did not say.
+        "resets_at": match &agent.status {
+            Some(AgentStatus::UsageLimit(Some(at))) => json!(at.saturating_mul(1000)),
+            _ => Value::Null,
+        },
         "program_note": program_note,
     })
 }

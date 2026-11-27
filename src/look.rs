@@ -182,7 +182,7 @@ impl Palette {
 /// second. One that has gone quiet holds still.
 ///
 /// Working is `+`, Needs you `!`, Done `=`, Idle `z`, Errored `x`, Unknown
-/// `?`, Starting `.`, and an agent that has exited `-`.
+/// `?`, Starting `.`, a usage limit `~`, and an agent that has exited `-`.
 pub fn sign(reported: Option<&AgentStatus>, program: &Status, clock: u64) -> (char, Tone) {
     match reported {
         Some(AgentStatus::Working) => (if clock.is_multiple_of(2) { '+' } else { '*' }, Tone::Strong),
@@ -191,6 +191,9 @@ pub fn sign(reported: Option<&AgentStatus>, program: &Status, clock: u64) -> (ch
         Some(AgentStatus::Done) => ('=', Tone::Good),
         Some(AgentStatus::Idle) => ('z', Tone::Dim),
         Some(AgentStatus::Error(_)) => ('x', Tone::Bad),
+        // Waiting on time, not on the user and not failed: neither yellow
+        // nor red.
+        Some(AgentStatus::UsageLimit(_)) => ('~', Tone::Plain),
         Some(AgentStatus::Unknown(_)) => ('?', Tone::Plain),
         Some(AgentStatus::Starting) => ('.', Tone::Dim),
         None => match program {
@@ -310,9 +313,10 @@ mod tests {
             of(AgentStatus::Error(None)),
             of(AgentStatus::Unknown(Why::NoReport)),
             of(AgentStatus::Starting),
+            of(AgentStatus::UsageLimit(None)),
             sign(None, &Status::Exited(Exit { code: 0 }), 0).0,
         ];
-        assert_eq!(signs, ['+', '!', '=', 'z', 'x', '?', '.', '-']);
+        assert_eq!(signs, ['+', '!', '=', 'z', 'x', '?', '.', '~', '-']);
         // An agent that stopped with an error, or never started, is Errored.
         assert_eq!(sign(None, &Status::Exited(Exit { code: 3 }), 0).0, 'x');
         assert_eq!(sign(None, &Status::NotStarted("why".into()), 0).0, 'x');

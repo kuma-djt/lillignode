@@ -592,6 +592,12 @@ impl<B: AgentBackend> App<B> {
                     began = true;
                     continue;
                 }
+                // Waiting on time, not on you: said, with no bell.
+                Event::ReachedUsageLimit { label, resets, .. } => format!(
+                    "{label} says it has reached a usage limit ({}). Lillignode changed nothing; the sidebar \
+                     shows it until the agent reports something else.",
+                    crate::status::resets_words(resets, std::time::SystemTime::now())
+                ),
                 Event::StatusBack { kind } => {
                     self.take_back_unknown_notice(kind);
                     continue;

@@ -244,6 +244,13 @@ fn record_reply(id: &str, nth: usize, said: &str) {
     let _ = file.write_all(lines.as_bytes());
 }
 
+/// Seconds since 1970, `secs` from now.
+fn from_now(secs: i64) -> i64 {
+    let now =
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
+    now + secs
+}
+
 fn report(body: &str) {
     let mut out = std::io::stdout();
     let _ = write!(out, "\x1b]7501;{body}\x07");
@@ -316,6 +323,11 @@ fn status_mode() {
                 b't' => "state=working:app=claude-code:id=task-1".to_string(),
                 b'c' => "state=clear".to_string(),
                 b'l' => format!("state=working:app=claude-code:msg={}", base64(&"long ".repeat(600))),
+                // A usage limit, with Lillignode's own keys: one resetting
+                // in 2 h 5 min, one with no time, one that said it reset 5 min ago.
+                b'L' => format!("state=blocked:app=claude-code:limit=usage:resets={}", from_now(7500)),
+                b'N' => "state=blocked:app=claude-code:limit=usage".to_string(),
+                b'X' => format!("state=error:app=claude-code:limit=usage:resets={}", from_now(-300)),
                 0x04 => return,
                 _ => continue,
             };

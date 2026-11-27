@@ -1195,6 +1195,9 @@ Host: localhost:{port}
     println!("J. Saved teams, and starting one from the page when the settings allow it");
     teams_section(&sb, port);
 
+    println!("K. A usage limit, with the time the agent says it resets");
+    usage_limit_section(&sb, port);
+
     let _ = std::fs::remove_dir_all(&sb.root);
     println!("\nAll checks passed.");
 }
@@ -1489,6 +1492,95 @@ fn teams_section(sb: &Sandbox, port: u16) {
     let _ = std::fs::remove_file(sb.state.join(lillignode::teams::FILE));
     let _ = std::fs::remove_file(sb.state.join("workspace.json"));
     settings(sb, &format!("{{\"page\": true, \"page_port\": {port}}}"));
+}
+
+/// The page's state once the reporter's row passes `ready`, or after
+/// three seconds, whichever is first: the page's copy follows the terminal
+/// by a moment.
+fn state_when(page: &Page, ready: impl Fn(&serde_json::Value) -> bool) -> serde_json::Value {
+    let until = std::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        let at = state(page, "");
+        let row = at["state"]["agents"]
+            .as_array()
+            .and_then(|a| a.iter().find(|r| r["name"] == "reporter"))
+            .cloned();
+        if row.as_ref().is_some_and(&ready) || std::time::Instant::now() > until {
+            return at;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn usage_limit_section(sb: &Sandbox, port: u16) {
+    // A workspace of its own: nothing restored from earlier sections.
+    for file in ["workspace.json", "workspace.previous.json"] {
+        let _ = std::fs::remove_file(sb.state.join(file));
+    }
+    let (mut s, page) = started(sb, port);
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+    // The stand-in says it reached a usage limit that resets in 2 h 5 min.
+    s.writer.write_all(b"L").unwrap();
+    s.writer.flush().unwrap();
+    s.expect(
+        "the terminal says the agent reached a usage limit, and when it says it resets",
+        "says it has reached a usage limit (resets in 2 h 5 min)",
+    );
+    s.expect("the sidebar shows it as its own state", "Usage limit");
+    let at = state_when(&page, |r| r["state"] == "usage-limit");
+    let r = agent(&at["state"], "reporter");
+    let resets = r["resets_at"].as_u64().unwrap_or(0) / 1000;
+    check(
+        "the page is told it is a usage limit, with when it resets",
+        r["state"] == "usage-limit" && (now + 7490..=now + 7520).contains(&resets),
+        &r.to_string(),
+    );
+    check(
+        "it is not counted as needing you, and no event says it is",
+        r["needs_you"] == false
+            && !at["state"]["events"]
+                .as_array()
+                .is_some_and(|ev| ev.iter().any(|e| e["what"] == "began-needing-you")),
+        &r.to_string(),
+    );
+    check(
+        "and an event names the agent that reached it",
+        at["state"]["events"].as_array().is_some_and(|ev| {
+            ev.iter().any(|e| e["what"] == "reached-usage-limit" && e["agent"] == r["key"])
+        }),
+        &at["state"]["events"].to_string(),
+    );
+    // No time given: said so, never a guess.
+    s.writer.write_all(b"N").unwrap();
+    s.writer.flush().unwrap();
+    let r = agent(&state_when(&page, |r| r["resets_at"].is_null())["state"], "reporter").clone();
+    check(
+        "with no time given, the page is told none, and the words say so",
+        r["state"] == "usage-limit"
+            && r["resets_at"].is_null()
+            && r["words"] == "Usage limit, reset time not given",
+        &r.to_string(),
+    );
+    // Past the time it gave, it is still what the agent said.
+    s.writer.write_all(b"X").unwrap();
+    s.writer.flush().unwrap();
+    let r = agent(
+        &state_when(&page, |r| r["words"].as_str().is_some_and(|w| w.contains("ago")))["state"],
+        "reporter",
+    )
+    .clone();
+    check(
+        "past the time it said, Lillignode does not decide the limit has passed",
+        r["state"] == "usage-limit" && r["words"] == "Usage limit, said it resets 5 min ago",
+        &r.to_string(),
+    );
+    // Any other report ends it.
+    s.writer.write_all(b"i").unwrap();
+    s.writer.flush().unwrap();
+    let r = agent(&state_when(&page, |r| r["state"] == "idle")["state"], "reporter").clone();
+    check("another report ends it", r["state"] == "idle" && r["resets_at"].is_null(), &r.to_string());
+    quit_either_way(s);
+    let _ = std::fs::remove_file(sb.state.join("workspace.json"));
 }
 
 /// Quit, answering yes if Lillignode asks first.

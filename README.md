@@ -266,6 +266,19 @@ An agent's status is what the agent says it is. Lillignode reads the status repo
 - **A program that reports nothing shows Unknown,** and the status report says no report has come. Claude Code and Codex are expected to report, so for them a notice says so once, with the likeliest cause.
 - **Done means the agent's turn ended.** It does not mean the work succeeded, and the turn may have ended on a question written as ordinary text, which no report marks as waiting for you. Seen with Grok Build.
 
+### A usage limit (Lillignode's own keys, not in the proposal)
+
+The proposal has no way to say "I have reached a usage limit" or when it resets, and no agent says it today. Lillignode reads two keys of its own beside a `blocked` or `error` report, as the proposal allows ("unknown keys must be ignored", so a terminal that does not know them shows the agent as blocked):
+
+```
+ESC ] 7501 ; state=blocked:limit=usage:resets=1764201600 BEL
+```
+
+- `limit=usage` marks a usage limit. `resets=` is when the agent says it resets, in whole seconds since 1970 (UTC).
+- **Shown as its own state:** `~ Usage limit` in the sidebar, not yellow and not red, with no bell; a notice says when it resets ("resets in 2 h 5 min"); the page gives the time in the reader's own time zone.
+- **Never a guess.** No `resets`, or one before 2020 or more than 31 days ahead: "reset time not given". Past the time, Lillignode still shows what the agent said ("said it resets 4 min ago") until the agent reports something else.
+- Lillignode does not read an agent's screen for words like "usage limit reached": that would be guessing at its state.
+
 ### Which programs, and how we know
 
 Three levels of evidence, strongest first. Everything checked by hand was on Windows 11 in Windows Terminal, in November 2026.

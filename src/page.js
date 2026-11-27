@@ -140,6 +140,18 @@
       const waited = since(agent.needs_you_since);
       return ["Needs you", waited === null ? "" : ", waiting " + ago(waited)];
     }
+    // A usage limit: when the agent said it resets, at the reader's own
+    // time of day, and how far off that is by Lillignode's clock. Past it,
+    // what the agent said is still all that is known.
+    if (agent.state === "usage-limit") {
+      if (agent.resets_at === null || agent.resets_at === undefined) return ["Usage limit", ", reset time not given"];
+      const left = -since(agent.resets_at);
+      const at = new Date(agent.resets_at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+      if (Number.isNaN(left)) return ["Usage limit", ", resets " + at];
+      if (left > 60000) return ["Usage limit", ", resets " + at + " (in " + ago(left) + ")"];
+      if (left > -60000) return ["Usage limit", ", resets about now (" + at + ")"];
+      return ["Usage limit", ", said it resets at " + at + ", " + ago(-left) + " ago"];
+    }
     const age = since(agent.reported_at);
     return [agent.words, age === null ? "" : ", " + ago(age) + " ago"];
   }
@@ -147,6 +159,7 @@
   function agentClass(agent) {
     if (!agent.running) return "gone";
     if (agent.needs_you) return "needs-you";
+    if (agent.state === "usage-limit") return "usage-limit";
     return agent.state === "working" ? "working" : "";
   }
 

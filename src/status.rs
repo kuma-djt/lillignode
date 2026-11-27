@@ -65,6 +65,14 @@ pub const CODEX: Reporter =
 /// started with it set, every agent inherits it.
 pub const OFF_SWITCH: &str = "CLAUDE_CODE_DISABLE_TERMINAL_TITLE";
 
+/// A reset time before this (2020-01-01, in seconds since 1970) is not
+/// one a program means: it is said as not given.
+const EARLIEST_RESET: u64 = 1_577_836_800;
+
+/// A reset time further ahead than this is not believed, and is said as
+/// not given.
+const LONGEST_LIMIT: Duration = Duration::from_secs(31 * 24 * 60 * 60);
+
 /// The longest message shown from a report, in characters.
 const MESSAGE_CHARS: usize = 200;
 
@@ -152,6 +160,12 @@ pub enum AgentStatus {
     Idle,
     /// The last request failed; the agent is still open. Its own words, if any.
     Error(Option<String>),
+    /// The agent said it has reached a usage limit, with the time it says
+    /// the limit resets (seconds since 1970), if it gave one Lillignode
+    /// believes. Not in the proposal: Lillignode's own keys, `limit=usage`
+    /// and `resets=`, beside `state=blocked` or `state=error`, which a
+    /// terminal that does not know them passes over, as the proposal says.
+    UsageLimit(Option<u64>),
     Unknown(Why),
 }
 
@@ -164,6 +178,7 @@ impl AgentStatus {
         match self {
             AgentStatus::NeedsYou(_) => "Needs you".into(),
             AgentStatus::Error(_) => "Error".into(),
+            AgentStatus::UsageLimit(_) => "Usage limit".into(),
             AgentStatus::Unknown(_) => "Unknown".into(),
             other => other.text(),
         }
@@ -182,9 +197,45 @@ impl AgentStatus {
             AgentStatus::Idle => "Idle".into(),
             AgentStatus::Error(Some(msg)) => format!("Error: {msg}"),
             AgentStatus::Error(None) => "Error".into(),
+            AgentStatus::UsageLimit(resets) => {
+                format!("Usage limit, {}", resets_words(*resets, SystemTime::now()))
+            }
             AgentStatus::Unknown(why) => format!("Unknown: {}", why_short(*why)),
         }
     }
+}
+
+/// When a usage limit resets, as the agent said it, against `now`: "resets
+/// in 2 h 5 min", "said it resets 4 min ago" (Lillignode never decides on
+/// its own that the limit has passed), or "reset time not given".
+pub fn resets_words(resets: Option<u64>, now: SystemTime) -> String {
+    let Some(resets) = resets else { return "reset time not given".to_string() };
+    let now = now.duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    let span = |secs: u64| {
+        let minutes = secs.div_ceil(60);
+        match (minutes / 60, minutes % 60) {
+            (0, m) => format!("{m} min"),
+            (h, 0) => format!("{h} h"),
+            (h, m) => format!("{h} h {m} min"),
+        }
+    };
+    match resets.checked_sub(now) {
+        Some(0) | None if resets + 60 > now => "resets within a minute".to_string(),
+        Some(ahead) => format!("resets in {}", span(ahead)),
+        None => format!("said it resets {} ago", span(now - resets)),
+    }
+}
+
+/// A reset time as a report gives it: whole seconds since 1970, from 2020
+/// to 31 days ahead of `now`. Anything else is not given.
+fn reset_time(text: Option<&str>, now: SystemTime) -> Option<u64> {
+    let text = text?;
+    if text.is_empty() || text.len() > 12 || !text.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let at: u64 = text.parse().ok()?;
+    let latest = now.duration_since(SystemTime::UNIX_EPOCH).ok()?.as_secs() + LONGEST_LIMIT.as_secs();
+    (EARLIEST_RESET..=latest).contains(&at).then_some(at)
 }
 
 fn why_short(why: Why) -> &'static str {
@@ -280,6 +331,8 @@ struct Parts<'a> {
     kind: Option<&'a str>,
     title: Option<&'a str>,
     msg: Option<&'a str>,
+    limit: Option<&'a str>,
+    resets: Option<&'a str>,
 }
 
 /// The characters the format allows in a value.
@@ -426,6 +479,11 @@ fn read_parts(body: &[u8]) -> Result<Reading, String> {
         None => None,
     };
     let status = match state {
+        // A usage limit: Lillignode's own key beside a state the proposal
+        // has. Any other word for `limit` is passed over, as an unknown key.
+        "blocked" | "error" if parts.limit == Some("usage") => {
+            AgentStatus::UsageLimit(reset_time(parts.resets, SystemTime::now()))
+        }
         "working" => AgentStatus::Working,
         "blocked" => AgentStatus::NeedsYou(kind_of(parts.kind)),
         "done" => AgentStatus::Done,
@@ -467,6 +525,8 @@ fn parse(text: &str) -> Parts<'_> {
             "kind" => parts.kind = Some(value),
             "title" => parts.title = Some(value),
             "msg" => parts.msg = Some(value),
+            "limit" => parts.limit = Some(value),
+            "resets" => parts.resets = Some(value),
             _ => {}
         }
     }
@@ -1014,6 +1074,46 @@ mod tests {
             Reading::Status { status, .. } => assert_eq!(status, expected, "{body}"),
             other => panic!("{body}: {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_usage_limit_is_its_own_state_with_the_reset_time_only_when_it_can_be_believed() {
+        let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs();
+        let soon = now + 2 * 3600;
+        is(&format!("state=blocked:limit=usage:resets={soon}"), AgentStatus::UsageLimit(Some(soon)));
+        is(&format!("state=error:limit=usage:resets={soon}:app=x"), AgentStatus::UsageLimit(Some(soon)));
+        // Not given, or not believed: never a guess, never zero, never now.
+        is("state=blocked:limit=usage", AgentStatus::UsageLimit(None));
+        for bad in
+            ["", "0", "12ab", "-5", "1000000000", &(now + 40 * 24 * 3600).to_string(), "99999999999999"]
+        {
+            is(&format!("state=blocked:limit=usage:resets={bad}"), AgentStatus::UsageLimit(None));
+        }
+        // Another word for limit is passed over, as an unknown key; a state
+        // that says what the agent is doing stands.
+        is("state=blocked:limit=tokens:resets=1", AgentStatus::NeedsYou(None));
+        is(&format!("state=working:limit=usage:resets={soon}"), AgentStatus::Working);
+        is("state=done:limit=usage", AgentStatus::Done);
+        // A part's report keeps the part's own rules: waiting.
+        let (_, change) = read_part(b"state=blocked:id=sub:limit=usage").unwrap();
+        assert_eq!(change, PartChange::Set(PartState::Waiting(None), None));
+        // Short in the sidebar; the time in the words.
+        assert_eq!(AgentStatus::UsageLimit(Some(soon)).short(), "Usage limit");
+        assert!(AgentStatus::UsageLimit(Some(soon)).text().starts_with("Usage limit, resets in "));
+    }
+
+    #[test]
+    fn a_reset_time_is_said_from_now_and_never_decided_to_have_passed() {
+        let at = |secs: u64| SystemTime::UNIX_EPOCH + Duration::from_secs(secs);
+        let now = 1_800_000_000;
+        assert_eq!(resets_words(None, at(now)), "reset time not given");
+        assert_eq!(resets_words(Some(now + 2 * 3600 + 5 * 60), at(now)), "resets in 2 h 5 min");
+        assert_eq!(resets_words(Some(now + 3600), at(now)), "resets in 1 h");
+        assert_eq!(resets_words(Some(now + 90), at(now)), "resets in 2 min");
+        assert_eq!(resets_words(Some(now + 20), at(now)), "resets in 1 min");
+        assert_eq!(resets_words(Some(now), at(now)), "resets within a minute");
+        assert_eq!(resets_words(Some(now - 30), at(now)), "resets within a minute");
+        assert_eq!(resets_words(Some(now - 4 * 60), at(now)), "said it resets 4 min ago");
     }
 
     #[test]
