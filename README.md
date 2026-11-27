@@ -209,6 +209,17 @@ Instead of the two files, Lillignode can start one program of your choosing and 
 - **An old Board is not acted on.** If no Board has come from the program for a minute, the page says how long ago it last did, and nothing on it can be acted on until one comes.
 - **Nothing goes to the outbox file instead.** If the program cannot be started, says nothing for ten seconds, speaks another version of the pipe, or stops, the Board says so and nothing can be acted on until Lillignode is started again. It is not started again by itself.
 
+### Saved teams
+
+A team is a named set of agents: each one's program, kind, options and folder. The menu key, then `t`, asks for a name:
+
+- **A new name** saves the agents open now as that team, after asking: "Save the 3 agents open now as the team "web"? y / n".
+- **A saved name** starts it, after asking: "Start the team "web": 2 agents, in new conversations? y / n / s". `s` saves over it with the agents open now.
+- **No conversation is kept with a team.** Its agents start new conversations; continuing a conversation is the workspace's job.
+- **Nothing is started twice.** An agent of the team that is already open, with the same program and folder, is left as it is, and said. One whose folder is not there is not started, and named.
+- **Kept in `teams.json`** beside your workspace (`lillignode --where` says where), written whole and private. A file that cannot be read is never written over.
+- **On the page** the saved teams are listed under the agents. Add `"page_can_start": true` beside `"page": true` and each has a Start button, on the same terms as typing and acting: under the word, from this machine, with the page's token, for this run of Lillignode. Saving a team is done in Lillignode's own window only.
+
 ## Settings
 
 One JSON file; `lillignode --where` says where it is.
@@ -243,7 +254,7 @@ And to let it act on the cards of its Board, which is off unless you ask whateve
 
 If the colours come out wrong, add `"colors"` with `"full"`, `"256"`, `"16"` or `"none"`. Setting the `NO_COLOR` environment variable also switches colour off.
 
-All are optional, and a change takes effect the next time Lillignode is started. `billing` does nothing without `cost`, and `cost_warning_tokens` without it is reported as a mistake; so is `page_port`, `page_can_type`, `page_can_act` or `board_adapter` without `page`. A Lillignode older than the page does not know `"page"` and treats it as a mistake in the file.
+All are optional, and a change takes effect the next time Lillignode is started. `billing` does nothing without `cost`, and `cost_warning_tokens` without it is reported as a mistake; so is `page_port`, `page_can_type`, `page_can_act`, `page_can_start` or `board_adapter` without `page`. A Lillignode older than the page does not know `"page"` and treats it as a mistake in the file.
 
 **The file is strict.** One mistake in it and none of it is used: every setting is at its default until it is fixed. Lillignode never changes the file. It tells you when it starts, beginning with how to fix it ("To fix your settings file: ...") and naming the line and column where it can.
 

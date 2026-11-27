@@ -321,7 +321,15 @@
           "message box; what you press on a card goes to " + onward
         : "This page can act on your Board: what you press on a card is passed to Lillignode, which sends it to " + onward;
     }
-    standing.className = token || acts ? "can-type" : "";
+    // Starting a saved team is said too, and the page is not called read
+    // only while it can.
+    const starts = !!(teams && teams.starting);
+    if (starts) {
+      standing.textContent = standing.textContent === READ_ONLY
+        ? "This page can start your saved teams in Lillignode. It sends nothing else."
+        : standing.textContent + " It can also start your saved teams.";
+    }
+    standing.className = token || acts || starts ? "can-type" : "";
     const key = target();
     typing.hidden = !token || key === null;
     if (typing.hidden) return;
@@ -951,6 +959,75 @@
       "(board.json, beside your workspace: lillignode --where says where) or from a program your settings name. " +
       "None is needed to run agents.";
   }
+
+  // The saved teams: read every few seconds, as the Board is. Start is
+  // offered only where the settings allow it, with the token that came
+  // with the list.
+  let teams = null;
+  let startingNow = false;
+  function drawTeams() {
+    const section = el("teams");
+    const list = teams ? teams.teams || [] : [];
+    section.hidden = list.length === 0 && !(teams && teams.problem);
+    const rows = list.map((team) => {
+      const li = text("li", "team-row", "");
+      const head = text("div", "team-head", "");
+      head.append(text("span", "team-name", team.name));
+      if (teams.starting) {
+        const b = document.createElement("button");
+        b.type = "button";
+        b.className = "team-start";
+        b.textContent = "Start";
+        b.disabled = startingNow || lostAt !== null || movedOn;
+        b.setAttribute("aria-label", "Start the team " + team.name);
+        b.addEventListener("click", () => startTeam(team.name));
+        head.append(b);
+      }
+      li.append(head, text("p", "team-agents quiet", team.agents.join(", ")));
+      return li;
+    });
+    if (teams && teams.problem) rows.push(text("li", "team-problem", teams.problem));
+    el("teams-list").replaceChildren(...rows);
+  }
+  function startTeam(name) {
+    if (!teams || !teams.starting || !state) return;
+    startingNow = true;
+    drawTeams();
+    const said = el("teams-said");
+    fetch("start", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token: teams.starting, run: String(state.run), name }),
+      signal: AbortSignal.timeout(15000),
+    })
+      .then((answer) => (answer.ok ? answer.json() : answer.text().then((words) => ({ outcome: "refused", words }))))
+      .then((heard) => {
+        said.hidden = false;
+        said.textContent = heard.words;
+      })
+      .catch(() => {
+        said.hidden = false;
+        said.textContent = "No answer from Lillignode, so it is not known whether the team was started. Look at the agents before pressing it again.";
+      })
+      .finally(() => {
+        startingNow = false;
+        readTeams();
+      });
+  }
+  function readTeams() {
+    if (movedOn || lostAt !== null) return;
+    fetch("teams", { cache: "no-store", signal: AbortSignal.timeout(5000) })
+      .then((answer) => (answer.ok ? answer.json() : null))
+      .then((heard) => {
+        if (heard) {
+          teams = heard;
+          drawTeams();
+        }
+      })
+      .catch(() => {});
+  }
+  setInterval(readTeams, BOARD_MS);
+  readTeams();
 
   function readBoard() {
     if (movedOn || lostAt !== null) return;

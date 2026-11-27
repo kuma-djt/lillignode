@@ -242,6 +242,15 @@ li.gone .agent-name { color: var(--cream-quiet); }
 .card-foot { display: flex; align-items: center; gap: 8px; }
 .card-foot .card-meta { flex: 1; min-width: 0; }
 
+/* The saved teams, under the agents. */
+#teams { margin-top: 14px; border-top: 1px solid var(--rule); }
+.team-row { padding: 6px 14px 8px; border-top: 1px solid var(--rule); }
+.team-head { display: flex; align-items: center; gap: 10px; }
+.team-name { font-weight: 600; flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.team-start { padding: 4px 12px; font-weight: 600; background: transparent; color: var(--cream); border: 1px solid var(--cream-quiet); border-radius: 3px; }
+.team-agents { padding: 2px 0 0; margin: 0; font-size: 12px; }
+#teams-said { padding: 4px 14px 8px; font-size: 13px; }
+
 /* Agents reporting through the Board's adapter: kept apart from Lillignode's own. */
 #reporting { margin-top: 14px; border-top: 1px solid var(--rule); }
 #reporting > p { font-size: 12px; padding: 0 14px 4px; margin: 0; }

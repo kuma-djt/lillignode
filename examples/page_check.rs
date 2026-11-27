@@ -284,6 +284,11 @@ fn serve(sb: &Sandbox, port: u16, can_type: bool, can_act: bool) {
         let adapter = std::env::var("PAGE_CHECK_BOARD_ADAPTER")
             .map(|named| format!(", \"board_adapter\": {named}"))
             .unwrap_or_default();
+        // Any other settings a check brings, as `"name": value` pairs.
+        let adapter = match std::env::var("PAGE_CHECK_SETTINGS") {
+            Ok(more) => format!("{adapter}, {more}"),
+            Err(_) => adapter,
+        };
         settings(
             sb,
             &format!("{{\"page\": true, \"page_port\": {port}, \"page_can_act\": true{and_type}{adapter}}}"),
@@ -358,6 +363,20 @@ fn serve(sb: &Sandbox, port: u16, can_type: bool, can_act: bool) {
             ("pickup", _) => {
                 std::fs::write(sb.state.join(lillignode::board::OUTBOX), "").unwrap();
                 println!("DONE pickup");
+            }
+            // A saved team of the two stand-ins, each in a folder of its own.
+            ("teams", _) => {
+                let (a, b) = (sb.root.join("web-api"), sb.root.join("web-docs"));
+                std::fs::create_dir_all(&a).unwrap();
+                std::fs::create_dir_all(&b).unwrap();
+                let team = serde_json::json!({ "teams": [
+                    { "name": "web", "agents": [
+                        { "name": "reporter", "command": "reporter", "kind": "program", "args": [], "folder": a },
+                        { "name": "plain", "command": "plain", "kind": "program", "args": [], "folder": b } ] },
+                    { "name": "docs", "agents": [
+                        { "name": "plain", "command": "plain", "kind": "program", "args": [], "folder": sb.root.join("gone") } ] } ] });
+                std::fs::write(sb.state.join(lillignode::teams::FILE), team.to_string()).unwrap();
+                println!("DONE teams");
             }
             ("board", which) if which.trim().starts_with("close ") => {
                 close_card(sb, which.trim().trim_start_matches("close ").trim());
@@ -1173,6 +1192,9 @@ Host: localhost:{port}
     println!("I. A Board adapter, when the settings name one");
     adapter_section(&sb, port);
 
+    println!("J. Saved teams, and starting one from the page when the settings allow it");
+    teams_section(&sb, port);
+
     let _ = std::fs::remove_dir_all(&sb.root);
     println!("\nAll checks passed.");
 }
@@ -1327,4 +1349,118 @@ fn adapter_section(sb: &Sandbox, port: u16) {
     drop(s.quit("quit", true));
     let _ = std::fs::remove_file(sb.state.join(lillignode::board::SENT));
     settings(sb, &format!("{{\"page\": true, \"page_port\": {port}}}"));
+}
+
+/// A `POST` to the page's `start`, as its Start button sends it.
+fn start_team(page: &Page, token: &str, run: &str, name: &str) -> (String, String) {
+    let port = page.port;
+    let body = serde_json::json!({ "token": token, "run": run, "name": name }).to_string();
+    let answer = ask(
+        page,
+        &format!(
+            "POST /start HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n{}Content-Length: {}\r\n\r\n{body}",
+            own(port),
+            body.len()
+        ),
+    )
+    .unwrap_or_default();
+    let said: serde_json::Value =
+        serde_json::from_str(answer.split_once("\r\n\r\n").map_or("", |(_, body)| body)).unwrap_or_default();
+    match (said["outcome"].as_str(), said["words"].as_str()) {
+        (Some(outcome), Some(words)) => (outcome.to_string(), words.to_string()),
+        _ => (answer.lines().next().unwrap_or("").to_string(), answer),
+    }
+}
+
+fn teams_shown(page: &Page) -> serde_json::Value {
+    let answer = get(page, "/teams").unwrap_or_default();
+    serde_json::from_str(answer.split_once("\r\n\r\n").map_or("", |(_, body)| body)).unwrap_or_default()
+}
+
+fn teams_section(sb: &Sandbox, port: u16) {
+    // A team of one stand-in, in a folder of its own, and the workspace
+    // emptied, so starting the team is seen to start it.
+    let place = sb.root.join("team-web");
+    std::fs::create_dir_all(&place).unwrap();
+    let team = serde_json::json!({ "teams": [ { "name": "web", "agents": [
+        { "name": "plain", "command": "plain", "kind": "program", "args": [], "folder": place } ] } ] });
+    std::fs::write(sb.state.join(lillignode::teams::FILE), team.to_string()).unwrap();
+    let _ = std::fs::remove_file(sb.state.join("workspace.json"));
+
+    // Off: listed, read only, and a start as the page would send it gets nothing.
+    settings(sb, &format!("{{\"page\": true, \"page_port\": {port}}}"));
+    let mut s = Session::start(sb);
+    let page = page_on_screen(&mut s, port);
+    let shown = teams_shown(&page);
+    check(
+        "the saved teams are given to the page, each with its agents",
+        shown["teams"][0]["name"] == "web" && shown["teams"][0]["agents"][0] == "plain (team-web)",
+        &shown.to_string(),
+    );
+    check(
+        "with starting off, the page is given no way to start one",
+        shown["starting"].is_null(),
+        &shown.to_string(),
+    );
+    let run = state(&page, "")["state"]["run"].as_str().unwrap_or_default().to_string();
+    let (status, _) = start_team(&page, "x", &run, "web");
+    check(
+        "and a start as the page would send it gets nothing",
+        status.starts_with("HTTP/1.1 404") || status.starts_with("HTTP/1.1 405"),
+        &status,
+    );
+    quit_either_way(s);
+
+    // On: started from the page, said in the terminal; a start from another
+    // run, or of a team that is not there, is refused.
+    settings(sb, &format!("{{\"page\": true, \"page_port\": {port}, \"page_can_start\": true}}"));
+    let mut s = Session::start(sb);
+    let page = page_on_screen(&mut s, port);
+    let shown = teams_shown(&page);
+    let token = shown["starting"].as_str().unwrap_or_default().to_string();
+    check("with starting on, the page is given a token to start with", token.len() >= 32, &shown.to_string());
+    let run = state(&page, "")["state"]["run"].as_str().unwrap_or_default().to_string();
+    let (outcome, words) = start_team(&page, &token, "0", "web");
+    check(
+        "a start from an earlier run is refused",
+        outcome == "refused" && words.contains("started again"),
+        &words,
+    );
+    let (outcome, words) = start_team(&page, &token, &run, "nope");
+    check(
+        "a team that is not there is refused",
+        outcome == "refused" && words.contains("no team called"),
+        &words,
+    );
+    let (outcome, words) = start_team(&page, "not-the-token", &run, "web");
+    check("a start without the page's token is refused", outcome.starts_with("HTTP/1.1 403"), &words);
+    let (outcome, words) = start_team(&page, &token, &run, "web");
+    check(
+        "a start from the page starts the team's agents",
+        outcome == "sent" && words.starts_with("Started the team \"web\": plain (team-web)."),
+        &words,
+    );
+    s.expect("the agent is running", "STANDIN READY echo-plain");
+    s.expect("and the terminal says the page started it", "From the page: Started the team");
+    let (outcome, words) = start_team(&page, &token, &run, "web");
+    check(
+        "started again, an agent already open is not started twice",
+        outcome == "sent" && words.contains("Already open, left as they were: plain (team-web)."),
+        &words,
+    );
+    quit_either_way(s);
+    let _ = std::fs::remove_file(sb.state.join(lillignode::teams::FILE));
+    let _ = std::fs::remove_file(sb.state.join("workspace.json"));
+    settings(sb, &format!("{{\"page\": true, \"page_port\": {port}}}"));
+}
+
+/// Quit, answering yes if Lillignode asks first.
+fn quit_either_way(mut s: Session) {
+    s.raw(CTRL_Q);
+    s.keys(b"q");
+    s.pump_for(Duration::from_millis(800));
+    if s.exit.is_none() && s.flat().contains("? y / n") {
+        s.keys(b"y");
+    }
+    drop(s.wait_for_exit("quit"));
 }

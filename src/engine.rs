@@ -20,6 +20,7 @@ use crate::kind::AgentKind;
 use crate::snapshot::{AgentCopy, EventCopy, Published, StateCopy};
 use crate::state::{self, SavedWorkspace};
 use crate::status::{AgentStatus, Why};
+use crate::teams::{Team, TeamAgent};
 use crate::workspace::{AgentKey, Entry, Happened, NoPair, Pair, RestoreReport, Workspace};
 
 /// Something that happened, for a face to say in its own words. Events are
@@ -613,6 +614,57 @@ impl<B: AgentBackend> Engine<B> {
         Ok(())
     }
 
+    /// The agents open now, as a team of this name: each one's program,
+    /// kind, options and folder. No conversation is kept with a team.
+    pub fn team_of_open(&self, name: &str) -> Team {
+        let agents = self
+            .ws
+            .entries()
+            .iter()
+            .map(|e| TeamAgent {
+                name: e.saved.name.clone(),
+                command: e.saved.command.clone(),
+                kind: e.saved.kind.clone(),
+                args: e.saved.args.clone(),
+                folder: e.saved.folder.clone(),
+            })
+            .collect();
+        Team { name: name.to_string(), agents }
+    }
+
+    /// Which of a team's agents are already open: running, with the same
+    /// program and folder. Those are not started twice.
+    pub fn already_open(&self, agent: &TeamAgent) -> bool {
+        self.ws.entries().iter().any(|e| {
+            e.is_running()
+                && e.saved.command.eq_ignore_ascii_case(&agent.command)
+                && e.saved.folder == agent.folder
+        })
+    }
+
+    /// Starts each of a team's agents that is not already open, each in a
+    /// new conversation. One whose folder is not there, or that cannot be
+    /// started, is not started, and said; the rest are.
+    pub fn start_team(&mut self, team: &Team) -> TeamStarted {
+        let mut out = TeamStarted::default();
+        for agent in &team.agents {
+            if self.already_open(agent) {
+                out.already.push(agent.label());
+                continue;
+            }
+            if !agent.folder.is_dir() {
+                out.not_started.push((agent.label(), "its folder is not there".to_string()));
+                continue;
+            }
+            let kind = AgentKind::of_saved(agent.kind.as_deref(), &agent.command);
+            match self.start_new(&agent.command, agent.args.clone(), kind, agent.folder.clone()) {
+                Ok(()) => out.started.push(agent.label()),
+                Err(why) => out.not_started.push((agent.label(), why.to_string())),
+            }
+        }
+        out
+    }
+
     /// Something came from a running agent: output, or its end. What the
     /// user should be told of it becomes an event.
     pub fn handle(&mut self, event: AgentEvent) {
@@ -1000,6 +1052,15 @@ impl<B: AgentBackend> Engine<B> {
         self.question = Some(question);
         question
     }
+}
+
+/// What came of starting a team: who was started, who was already open,
+/// and who was not started, with why.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TeamStarted {
+    pub started: Vec<String>,
+    pub already: Vec<String>,
+    pub not_started: Vec<(String, String)>,
 }
 
 #[cfg(test)]

@@ -156,6 +156,9 @@ pub struct Config {
     /// Let the page act on the Board's cards. Off unless the user asks,
     /// apart from `page` and from `page_can_type`.
     pub page_can_act: bool,
+    /// Let the page start a saved team. Off unless the user asks, apart
+    /// from `page`: starting agents is more than typing to them.
+    pub page_can_start: bool,
     /// One outside program to start and talk to over its own pipe for the
     /// Board, in place of the Board's files. Off unless named.
     pub board_adapter: Option<BoardAdapter>,
@@ -204,6 +207,7 @@ impl Default for Config {
             page_port: DEFAULT_PAGE_PORT,
             page_can_type: false,
             page_can_act: false,
+            page_can_start: false,
             board_adapter: None,
         }
     }
@@ -243,6 +247,7 @@ struct File {
     page_port: Option<u32>,
     page_can_type: Option<bool>,
     page_can_act: Option<bool>,
+    page_can_start: Option<bool>,
     board_adapter: Option<BoardAdapter>,
 }
 
@@ -300,6 +305,13 @@ fn parse(text: &str) -> Result<Config, String> {
         // Said, so the user does not look for buttons that are not there.
         Some(true) if !config.page => {
             return Err("add \"page\": true, or take out \"page_can_act\", which needs it".to_string());
+        }
+        can => can.unwrap_or(false),
+    };
+    config.page_can_start = match file.page_can_start {
+        // Said, so the user does not look for buttons that are not there.
+        Some(true) if !config.page => {
+            return Err("add \"page\": true, or take out \"page_can_start\", which needs it".to_string());
         }
         can => can.unwrap_or(false),
     };

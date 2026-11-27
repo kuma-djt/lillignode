@@ -146,12 +146,31 @@ pub struct Acted {
 /// nowhere left to pass it to.
 pub type Acting = Arc<dyn Fn(Acted) -> bool + Send + Sync>;
 
+/// A saved team the reader asked to start from the page, passed on. The
+/// page decides nothing about it.
+pub struct Started {
+    /// Which run of Lillignode the page was showing when it was pressed.
+    pub run: String,
+    /// The team's name, as the page showed it.
+    pub name: String,
+    /// When it arrived.
+    pub asked: Instant,
+    /// Where to say what became of it.
+    pub answer: mpsc::Sender<TypedAnswer>,
+}
+
+/// Where the page passes on a team to start. False: there was nowhere
+/// left to pass it to.
+pub type Starting = Arc<dyn Fn(Started) -> bool + Send + Sync>;
+
 /// The ways a page may send something, each only if the user switched it
 /// on. With none, the page is read only.
 #[derive(Default)]
 pub struct Ways {
     pub typing: Option<Typing>,
     pub acting: Option<Acting>,
+    /// Starting a saved team, where the settings allow it.
+    pub starting: Option<Starting>,
     /// Where the Board comes from when an adapter keeps it; otherwise the
     /// Board's file.
     pub adapter: Option<crate::adapter::Link>,
@@ -159,7 +178,7 @@ pub struct Ways {
 
 impl From<Option<Typing>> for Ways {
     fn from(typing: Option<Typing>) -> Self {
-        Ways { typing, acting: None, adapter: None }
+        Ways { typing, acting: None, adapter: None, starting: None }
     }
 }
 
@@ -272,6 +291,8 @@ pub struct Served {
     /// Whether the page was handed somewhere to pass on what is done to a
     /// card. Then, too, the word is new each start and kept nowhere.
     pub can_act: bool,
+    /// Whether the page was handed somewhere to pass on a team to start.
+    pub can_start: bool,
     /// The token anything sent must carry, where the page may send.
     token: Option<Arc<Mutex<String>>>,
 }
@@ -328,6 +349,7 @@ struct Serving {
     folder: Option<PathBuf>,
     /// The Board's adapter, where one keeps the Board.
     adapter: Option<crate::adapter::Link>,
+    starting: Option<Starting>,
 }
 
 impl Serving {
@@ -354,8 +376,8 @@ pub fn serve(
     folder: Option<&Path>,
     ways: impl Into<Ways>,
 ) -> Result<Served, String> {
-    let Ways { typing, acting, adapter } = ways.into();
-    let sends = typing.is_some() || acting.is_some();
+    let Ways { typing, acting, adapter, starting } = ways.into();
+    let sends = typing.is_some() || acting.is_some() || starting.is_some();
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, port)).map_err(|e| e.to_string())?;
     let address = listener.local_addr().map_err(|e| e.to_string())?;
     let (word, word_not_kept) = if sends { (new_word(), None) } else { kept_word(folder) };
@@ -370,6 +392,7 @@ pub fn serve(
         word_not_kept,
         can_type: typing.is_some(),
         can_act: acting.is_some(),
+        can_start: starting.is_some(),
         token: token.clone(),
     };
     let serving = Arc::new(Serving {
@@ -381,6 +404,7 @@ pub fn serve(
         token,
         folder: folder.map(Path::to_path_buf),
         adapter,
+        starting,
     });
     let open = Arc::new(AtomicUsize::new(0));
     let accept = move || {
@@ -653,6 +677,9 @@ fn answer(stream: &TcpStream, serving: &Serving) -> std::io::Result<()> {
     let token = serving.token();
     let token = token.as_deref();
     if request.method == Method::Post {
+        if let (Some(token), Some("start"), Some(starting)) = (token, rest, &serving.starting) {
+            return take_started(stream, &request.body, starting, token);
+        }
         return match (token, rest, &serving.typing, &serving.acting) {
             (Some(token), Some("send"), Some(typing), _) => take_typed(stream, &request.body, typing, token),
             (Some(token), Some("act"), _, Some(acting)) => take_acted(stream, &request.body, acting, token),
@@ -693,6 +720,23 @@ fn answer(stream: &TcpStream, serving: &Serving) -> std::io::Result<()> {
             state_once(stream, latest.map(|(_, published)| published), agent, &request.query, tokens)
         }
         "stream" => stream_states(stream, serving, &word, &request.query),
+        // The saved teams, read again at each request, and, where the
+        // settings allow starting one from here, the token a start carries.
+        "teams" => {
+            let shown = match crate::teams::read(serving.folder.as_deref()) {
+                Ok(teams) => json!({
+                    "teams": teams.iter().map(|t| json!({
+                        "name": t.name,
+                        "agents": t.agents.iter().map(crate::teams::TeamAgent::label).collect::<Vec<_>>(),
+                    })).collect::<Vec<_>>(),
+                    "problem": null,
+                }),
+                Err(why) => json!({ "teams": [], "problem": why }),
+            };
+            let mut shown = shown;
+            shown["starting"] = json!(serving.starting.as_ref().and(token));
+            send(stream, "200 OK", "application/json", &shown.to_string())
+        }
         // Read again at each request: the file is the user's to change.
         "board" => {
             let folder = serving.folder.as_deref();
@@ -786,6 +830,32 @@ fn take_acted(stream: &TcpStream, body: &[u8], acting: &Acting, token: &str) -> 
     };
     if !acting(acted) {
         return refuse(stream, "503 Service Unavailable", "Lillignode is closing. Nothing was sent.");
+    }
+    said_back(stream, &heard)
+}
+
+/// What the page's Start on a team sends, and nothing else.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StartBody {
+    token: String,
+    run: String,
+    name: String,
+}
+
+/// A team to start, from this page: check its token, pass it on, and say
+/// back what became of it. Nothing here decides whether it may be started.
+fn take_started(stream: &TcpStream, body: &[u8], starting: &Starting, token: &str) -> std::io::Result<()> {
+    let Ok(sent) = serde_json::from_slice::<StartBody>(body) else {
+        return refuse(stream, "400 Bad Request", "The request could not be read.");
+    };
+    if !same(&sent.token, token) {
+        return refuse(stream, "403 Forbidden", STALE);
+    }
+    let (answer, heard) = mpsc::channel();
+    let started = Started { run: sent.run, name: sent.name, asked: Instant::now(), answer };
+    if !starting(started) {
+        return refuse(stream, "503 Service Unavailable", "Lillignode is closing. Nothing was started.");
     }
     said_back(stream, &heard)
 }
@@ -1565,8 +1635,13 @@ mod tests {
             passed.lock().unwrap().send(acted).is_ok()
         });
         let (publisher, reader) = channel();
-        let served =
-            serve(reader, 0, None, Ways { typing: None, acting: Some(acting), adapter: None }).unwrap();
+        let served = serve(
+            reader,
+            0,
+            None,
+            Ways { typing: None, acting: Some(acting), adapter: None, starting: None },
+        )
+        .unwrap();
         assert!(served.can_act && !served.can_type);
         let word: &'static str = Box::leak(word_now(&served.word).into_boxed_str());
         let at = At { address: served.address, word };
@@ -1723,7 +1798,8 @@ mod tests {
             let acting: Option<Acting> = acting.then(|| Arc::new(|_: Acted| false) as Acting);
             (
                 publisher,
-                serve(reader, 0, Some(&folder), Ways { typing: None, acting, adapter: None }).unwrap(),
+                serve(reader, 0, Some(&folder), Ways { typing: None, acting, adapter: None, starting: None })
+                    .unwrap(),
             )
         };
         let (_p, reading) = start(false);

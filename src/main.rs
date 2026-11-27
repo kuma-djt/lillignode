@@ -25,6 +25,7 @@ enum Msg {
     Typed(page::Typed),
     /// Something done to a card of the Board on the page.
     Acted(page::Acted),
+    Started(page::Started),
 }
 
 impl From<AgentEvent> for Msg {
@@ -237,7 +238,13 @@ fn main() -> ExitCode {
         if let Some(named) = app.config.board_adapter.clone() {
             app.adapter_named(&named.command, &named.args);
         }
-        let ways = page::Ways { typing, acting, adapter };
+        let starting = app.config.page_can_start.then(|| {
+            let tx = tx.clone();
+            let pass: page::Starting =
+                std::sync::Arc::new(move |started| tx.send(Msg::Started(started)).is_ok());
+            pass
+        });
+        let ways = page::Ways { typing, acting, adapter, starting };
         match page::serve(reader, app.config.page_port, page_folder.as_deref(), ways) {
             Ok(served) => {
                 app.page_serving(served);
@@ -330,6 +337,11 @@ fn main() -> ExitCode {
                 // Its sender has stopped waiting and been told it is not
                 // known whether it was done: now it is known. It was not.
                 Msg::Acted(acted) if acted.asked.elapsed() > page::ANSWER_WITHIN => {}
+                Msg::Started(started) if started.asked.elapsed() > page::ANSWER_WITHIN => {}
+                Msg::Started(started) => {
+                    let (outcome, words) = app.start_team_from_page(&started.run, &started.name);
+                    let _ = started.answer.send(page::TypedAnswer { outcome, words });
+                }
                 Msg::Typed(typed) if typed.asked.elapsed() > page::ANSWER_WITHIN => {}
                 Msg::Acted(acted) => {
                     let seen = lillignode::board::Seen {

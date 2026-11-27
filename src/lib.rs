@@ -17,6 +17,7 @@ pub mod private;
 pub mod snapshot;
 pub mod state;
 pub mod status;
+pub mod teams;
 pub mod terminal;
 pub mod ui;
 pub mod view;
