@@ -296,7 +296,7 @@ body.phone #board { transition: transform 0.22s ease-out, visibility 0s linear 0
 body.phone.board-open #board { transition: transform 0.22s ease-out, visibility 0s; }
 body.phone #agents button { padding-top: 14px; padding-bottom: 14px; padding-right: 36px; position: relative; }
 /* A row opens its agent: shown by the mark at its end. */
-body.phone #agents button::after { content: "A"; position: absolute; right: 14px; top: 50%; transform: translateY(-50%); font-size: 26px; color: var(--cream-quiet); }
+body.phone #agents button::after { content: "\203A"; position: absolute; right: 14px; top: 50%; transform: translateY(-50%); font-size: 26px; color: var(--cream-quiet); }
 /* One agent on a phone: its name, then the message box with whom it is to,
    then the terminal. The box is never below a long screen, and never jumps
    when the screen arrives. */

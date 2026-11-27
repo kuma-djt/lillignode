@@ -463,7 +463,7 @@
     el("board-shade").hidden = !(phone && boardOpen);
     // While the Board is open it is the only thing that takes the keyboard.
     for (const behind of [document.querySelector("main > #agents-column"), el("middle"), blocking, header]) {
-      if (behind) behind.inert = phone && boardOpen && behind !== header;
+      if (behind) behind.inert = phone && boardOpen;
     }
     el("board").setAttribute("role", phone ? "dialog" : "region");
     if (phone) el("board").setAttribute("aria-modal", boardOpen ? "true" : "false");
