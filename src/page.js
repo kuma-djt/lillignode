@@ -142,6 +142,14 @@
     return h === 0 ? d + " d" : d + " d " + h + " h";
   }
 
+  // An agent's initials: the first letters of its first two words, or the
+  // first two letters of one word. "Claude Code" is CC, "reporter" RE.
+  function initials(name) {
+    const words = String(name || "?").split(/[\s_\-./\\]+/).filter(Boolean);
+    const two = words.length > 1 ? words[0][0] + words[1][0] : (words[0] || "?").slice(0, 2);
+    return two.toUpperCase();
+  }
+
   // What a row says after the name: the state, and how old it is.
   function stateWords(agent) {
     if (!agent.running) return [agent.words, ""];
@@ -219,6 +227,8 @@
         agentsList.append(li);
       }
       li.dataset.key = String(agent.key);
+      // The initials a look may show in a round picture slot.
+      li.firstChild.dataset.initials = initials(agent.name);
       li.className = agentClass(agent);
       const button = li.firstChild;
       button.setAttribute("aria-pressed", agent.key === shown ? "true" : "false");
@@ -375,6 +385,11 @@
         ? " The helper you named (" + h.name + ") has stopped: no guesses are shown."
         : " A helper you named (" + h.name + ") is sent the screen of any agent that reports nothing, and its guesses are marked as guesses.";
     }
+    // The same, in a few words, for a look that cuts the header on a phone.
+    const short = [token && acts ? "Can type and act" : token ? "Can type to agents" : acts ? "Can act on the Board" : "Read only"];
+    if (starts) short.push("starts teams");
+    if (state && state.helper) short.push(state.helper.stopped ? "helper stopped" : "helper on");
+    standing.dataset.short = short.join(" · ");
     standing.className = token || acts || starts ? "can-type" : "";
     const key = target();
     typing.hidden = !token || key === null;

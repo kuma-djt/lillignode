@@ -177,11 +177,13 @@ pub struct Ways {
     /// Where the Board comes from when an adapter keeps it; otherwise the
     /// Board's file.
     pub adapter: Option<crate::adapter::Link>,
+    /// The page's look, by name ("soft", "cards", "bold"), if one is chosen.
+    pub look: Option<&'static str>,
 }
 
 impl From<Option<Typing>> for Ways {
     fn from(typing: Option<Typing>) -> Self {
-        Ways { typing, acting: None, adapter: None, starting: None }
+        Ways { typing, acting: None, adapter: None, starting: None, look: None }
     }
 }
 
@@ -202,6 +204,20 @@ impl Drop for Place {
 const HTML: &str = include_str!("page.html");
 const CSS: &str = include_str!("page.css");
 const JS: &str = include_str!("page.js");
+
+/// The page's looks, while one is chosen: each a stylesheet laid over
+/// `page.css`, changing nothing but how it looks. Served as `look.css`;
+/// with none chosen, that is empty and the page is as it was.
+const LOOKS: [(&str, &str); 3] = [
+    ("soft", include_str!("look-soft.css")),
+    ("cards", include_str!("look-cards.css")),
+    ("bold", include_str!("look-bold.css")),
+];
+
+/// The stylesheet for the look named, or nothing.
+fn look_css(name: Option<&str>) -> &'static str {
+    name.and_then(|n| LOOKS.iter().find(|(look, _)| *look == n)).map_or("", |(_, css)| css)
+}
 
 /// What the browser may do with the page: load its own style and script,
 /// listen to its own address, and nothing else.
@@ -353,6 +369,7 @@ struct Serving {
     /// The Board's adapter, where one keeps the Board.
     adapter: Option<crate::adapter::Link>,
     starting: Option<Starting>,
+    look: Option<&'static str>,
 }
 
 impl Serving {
@@ -379,7 +396,7 @@ pub fn serve(
     folder: Option<&Path>,
     ways: impl Into<Ways>,
 ) -> Result<Served, String> {
-    let Ways { typing, acting, adapter, starting } = ways.into();
+    let Ways { typing, acting, adapter, starting, look } = ways.into();
     let sends = typing.is_some() || acting.is_some() || starting.is_some();
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, port)).map_err(|e| e.to_string())?;
     let address = listener.local_addr().map_err(|e| e.to_string())?;
@@ -408,6 +425,7 @@ pub fn serve(
         folder: folder.map(Path::to_path_buf),
         adapter,
         starting,
+        look,
     });
     let open = Arc::new(AtomicUsize::new(0));
     let accept = move || {
@@ -701,6 +719,7 @@ fn answer(stream: &TcpStream, serving: &Serving) -> std::io::Result<()> {
         "" => send(stream, "200 OK", "text/html; charset=utf-8", HTML),
         "page.css" => send(stream, "200 OK", "text/css; charset=utf-8", CSS),
         "page.js" => send(stream, "200 OK", "text/javascript; charset=utf-8", JS),
+        "look.css" => send(stream, "200 OK", "text/css; charset=utf-8", look_css(serving.look)),
         "state" => {
             // A screen is copied only while a reader shows it: say so, and
             // give the engine a moment to publish a copy that has it.
@@ -1683,7 +1702,7 @@ mod tests {
             reader,
             0,
             None,
-            Ways { typing: None, acting: Some(acting), adapter: None, starting: None },
+            Ways { typing: None, acting: Some(acting), adapter: None, starting: None, look: None },
         )
         .unwrap();
         assert!(served.can_act && !served.can_type);
@@ -1842,8 +1861,13 @@ mod tests {
             let acting: Option<Acting> = acting.then(|| Arc::new(|_: Acted| false) as Acting);
             (
                 publisher,
-                serve(reader, 0, Some(&folder), Ways { typing: None, acting, adapter: None, starting: None })
-                    .unwrap(),
+                serve(
+                    reader,
+                    0,
+                    Some(&folder),
+                    Ways { typing: None, acting, adapter: None, starting: None, look: None },
+                )
+                .unwrap(),
             )
         };
         let (_p, reading) = start(false);
@@ -2106,7 +2130,10 @@ mod tests {
             assert!(HTML.contains(&format!(">{heading}</h3>")), "{heading}");
         }
         assert!(!HTML.contains("Not connected yet"), "the Board is connected to its file now");
-        for (name, text) in [("page.html", HTML), ("page.js", JS), ("page.css", CSS)] {
+        for (name, text) in [("page.html", HTML), ("page.js", JS), ("page.css", CSS)]
+            .into_iter()
+            .chain(LOOKS.iter().map(|(name, css)| (*name, *css)))
+        {
             let lower = text.to_lowercase();
             for word in ["thread", "seat"] {
                 assert!(!lower.contains(word), "{name} says {word}");

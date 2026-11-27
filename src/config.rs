@@ -170,6 +170,19 @@ pub struct Config {
     /// three: the gnome and the large name side by side, stacked in the
     /// middle, or the name across the top.
     pub welcome_look: WelcomeLook,
+    /// How the page looks, while the owner chooses among three: the page
+    /// as it was ("plain", the default), or one of three finished looks.
+    pub page_look: PageLook,
+}
+
+/// The page's looks: the same page, styled four ways.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PageLook {
+    #[default]
+    Plain,
+    Soft,
+    Cards,
+    Bold,
 }
 
 /// The three ways the first screen can be laid out.
@@ -232,6 +245,7 @@ impl Default for Config {
             board_adapter: None,
             helper: None,
             welcome_look: WelcomeLook::Beside,
+            page_look: PageLook::Plain,
         }
     }
 }
@@ -274,6 +288,7 @@ struct File {
     board_adapter: Option<BoardAdapter>,
     helper: Option<BoardAdapter>,
     welcome_look: Option<String>,
+    page_look: Option<String>,
 }
 
 fn parse(text: &str) -> Result<Config, String> {
@@ -365,6 +380,18 @@ fn parse(text: &str) -> Result<Config, String> {
                 .to_string())
         }
     };
+    config.page_look = match file.page_look.as_deref() {
+        None | Some("plain") => PageLook::Plain,
+        Some("soft") => PageLook::Soft,
+        Some("cards") => PageLook::Cards,
+        Some("bold") => PageLook::Bold,
+        Some(_) => {
+            return Err(
+                "give \"page_look\" one of \"plain\", \"soft\", \"cards\" or \"bold\", or take it out"
+                    .to_string(),
+            )
+        }
+    };
     let Some(specs) = file.menu_keys else { return Ok(config) };
     if specs.is_empty() {
         return Err(
@@ -444,6 +471,13 @@ mod tests {
         let mut c = parse(r#"{"menu_keys": ["alt+m", "f9", "ctrl+t", "f2"]}"#).unwrap();
         c.function_keys_first();
         assert_eq!(c.menu_keys_label(), "F9 or F2 or Alt+M or Ctrl+T");
+    }
+
+    #[test]
+    fn the_page_look_is_plain_unless_said() {
+        assert_eq!(Config::default().page_look, PageLook::Plain);
+        assert_eq!(parse(r#"{"page_look": "cards"}"#).unwrap().page_look, PageLook::Cards);
+        assert!(parse(r#"{"page_look": "neon"}"#).unwrap_err().contains("\"page_look\""));
     }
 
     #[test]

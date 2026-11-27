@@ -1,0 +1,73 @@
+/* Look "cards": each agent a card on the navy ground, its state a badge,
+   its round picture slot on the left. The Board's cards take the same
+   shape, so the page reads as one set of things to look at. Orange is
+   needs-you only, teal is working. */
+html, body { font-size: 15px; background: var(--navy-deep); }
+header { background: var(--navy); padding: 12px 20px; border-bottom: 0; box-shadow: 0 2px 0 var(--rule); }
+main > section { background: var(--navy-deep); }
+#agents-column, #middle { border-right: 0; }
+h2 { padding: 16px 18px 10px; }
+
+#agents ul, #agents-list { padding: 0 12px; }
+#agents li, #agents li:last-child { border: 0; margin-bottom: 10px; }
+#agents button {
+  display: grid;
+  grid-template-columns: 48px minmax(0, 1fr);
+  grid-template-rows: auto auto;
+  column-gap: 14px; row-gap: 6px;
+  align-items: center;
+  min-height: 76px;
+  padding: 14px 16px;
+  border: 0;
+  border-left: 0;
+  border-radius: 10px;
+  background: var(--navy);
+  box-shadow: 0 1px 0 var(--rule), 0 6px 14px rgba(0, 0, 0, 0.25);
+}
+#agents button::before {
+  content: attr(data-initials);
+  grid-row: span 2;
+  width: 48px; height: 48px;
+  border-radius: 50%;
+  display: grid; place-items: center;
+  background: var(--navy-raised);
+  color: var(--cream);
+  font-weight: 700; font-size: 16px;
+}
+#agents button[aria-pressed="true"] { background: var(--navy-raised); box-shadow: 0 0 0 2px var(--cream), 0 6px 14px rgba(0, 0, 0, 0.25); }
+#agents button:hover { background: var(--navy-raised); }
+/* The state as a badge. */
+.agent-state .word {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 999px;
+  background: var(--navy-deep);
+  font-size: 13px;
+}
+#agents li.working .agent-state .word { background: var(--teal); color: var(--navy); }
+#agents li.needs-you .agent-state .word { background: var(--orange); color: var(--navy); }
+#agents li.needs-you button { box-shadow: 0 0 0 2px var(--orange), 0 6px 14px rgba(0, 0, 0, 0.25); }
+.agent-state .age { margin-left: 6px; }
+
+#terminal { border-radius: 10px; border: 0; box-shadow: 0 6px 14px rgba(0, 0, 0, 0.35); margin: 0 18px 18px; }
+#typing { margin: 0 18px 18px; padding: 14px; border-radius: 10px; background: var(--navy); }
+#typing-text { border-radius: 8px; min-height: 60px; font-size: 15px; }
+#typing button, .team-start, .team-yes, .team-no, #board button {
+  min-height: 44px; padding: 0 18px; border-radius: 8px; font-size: 15px;
+}
+.card {
+  background: var(--navy);
+  border: 0;
+  border-radius: 10px;
+  padding: 12px 14px;
+  margin-bottom: 10px;
+  box-shadow: 0 1px 0 var(--rule), 0 6px 14px rgba(0, 0, 0, 0.25);
+}
+#board-yours-list li, #board-know-list li { border: 0; margin: 0 12px 8px; padding: 10px 12px; border-radius: 10px; background: var(--navy); }
+.team-row { margin: 0 12px 10px; padding: 12px 14px; border: 0; border-radius: 10px; background: var(--navy); }
+#teams { border-top: 0; }
+
+body.phone header { padding: 10px 14px; }
+body.phone #standing { font-size: 0; }
+body.phone #standing::after { content: attr(data-short); font-size: 14px; }
+body.phone #agents button { padding-right: 40px; }

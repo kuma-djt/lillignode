@@ -311,13 +311,20 @@ fn serve(sb: &Sandbox, port: u16, can_type: bool, can_act: bool) {
         s.expect("a reporting stand-in starts", "STANDIN READY status");
         (s, page)
     } else if can_type {
-        settings(sb, &format!("{{\"page\": true, \"page_port\": {port}, \"page_can_type\": true}}"));
+        // Any other settings a check brings, as `"name": value` pairs.
+        let more = std::env::var("PAGE_CHECK_SETTINGS").map(|m| format!(", {m}")).unwrap_or_default();
+        settings(sb, &format!("{{\"page\": true, \"page_port\": {port}, \"page_can_type\": true{more}}}"));
         let mut s = Session::start(sb);
         let page = page_on_screen(&mut s, port);
         s.new_agent("plain");
         s.expect("a stand-in that says what it is sent starts", "STANDIN READY echo-plain");
         s.new_agent("reporter");
         s.expect("a reporting stand-in starts", "STANDIN READY status");
+        // A third agent, for a check that shows several states at once.
+        if std::env::var("PAGE_CHECK_THIRD").is_ok() {
+            s.new_agent("reporter");
+            s.expect("a second reporting stand-in starts", "STANDIN READY status");
+        }
         (s, page)
     } else {
         started(sb, port)

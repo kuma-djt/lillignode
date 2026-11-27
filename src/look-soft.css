@@ -1,0 +1,58 @@
+/* Look "soft": the same page with more room. Rounded rows, a round picture
+   slot with each agent's initials, larger type and touch-sized buttons. The
+   four colours and their meanings are unchanged: orange is needs-you only,
+   teal is working. */
+html, body { font-size: 16px; }
+h1 { font-size: 20px; }
+header { padding: 14px 20px; gap: 6px 24px; }
+
+#agents-column { padding: 8px 10px; }
+#agents li, #agents li:last-child { border: 0; margin: 0 0 8px; }
+#agents button {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr);
+  column-gap: 12px;
+  align-items: center;
+  min-height: 64px;
+  padding: 10px 14px;
+  border-radius: 14px;
+  border-left: 0;
+  background: var(--navy-raised);
+  box-shadow: inset 0 0 0 1px var(--rule);
+}
+#agents button::before {
+  content: attr(data-initials);
+  grid-row: span 2;
+  width: 44px; height: 44px;
+  border-radius: 50%;
+  display: grid; place-items: center;
+  background: var(--navy-deep);
+  color: var(--cream);
+  font-weight: 700; font-size: 15px; letter-spacing: 0.04em;
+  box-shadow: inset 0 0 0 2px var(--rule);
+}
+#agents button[aria-pressed="true"] { box-shadow: inset 0 0 0 2px var(--cream); background: var(--navy-raised); }
+#agents li.working button::before { box-shadow: inset 0 0 0 3px var(--teal); }
+#agents li.needs-you button { box-shadow: inset 0 0 0 2px var(--orange); }
+#agents li.needs-you button::before { background: var(--orange); color: var(--navy); box-shadow: none; }
+.agent-name { font-size: 16px; }
+.agent-state { font-size: 14px; }
+
+#terminal { border-radius: 12px; padding: 14px 16px; }
+#typing-text { border-radius: 10px; min-height: 64px; padding: 10px 12px; font-size: 16px; }
+#typing button, .team-start, .team-yes, .team-no, #board button {
+  min-height: 44px; padding: 0 18px; border-radius: 22px; font-size: 15px;
+}
+.card { border-radius: 14px; padding: 12px 14px; margin-bottom: 10px; }
+.card-title { font-size: 15px; }
+#board-decide-list { padding: 0 12px; }
+#blocking { border-radius: 0 0 14px 14px; }
+.team-row { padding: 12px 14px; }
+
+/* A phone: the header says in a few words what this page can do, so the
+   agents show above the fold. */
+body.phone header { padding: 10px 14px; }
+body.phone #standing { font-size: 0; }
+body.phone #standing::after { content: attr(data-short); font-size: 14px; }
+body.phone #agents button { min-height: 72px; padding-right: 40px; }
+body.phone #agents button::after { right: 16px; }

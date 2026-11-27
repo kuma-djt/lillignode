@@ -1,0 +1,55 @@
+/* Look "bold": larger type and a strong edge. Square picture slots with
+   each agent's initials, the state in capitals, wide edges in the state's
+   colour, and a compact header. Orange is needs-you only, teal is working. */
+html, body { font-size: 17px; }
+h1 { font-size: 22px; font-weight: 800; letter-spacing: 0.01em; }
+h2 { font-size: 13px; font-weight: 800; color: var(--cream); padding: 16px 16px 10px; }
+header { padding: 10px 18px; }
+#standing { font-size: 14px; }
+
+#agents li { border-top: 2px solid var(--rule); }
+#agents button {
+  display: grid;
+  grid-template-columns: 46px minmax(0, 1fr);
+  column-gap: 14px;
+  align-items: center;
+  min-height: 72px;
+  padding: 12px 14px;
+  border-left: 8px solid var(--rule);
+}
+#agents button::before {
+  content: attr(data-initials);
+  grid-row: span 2;
+  width: 46px; height: 46px;
+  border-radius: 8px;
+  display: grid; place-items: center;
+  background: var(--cream);
+  color: var(--navy);
+  font-weight: 800; font-size: 17px;
+}
+#agents li.working button { border-left-color: var(--teal); }
+#agents li.needs-you button { border-left-color: var(--orange); }
+#agents li.needs-you button::before { background: var(--orange); }
+#agents li.working button::before { background: var(--teal); }
+#agents button[aria-pressed="true"] { background: var(--navy-raised); }
+.agent-name { font-size: 18px; font-weight: 800; }
+.agent-state { font-size: 14px; text-transform: uppercase; letter-spacing: 0.06em; font-weight: 700; }
+.agent-state .age { text-transform: none; letter-spacing: 0; font-weight: 400; }
+
+#terminal { border-width: 2px; }
+#typing-text { min-height: 64px; font-size: 16px; border-width: 2px; }
+#typing button, .team-start, .team-yes, .team-no, #board button {
+  min-height: 48px; padding: 0 20px; border-radius: 4px; font-size: 16px; font-weight: 800; border-width: 2px;
+}
+.card { border-width: 2px; border-radius: 4px; border-left: 8px solid var(--cream-quiet); padding: 12px 14px; margin-bottom: 10px; }
+.card.fire { border-left-color: var(--cream); }
+.card-title { font-size: 16px; font-weight: 800; }
+#blocking { font-size: 18px; font-weight: 800; }
+.team-row { padding: 12px 14px; }
+.team-name { font-size: 18px; font-weight: 800; }
+
+body.phone header { padding: 8px 12px; gap: 2px 12px; }
+body.phone h1 { font-size: 20px; }
+body.phone #standing { font-size: 0; }
+body.phone #standing::after { content: attr(data-short); font-size: 14px; font-weight: 700; }
+body.phone #agents button { padding-right: 40px; min-height: 76px; }

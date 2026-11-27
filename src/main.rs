@@ -256,7 +256,13 @@ fn main() -> ExitCode {
                 std::sync::Arc::new(move |started| tx.send(Msg::Started(started)).is_ok());
             pass
         });
-        let ways = page::Ways { typing, acting, adapter, starting };
+        let look = match app.config.page_look {
+            lillignode::config::PageLook::Plain => None,
+            lillignode::config::PageLook::Soft => Some("soft"),
+            lillignode::config::PageLook::Cards => Some("cards"),
+            lillignode::config::PageLook::Bold => Some("bold"),
+        };
+        let ways = page::Ways { typing, acting, adapter, starting, look };
         match page::serve(reader, app.config.page_port, page_folder.as_deref(), ways) {
             Ok(served) => {
                 app.page_serving(served);
