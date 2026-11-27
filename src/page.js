@@ -980,16 +980,25 @@
         b.textContent = "Start";
         b.disabled = startingNow || lostAt !== null || movedOn;
         b.setAttribute("aria-label", "Start the team " + team.name);
-        b.addEventListener("click", () => startTeam(team.name));
+        b.addEventListener("click", () => startTeam(team));
         head.append(b);
       }
-      li.append(head, text("p", "team-agents quiet", team.agents.join(", ")));
+      // What each agent runs, in full, and where: what Start starts.
+      const agents = document.createElement("ul");
+      agents.className = "team-agents";
+      for (const agent of team.agents) {
+        const line = text("li", "team-agent", "");
+        line.append(text("code", "team-runs", agent.runs));
+        if (agent.folder) line.append(text("span", "quiet", " in " + agent.folder));
+        agents.append(line);
+      }
+      li.append(head, agents);
       return li;
     });
     if (teams && teams.problem) rows.push(text("li", "team-problem", teams.problem));
     el("teams-list").replaceChildren(...rows);
   }
-  function startTeam(name) {
+  function startTeam(team) {
     if (!teams || !teams.starting || !state) return;
     startingNow = true;
     drawTeams();
@@ -997,7 +1006,7 @@
     fetch("start", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ token: teams.starting, run: String(state.run), name }),
+      body: JSON.stringify({ token: teams.starting, run: String(state.run), name: team.name, shown: team.shown }),
       signal: AbortSignal.timeout(15000),
     })
       .then((answer) => (answer.ok ? answer.json() : answer.text().then((words) => ({ outcome: "refused", words }))))

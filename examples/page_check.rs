@@ -1352,9 +1352,9 @@ fn adapter_section(sb: &Sandbox, port: u16) {
 }
 
 /// A `POST` to the page's `start`, as its Start button sends it.
-fn start_team(page: &Page, token: &str, run: &str, name: &str) -> (String, String) {
+fn start_team(page: &Page, token: &str, run: &str, name: &str, shown: &str) -> (String, String) {
     let port = page.port;
-    let body = serde_json::json!({ "token": token, "run": run, "name": name }).to_string();
+    let body = serde_json::json!({ "token": token, "run": run, "name": name, "shown": shown }).to_string();
     let answer = ask(
         page,
         &format!(
@@ -1392,9 +1392,18 @@ fn teams_section(sb: &Sandbox, port: u16) {
     let mut s = Session::start(sb);
     let page = page_on_screen(&mut s, port);
     let shown = teams_shown(&page);
+    let agent = &shown["teams"][0]["agents"][0];
     check(
-        "the saved teams are given to the page, each with its agents",
-        shown["teams"][0]["name"] == "web" && shown["teams"][0]["agents"][0] == "plain (team-web)",
+        "the saved teams are given to the page, each agent with what it runs and where",
+        shown["teams"][0]["name"] == "web"
+            && agent["runs"] == "plain"
+            && agent["folder"] == "team-web"
+            && agent["label"] == "plain (team-web)",
+        &shown.to_string(),
+    );
+    check(
+        "and each team with a fingerprint of what it starts",
+        shown["teams"][0]["shown"].as_str().is_some_and(|f| f.len() == 16),
         &shown.to_string(),
     );
     check(
@@ -1403,7 +1412,7 @@ fn teams_section(sb: &Sandbox, port: u16) {
         &shown.to_string(),
     );
     let run = state(&page, "")["state"]["run"].as_str().unwrap_or_default().to_string();
-    let (status, _) = start_team(&page, "x", &run, "web");
+    let (status, _) = start_team(&page, "x", &run, "web", "x");
     check(
         "and a start as the page would send it gets nothing",
         status.starts_with("HTTP/1.1 404") || status.starts_with("HTTP/1.1 405"),
@@ -1418,23 +1427,36 @@ fn teams_section(sb: &Sandbox, port: u16) {
     let page = page_on_screen(&mut s, port);
     let shown = teams_shown(&page);
     let token = shown["starting"].as_str().unwrap_or_default().to_string();
+    let print = shown["teams"][0]["shown"].as_str().unwrap_or_default().to_string();
     check("with starting on, the page is given a token to start with", token.len() >= 32, &shown.to_string());
     let run = state(&page, "")["state"]["run"].as_str().unwrap_or_default().to_string();
-    let (outcome, words) = start_team(&page, &token, "0", "web");
+    let (outcome, words) = start_team(&page, &token, "0", "web", &print);
     check(
         "a start from an earlier run is refused",
         outcome == "refused" && words.contains("started again"),
         &words,
     );
-    let (outcome, words) = start_team(&page, &token, &run, "nope");
+    let (outcome, words) = start_team(&page, &token, &run, "nope", &print);
     check(
         "a team that is not there is refused",
         outcome == "refused" && words.contains("no team called"),
         &words,
     );
-    let (outcome, words) = start_team(&page, "not-the-token", &run, "web");
+    let (outcome, words) = start_team(&page, "not-the-token", &run, "web", &print);
     check("a start without the page's token is refused", outcome.starts_with("HTTP/1.1 403"), &words);
-    let (outcome, words) = start_team(&page, &token, &run, "web");
+    // The file changed after the page showed it: what was shown is not
+    // what would run, so nothing runs.
+    let changed = serde_json::json!({ "teams": [ { "name": "web", "agents": [
+        { "name": "plain", "command": "plain", "kind": "program", "args": ["--other"], "folder": place } ] } ] });
+    std::fs::write(sb.state.join(lillignode::teams::FILE), changed.to_string()).unwrap();
+    let (outcome, words) = start_team(&page, &token, &run, "web", &print);
+    check(
+        "a team changed since the page showed it is not started",
+        outcome == "refused" && words.contains("has changed since it was shown"),
+        &words,
+    );
+    std::fs::write(sb.state.join(lillignode::teams::FILE), team.to_string()).unwrap();
+    let (outcome, words) = start_team(&page, &token, &run, "web", &print);
     check(
         "a start from the page starts the team's agents",
         outcome == "sent" && words.starts_with("Started the team \"web\": plain (team-web)."),
@@ -1442,7 +1464,7 @@ fn teams_section(sb: &Sandbox, port: u16) {
     );
     s.expect("the agent is running", "STANDIN READY echo-plain");
     s.expect("and the terminal says the page started it", "From the page: Started the team");
-    let (outcome, words) = start_team(&page, &token, &run, "web");
+    let (outcome, words) = start_team(&page, &token, &run, "web", &print);
     check(
         "started again, an agent already open is not started twice",
         outcome == "sent" && words.contains("Already open, left as they were: plain (team-web)."),

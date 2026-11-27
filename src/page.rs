@@ -153,6 +153,9 @@ pub struct Started {
     pub run: String,
     /// The team's name, as the page showed it.
     pub name: String,
+    /// The fingerprint of the team as the page showed it: a team changed
+    /// since is not started.
+    pub shown: String,
     /// When it arrived.
     pub asked: Instant,
     /// Where to say what became of it.
@@ -316,7 +319,7 @@ impl Served {
     /// with it: whoever had the old address has nothing left that works.
     pub fn change_word(&mut self) -> Option<String> {
         let word = new_word();
-        self.word_not_kept = match (&self.folder, self.can_type || self.can_act) {
+        self.word_not_kept = match (&self.folder, self.can_type || self.can_act || self.can_start) {
             (_, true) => None,
             (Some(folder), false) => keep_word(folder, &word).err(),
             (None, false) => Some("Lillignode has nowhere to save".to_string()),
@@ -725,9 +728,16 @@ fn answer(stream: &TcpStream, serving: &Serving) -> std::io::Result<()> {
         "teams" => {
             let shown = match crate::teams::read(serving.folder.as_deref()) {
                 Ok(teams) => json!({
+                    // Each agent as it runs: its program and options in
+                    // full, and its folder's last part.
                     "teams": teams.iter().map(|t| json!({
                         "name": t.name,
-                        "agents": t.agents.iter().map(crate::teams::TeamAgent::label).collect::<Vec<_>>(),
+                        "shown": crate::teams::digest(t),
+                        "agents": t.agents.iter().map(|a| json!({
+                            "label": a.label(),
+                            "runs": a.runs(),
+                            "folder": a.folder.file_name().map(|f| f.to_string_lossy().to_string()),
+                        })).collect::<Vec<_>>(),
                     })).collect::<Vec<_>>(),
                     "problem": null,
                 }),
@@ -841,6 +851,7 @@ struct StartBody {
     token: String,
     run: String,
     name: String,
+    shown: String,
 }
 
 /// A team to start, from this page: check its token, pass it on, and say
@@ -853,7 +864,8 @@ fn take_started(stream: &TcpStream, body: &[u8], starting: &Starting, token: &st
         return refuse(stream, "403 Forbidden", STALE);
     }
     let (answer, heard) = mpsc::channel();
-    let started = Started { run: sent.run, name: sent.name, asked: Instant::now(), answer };
+    let started =
+        Started { run: sent.run, name: sent.name, shown: sent.shown, asked: Instant::now(), answer };
     if !starting(started) {
         return refuse(stream, "503 Service Unavailable", "Lillignode is closing. Nothing was started.");
     }
@@ -1522,6 +1534,23 @@ mod tests {
         // With no folder there is no file to read.
         let (_publisher, at) = served();
         assert!(get(at, "/board").contains("\"empty\":true"));
+    }
+
+    #[test]
+    fn a_page_that_may_start_teams_keeps_a_new_word_nowhere_either() {
+        let folder = scratch("starting-word");
+        let (_p, reader) = channel();
+        let reading = serve(reader, 0, Some(&folder), None::<Typing>).unwrap();
+        let kept = word_now(&reading.word);
+        let (_p, reader) = channel();
+        let starting: Starting = Arc::new(|_: Started| false);
+        let mut one =
+            serve(reader, 0, Some(&folder), Ways { starting: Some(starting), ..Ways::default() }).unwrap();
+        let first = word_now(&one.word);
+        assert_ne!(first, kept, "new each start");
+        assert_eq!(one.change_word(), None);
+        assert_ne!(word_now(&one.word), first);
+        assert_eq!(read_word(&folder).as_deref(), Some(kept.as_str()), "the new word was not written");
     }
 
     #[test]

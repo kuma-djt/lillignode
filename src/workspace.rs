@@ -679,6 +679,20 @@ impl<B: AgentBackend> Workspace<B> {
         kind: AgentKind,
         folder: PathBuf,
     ) -> Result<(), StartError> {
+        self.start_placed(command, args, kind, folder, true)
+    }
+
+    /// Start a new agent, put in front or not. Not in front, the agent in
+    /// front and any two side by side stay as they were: the new one is
+    /// added at the end of the list. On failure nothing is added.
+    pub fn start_placed(
+        &mut self,
+        command: &str,
+        args: Vec<String>,
+        kind: AgentKind,
+        folder: PathBuf,
+        front: bool,
+    ) -> Result<(), StartError> {
         // A workspace with more would not be started at the next launch.
         if self.entries.len() >= crate::state::MOST_AGENTS {
             return Err(StartError::Refused(format!(
@@ -714,7 +728,9 @@ impl<B: AgentBackend> Workspace<B> {
             resuming_since: None,
             cost_warned: false,
         });
-        self.bring_to_front(self.entries.len() - 1);
+        if front || self.entries.len() == 1 {
+            self.bring_to_front(self.entries.len() - 1);
+        }
         Ok(())
     }
 

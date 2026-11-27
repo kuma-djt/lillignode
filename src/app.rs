@@ -290,6 +290,9 @@ pub struct App<B: AgentBackend> {
     board_adapter_named: Option<String>,
     /// The team a question about a team is about.
     team_asked: String,
+    /// The fingerprint of the team as the question showed it: the answer
+    /// starts that team, or nothing if it has changed since.
+    team_digest: String,
     /// The page may start saved teams.
     page_starts: bool,
     /// The agents Lillignode knows by name that were found on this
@@ -553,6 +556,7 @@ impl<B: AgentBackend> App<B> {
             board_adapter: None,
             board_adapter_named: None,
             team_asked: String::new(),
+            team_digest: String::new(),
             page_starts: false,
             found_agents: None,
             no_settings_file: false,
@@ -722,6 +726,19 @@ impl<B: AgentBackend> App<B> {
                     (true, false) => "Anyone with this address can see your agents and type to them.",
                     (false, true) => "Anyone with this address can see your agents and act on your Board.",
                     (true, true) => "Anyone with it can see your agents, type to them and act on your Board.",
+                };
+                let who = if self.page_starts {
+                    let mut can = vec!["see your agents"];
+                    if self.page_types {
+                        can.push("type to them");
+                    }
+                    if self.page_acts {
+                        can.push("act on the Board");
+                    }
+                    let last = "start your teams";
+                    format!("Anyone with it can {} and {last}.", can.join(", "))
+                } else {
+                    who.to_string()
                 };
                 format!("The page is on: {address}  {who} {menu} then s shows it again.")
             }
@@ -1038,7 +1055,11 @@ impl<B: AgentBackend> App<B> {
                 match what {
                     Confirm::SaveTeam if yes => self.save_team(&self.team_asked.clone()),
                     Confirm::SaveTeam => self.notice = Some("No team was saved.".to_string()),
-                    Confirm::StartTeam if yes => match self.start_team_named(&self.team_asked.clone()) {
+                    Confirm::StartTeam if yes => match self.start_team_named(
+                        &self.team_asked.clone(),
+                        Some(&self.team_digest.clone()),
+                        true,
+                    ) {
                         Ok(words) => self.notice = Some(words),
                         Err(why) => self.refuse(why),
                     },
@@ -1205,7 +1226,14 @@ impl<B: AgentBackend> App<B> {
             KeyCode::Char('v') if self.engine.ws.pair().is_some() => self.act(Action::ShowOne),
             KeyCode::Char('v') => self.act(Action::ShowTwo),
             KeyCode::Char('q') => self.act(Action::Quit),
-            KeyCode::Char('t') => self.mode = Mode::TeamName(String::new()),
+            // A teams' file that cannot be read is said before a name is
+            // asked for, not after.
+            KeyCode::Char('t') => match crate::teams::read(self.board_folder.as_deref()) {
+                Ok(_) => self.mode = Mode::TeamName(String::new()),
+                Err(why) => self.refuse(format!(
+                    "{why}. No team can be saved or started until it is put right or deleted; it is left as it is."
+                )),
+            },
             _ => {}
         }
     }
@@ -1246,6 +1274,7 @@ impl<B: AgentBackend> App<B> {
         match crate::teams::find(&teams, &name) {
             Some(team) => {
                 self.team_asked = team.name.clone();
+                self.team_digest = crate::teams::digest(team);
                 self.mode = Mode::Confirm(Confirm::StartTeam);
             }
             None if self.engine.ws.entries().is_empty() => self.refuse(format!(
@@ -1273,14 +1302,28 @@ impl<B: AgentBackend> App<B> {
         }
     }
 
-    /// Start a saved team by name. The words that say what came of it.
-    pub fn start_team_named(&mut self, name: &str) -> Result<String, String> {
+    /// Start a saved team by name, read again now. With `shown`, only the
+    /// team as it was shown: if it has changed since, nothing is started.
+    /// The words that say what came of it.
+    pub fn start_team_named(
+        &mut self,
+        name: &str,
+        shown: Option<&str>,
+        front: bool,
+    ) -> Result<String, String> {
         let teams = crate::teams::read(self.board_folder.as_deref())
             .map_err(|why| format!("{why}. Nothing was started."))?;
         let Some(team) = crate::teams::find(&teams, name).cloned() else {
             return Err(format!("There is no team called \"{name}\". Nothing was started."));
         };
-        let done = self.engine.start_team(&team);
+        if shown.is_some_and(|shown| shown != crate::teams::digest(&team)) {
+            return Err(format!(
+                "The team \"{}\" has changed since it was shown. Nothing was started. Look at it again, then \
+                 start it.",
+                team.name
+            ));
+        }
+        let done = self.engine.start_team(&team, front);
         self.say_events();
         let mut words = if done.started.is_empty() {
             format!("Started nothing from the team \"{}\".", team.name)
@@ -1296,11 +1339,23 @@ impl<B: AgentBackend> App<B> {
         Ok(words)
     }
 
-    /// Start a team from the page, when the settings allow it. Refused in
-    /// the terminal's words, as text and actions from the page are.
-    pub fn start_team_from_page(&mut self, run: &str, name: &str) -> (TypedOutcome, String) {
+    /// Start a team from the page, when the settings allow it: the team as
+    /// the page showed it (`shown`, its fingerprint). Refused in the
+    /// terminal's words, as text and actions from the page are, and while
+    /// Lillignode's own window is asking something or being typed in, so a
+    /// start from the page never takes the keyboard or the screen from
+    /// whoever is at it. The agent in front stays in front.
+    pub fn start_team_from_page(&mut self, run: &str, name: &str, shown: &str) -> (TypedOutcome, String) {
         if !self.config.page_can_start {
             return (TypedOutcome::Refused, "This page cannot start teams. Nothing was started.".to_string());
+        }
+        if !matches!(self.mode, Mode::Normal) {
+            return (
+                TypedOutcome::Refused,
+                "Lillignode's window is asking something or being typed in. Nothing was started. Try again \
+                 once it is answered."
+                    .to_string(),
+            );
         }
         if run != self.engine.run().to_string() {
             return (
@@ -1310,7 +1365,7 @@ impl<B: AgentBackend> App<B> {
                     .to_string(),
             );
         }
-        match self.start_team_named(name) {
+        match self.start_team_named(name, Some(shown), false) {
             Ok(words) => {
                 self.notice = Some(format!("From the page: {words}"));
                 (TypedOutcome::Sent, words)
@@ -1980,15 +2035,12 @@ impl<B: AgentBackend> App<B> {
                 )
             }
             Mode::TeamName(input) => {
-                let saved: Vec<String> = crate::teams::read(self.board_folder.as_deref())
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|t| t.name)
-                    .collect();
-                let saved = if saved.is_empty() {
-                    "none saved yet".to_string()
-                } else {
-                    format!("saved: {}", saved.join(", "))
+                let saved = match crate::teams::read(self.board_folder.as_deref()) {
+                    Ok(teams) if teams.is_empty() => "none saved yet".to_string(),
+                    Ok(teams) => {
+                        format!("saved: {}", teams.into_iter().map(|t| t.name).collect::<Vec<_>>().join(", "))
+                    }
+                    Err(_) => "the teams' file cannot be read".to_string(),
                 };
                 format!(
                     "Team: {input}   (a saved name starts that team; a new one saves the agents open now   {saved}   \
@@ -2000,21 +2052,42 @@ impl<B: AgentBackend> App<B> {
                 let teams = crate::teams::read(self.board_folder.as_deref()).unwrap_or_default();
                 let team = crate::teams::find(&teams, name);
                 let agents = team.map_or(0, |t| t.agents.len());
-                let open: Vec<String> = team
-                    .map(|t| {
-                        t.agents.iter().filter(|a| self.engine.already_open(a)).map(|a| a.label()).collect()
-                    })
-                    .unwrap_or_default();
+                // What runs, each in full: the program, its options and its
+                // folder, as the team's file has them.
+                let (runs, open): (Vec<String>, Vec<String>) = match team {
+                    Some(t) => {
+                        let open = self.engine.already_open(t);
+                        let runs = t
+                            .agents
+                            .iter()
+                            .zip(&open)
+                            .filter(|(_, open)| !**open)
+                            .map(|(a, _)| format!("{} in {}", a.runs(), a.folder.display()))
+                            .collect();
+                        let already = t
+                            .agents
+                            .iter()
+                            .zip(&open)
+                            .filter(|(_, open)| **open)
+                            .map(|(a, _)| a.label())
+                            .collect();
+                        (runs, already)
+                    }
+                    None => (Vec::new(), Vec::new()),
+                };
+                let runs =
+                    if runs.is_empty() { String::new() } else { format!("   Runs: {}.", runs.join("; ")) };
                 let already = if open.is_empty() {
                     String::new()
                 } else {
                     format!("   Already open, left as they are: {}.", open.join(", "))
                 };
+                let running = self.engine.ws.entries().iter().filter(|e| e.is_running()).count();
                 format!(
-                    "Start the team \"{name}\": {}, in new conversations? y / n / s   s: save over it with the {} \
-                     open now.{already}",
+                    "Start the team \"{name}\": {}, in new conversations? y / n / s{runs}{already}   s: save over \
+                     it with the {} running now.",
                     plural(agents, "agent", "agents"),
-                    plural(self.engine.ws.entries().len(), "agent", "agents")
+                    plural(running, "agent", "agents")
                 )
             }
             Mode::Confirm(Confirm::NewAddress) => "Give the page a new address? y / n   The address it has \
@@ -2579,6 +2652,19 @@ impl<B: AgentBackend> App<B> {
         let lasts = match &self.page_word_not_kept {
             // Kept nowhere on purpose: an address that has leaked must not
             // be enough to type to an agent later.
+            None if self.page_starts => {
+                let can: Vec<&str> =
+                    [(self.page_types, "type"), (self.page_acts, "act"), (true, "start teams")]
+                        .into_iter()
+                        .filter_map(|(on, what)| on.then_some(what))
+                        .collect();
+                let can = match can.split_last() {
+                    Some((last, [])) => last.to_string(),
+                    Some((last, rest)) => format!("{} or {last}", rest.join(", ")),
+                    None => String::new(),
+                };
+                format!("While it can {can}, the address is new each time Lillignode starts.")
+            }
             None if self.page_types && self.page_acts => {
                 "While it can type or act, the address is new each time Lillignode starts.".to_string()
             }
@@ -3238,6 +3324,20 @@ mod tests {
         crate::teams::save(Some(&folder), team).unwrap();
         type_name(&mut app, "docs");
         app.on_key(press(KeyCode::Enter));
+        // What runs is said in full before y.
+        let bar = app.bar();
+        assert!(
+            bar.starts_with("Start the team \"docs\": 2 agents, in new conversations? y / n / s"),
+            "{bar}"
+        );
+        assert!(
+            bar.contains(&format!(
+                "Runs: codex in {}; claude in {}.",
+                here.display(),
+                folder.join("gone").display()
+            )),
+            "{bar}"
+        );
         app.on_key(press(KeyCode::Char('y')));
         let said = app.notice.clone().unwrap();
         assert!(said.starts_with("Started the team \"docs\": Codex (here). In new conversations."), "{said}");
@@ -3273,22 +3373,85 @@ mod tests {
         app.board_folder = Some(folder.clone());
         crate::teams::save(Some(&folder), app.engine.team_of_open("web")).unwrap();
         let run = app.engine.run().to_string();
-        let (outcome, words) = app.start_team_from_page(&run, "web");
+        let shown = crate::teams::digest(&crate::teams::read(Some(&folder)).unwrap()[0]);
+        let (outcome, words) = app.start_team_from_page(&run, "web", &shown);
         assert!(
             outcome == TypedOutcome::Refused && words == "This page cannot start teams. Nothing was started."
         );
         app.config.page_can_start = true;
-        let (outcome, words) = app.start_team_from_page("0", "web");
+        let (outcome, words) = app.start_team_from_page("0", "web", &shown);
         assert!(outcome == TypedOutcome::Refused && words.contains("started again"), "{words}");
-        let (outcome, words) = app.start_team_from_page(&run, "nope");
+        let (outcome, words) = app.start_team_from_page(&run, "nope", &shown);
         assert!(outcome == TypedOutcome::Refused && words.contains("no team called \"nope\""), "{words}");
-        let (outcome, words) = app.start_team_from_page(&run, "web");
+        // Shown one way, changed since: nothing is started.
+        let (outcome, words) = app.start_team_from_page(&run, "web", "0000000000000000");
+        assert!(
+            outcome == TypedOutcome::Refused && words.contains("has changed since it was shown"),
+            "{words}"
+        );
+        // Lillignode's window asking something: the page waits its turn.
+        app.mode = Mode::TeamName("we".into());
+        let (outcome, words) = app.start_team_from_page(&run, "web", &shown);
+        assert!(outcome == TypedOutcome::Refused && words.contains("asking something"), "{words}");
+        assert!(matches!(&app.mode, Mode::TeamName(typed) if typed == "we"), "the typing is left as it was");
+        app.mode = Mode::Normal;
+        let (outcome, words) = app.start_team_from_page(&run, "web", &shown);
         assert!(outcome == TypedOutcome::Sent && words.contains("Already open"), "{words}");
         assert!(
             app.notice.as_deref().unwrap().starts_with("From the page: Started nothing"),
             "{:?}",
             app.notice
         );
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    #[test]
+    fn a_team_started_from_the_page_leaves_the_agent_in_front_and_two_alike_are_matched_one_to_one() {
+        let folder = std::env::temp_dir().join(format!("lillignode-app-teams-alike-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&folder);
+        std::fs::create_dir_all(&folder).unwrap();
+        let mut app = app_with_claude_agents(2);
+        app.board_folder = Some(folder.clone());
+        app.config.page_can_start = true;
+        // An agent working in a folder that is there.
+        std::fs::create_dir_all(folder.join("w")).unwrap();
+        app.engine.ws.start_as_named("claude", folder.join("w")).unwrap();
+        let a = app.engine.team_of_open("x").agents[2].clone();
+        // Two alike, one of them open: one is already open, one is started.
+        let team = crate::teams::Team { name: "pair".into(), agents: vec![a.clone(), a.clone()] };
+        crate::teams::save(Some(&folder), team.clone()).unwrap();
+        app.act(Action::ShowTwo);
+        let before = (app.engine.ws.focused().unwrap().label(), app.engine.ws.pair());
+        let run = app.engine.run().to_string();
+        let (outcome, words) = app.start_team_from_page(&run, "pair", &crate::teams::digest(&team));
+        assert!(outcome == TypedOutcome::Sent, "{words}");
+        assert!(
+            words.contains("Started the team \"pair\": Claude Code (w).") && words.contains("Already open"),
+            "{words}"
+        );
+        assert_eq!(app.engine.ws.entries().len(), 4);
+        assert_eq!((app.engine.ws.focused().unwrap().label(), app.engine.ws.pair()), before, "nothing moved");
+        // Started again: both are open now.
+        let (_, words) = app.start_team_from_page(&run, "pair", &crate::teams::digest(&team));
+        assert!(words.starts_with("Started nothing"), "{words}");
+        assert_eq!(app.engine.ws.entries().len(), 4);
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    #[test]
+    fn t_says_a_teams_file_it_cannot_read_before_asking_for_a_name() {
+        let folder = std::env::temp_dir().join(format!("lillignode-app-teams-bad-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&folder);
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join(crate::teams::FILE), "{ not json").unwrap();
+        let mut app = app_with_claude_agents(1);
+        app.board_folder = Some(folder.clone());
+        app.on_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL));
+        app.on_key(press(KeyCode::Char('t')));
+        assert!(matches!(app.mode, Mode::Normal), "no name is asked for");
+        let said = app.notice.clone().unwrap_or_default();
+        assert!(said.contains("is not what Lillignode wrote") && said.contains("left as it is"), "{said}");
+        assert_eq!(std::fs::read_to_string(folder.join(crate::teams::FILE)).unwrap(), "{ not json");
         let _ = std::fs::remove_dir_all(&folder);
     }
 

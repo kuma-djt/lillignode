@@ -614,13 +614,15 @@ impl<B: AgentBackend> Engine<B> {
         Ok(())
     }
 
-    /// The agents open now, as a team of this name: each one's program,
-    /// kind, options and folder. No conversation is kept with a team.
+    /// The agents running now, as a team of this name: each one's program,
+    /// kind, options and folder. No conversation is kept with a team. One
+    /// that has ended or could not start is not part of it.
     pub fn team_of_open(&self, name: &str) -> Team {
         let agents = self
             .ws
             .entries()
             .iter()
+            .filter(|e| e.is_running())
             .map(|e| TeamAgent {
                 name: e.saved.name.clone(),
                 command: e.saved.command.clone(),
@@ -632,23 +634,36 @@ impl<B: AgentBackend> Engine<B> {
         Team { name: name.to_string(), agents }
     }
 
-    /// Which of a team's agents are already open: running, with the same
-    /// program and folder. Those are not started twice.
-    pub fn already_open(&self, agent: &TeamAgent) -> bool {
-        self.ws.entries().iter().any(|e| {
-            e.is_running()
-                && e.saved.command.eq_ignore_ascii_case(&agent.command)
-                && e.saved.folder == agent.folder
-        })
+    /// Which of a team's agents are already open, each matched to one
+    /// running agent with the same program, options and folder, and no
+    /// running agent matched twice: a team of two alike, with one open,
+    /// has one already open. True for each team agent, in order.
+    pub fn already_open(&self, team: &Team) -> Vec<bool> {
+        let mut free: Vec<&crate::workspace::Entry> =
+            self.ws.entries().iter().filter(|e| e.is_running()).collect();
+        team.agents
+            .iter()
+            .map(|agent| {
+                let found = free.iter().position(|e| {
+                    same_program(&e.saved.command, &agent.command)
+                        && e.saved.args == agent.args
+                        && same_folder(&e.saved.folder, &agent.folder)
+                });
+                found.map(|at| free.remove(at)).is_some()
+            })
+            .collect()
     }
 
     /// Starts each of a team's agents that is not already open, each in a
     /// new conversation. One whose folder is not there, or that cannot be
-    /// started, is not started, and said; the rest are.
-    pub fn start_team(&mut self, team: &Team) -> TeamStarted {
+    /// started, is not started, and said; the rest are. With `front`, the
+    /// last one started is put in front; without, the agent in front and
+    /// any two side by side stay as they were.
+    pub fn start_team(&mut self, team: &Team, front: bool) -> TeamStarted {
         let mut out = TeamStarted::default();
-        for agent in &team.agents {
-            if self.already_open(agent) {
+        let open = self.already_open(team);
+        for (agent, open) in team.agents.iter().zip(open) {
+            if open {
                 out.already.push(agent.label());
                 continue;
             }
@@ -657,10 +672,14 @@ impl<B: AgentBackend> Engine<B> {
                 continue;
             }
             let kind = AgentKind::of_saved(agent.kind.as_deref(), &agent.command);
-            match self.start_new(&agent.command, agent.args.clone(), kind, agent.folder.clone()) {
+            match self.ws.start_placed(&agent.command, agent.args.clone(), kind, agent.folder.clone(), front)
+            {
                 Ok(()) => out.started.push(agent.label()),
                 Err(why) => out.not_started.push((agent.label(), why.to_string())),
             }
+        }
+        if !out.started.is_empty() {
+            self.changed();
         }
         out
     }
@@ -1052,6 +1071,31 @@ impl<B: AgentBackend> Engine<B> {
         self.question = Some(question);
         question
     }
+}
+
+/// The same program: on Windows in any case, as Windows finds it.
+fn same_program(a: &str, b: &str) -> bool {
+    if cfg!(windows) {
+        a.eq_ignore_ascii_case(b)
+    } else {
+        a == b
+    }
+}
+
+/// The same folder, written either way: on Windows in any case and with
+/// either slash; anywhere, with or without a separator at the end.
+fn same_folder(a: &std::path::Path, b: &std::path::Path) -> bool {
+    let plain = |p: &std::path::Path| {
+        let mut text = p.to_string_lossy().to_string();
+        if cfg!(windows) {
+            text = text.replace('/', "\\").to_lowercase();
+        }
+        while text.len() > 1 && (text.ends_with('/') || text.ends_with('\\')) && !text.ends_with(":\\") {
+            text.pop();
+        }
+        text
+    };
+    plain(a) == plain(b)
 }
 
 /// What came of starting a team: who was started, who was already open,

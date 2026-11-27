@@ -339,7 +339,8 @@ fn main() -> ExitCode {
                 Msg::Acted(acted) if acted.asked.elapsed() > page::ANSWER_WITHIN => {}
                 Msg::Started(started) if started.asked.elapsed() > page::ANSWER_WITHIN => {}
                 Msg::Started(started) => {
-                    let (outcome, words) = app.start_team_from_page(&started.run, &started.name);
+                    let (outcome, words) =
+                        app.start_team_from_page(&started.run, &started.name, &started.shown);
                     let _ = started.answer.send(page::TypedAnswer { outcome, words });
                 }
                 Msg::Typed(typed) if typed.asked.elapsed() > page::ANSWER_WITHIN => {}

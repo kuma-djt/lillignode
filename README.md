@@ -214,11 +214,11 @@ Instead of the two files, Lillignode can start one program of your choosing and 
 A team is a named set of agents: each one's program, kind, options and folder. The menu key, then `t`, asks for a name:
 
 - **A new name** saves the agents open now as that team, after asking: "Save the 3 agents open now as the team "web"? y / n".
-- **A saved name** starts it, after asking: "Start the team "web": 2 agents, in new conversations? y / n / s". `s` saves over it with the agents open now.
+- **A saved name** starts it, after asking: "Start the team "web": 2 agents, in new conversations? y / n / s", followed by what each agent runs and in which folder. `s` saves over it with the agents running now. If the file changes between the question and `y`, nothing is started.
 - **No conversation is kept with a team.** Its agents start new conversations; continuing a conversation is the workspace's job.
-- **Nothing is started twice.** An agent of the team that is already open, with the same program and folder, is left as it is, and said. One whose folder is not there is not started, and named.
-- **Kept in `teams.json`** beside your workspace (`lillignode --where` says where), written whole and private. A file that cannot be read is never written over.
-- **On the page** the saved teams are listed under the agents. Add `"page_can_start": true` beside `"page": true` and each has a Start button, on the same terms as typing and acting: under the word, from this machine, with the page's token, for this run of Lillignode. Saving a team is done in Lillignode's own window only.
+- **Nothing is started twice.** An agent of the team that is already running, with the same program, options and folder, is left as it is, and said. One whose folder is not there is not started, and named.
+- **Kept in `teams.json`** beside your workspace (`lillignode --where` says where), written whole and private. A file that cannot be read, or holds what Lillignode would not write (a folder that is not a full path, a hidden character, more than 50 teams or 20 agents a team), is said, never started from and never written over.
+- **On the page** the saved teams are listed under the agents. Add `"page_can_start": true` beside `"page": true` and each has a Start button, on the same terms as typing and acting: under the word, from this machine, with the page's token, for this run of Lillignode. The page shows what each agent runs before you press Start; the agent in front stays in front; a start is refused while Lillignode's window is asking you something. While the page can start teams, its address is new each time Lillignode starts. Saving a team is done in Lillignode's own window only.
 
 ## Settings
 

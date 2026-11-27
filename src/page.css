@@ -248,7 +248,9 @@ li.gone .agent-name { color: var(--cream-quiet); }
 .team-head { display: flex; align-items: center; gap: 10px; }
 .team-name { font-weight: 600; flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .team-start { padding: 4px 12px; font-weight: 600; background: transparent; color: var(--cream); border: 1px solid var(--cream-quiet); border-radius: 3px; }
-.team-agents { padding: 2px 0 0; margin: 0; font-size: 12px; }
+.team-agents { list-style: none; padding: 2px 0 0; margin: 0; font-size: 12px; }
+.team-agent { padding: 1px 0; overflow-wrap: anywhere; }
+.team-runs { font-family: var(--mono, Consolas, monospace); font-size: 12px; }
 #teams-said { padding: 4px 14px 8px; font-size: 13px; }
 
 /* Agents reporting through the Board's adapter: kept apart from Lillignode's own. */
