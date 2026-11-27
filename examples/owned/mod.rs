@@ -350,6 +350,9 @@ pub fn sandbox(tag: &str) -> (Sandbox, PathBuf) {
         launchers: root.join("launchers"),
         root,
     };
+    // A folder of this name left by an earlier run that was stopped (process
+    // numbers are used again) would bring its workspace back: start empty.
+    let _ = std::fs::remove_dir_all(&sb.root);
     std::fs::create_dir_all(&sb.work).unwrap();
     std::fs::create_dir_all(&sb.launchers).unwrap();
     std::fs::create_dir_all(&sb.state).unwrap();

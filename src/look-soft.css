@@ -56,3 +56,7 @@ body.phone #standing { font-size: 0; }
 body.phone #standing::after { content: attr(data-short); font-size: 14px; }
 body.phone #agents button { min-height: 72px; padding-right: 40px; }
 body.phone #agents button::after { right: 16px; }
+
+/* The phone's own controls are touch-sized too. */
+body.phone #board-open, body.phone #back-to-agents, body.phone #board-close { min-height: 44px; }
+#blocking .blocking-open { min-height: 44px; }

@@ -8,7 +8,7 @@ main > section { background: var(--navy-deep); }
 #agents-column, #middle { border-right: 0; }
 h2 { padding: 16px 18px 10px; }
 
-#agents ul, #agents-list { padding: 0 12px; }
+#agents { padding: 0 12px; }
 #agents li, #agents li:last-child { border: 0; margin-bottom: 10px; }
 #agents button {
   display: grid;
@@ -71,3 +71,7 @@ body.phone header { padding: 10px 14px; }
 body.phone #standing { font-size: 0; }
 body.phone #standing::after { content: attr(data-short); font-size: 14px; }
 body.phone #agents button { padding-right: 40px; }
+
+/* The phone's own controls are touch-sized too. */
+body.phone #board-open, body.phone #back-to-agents, body.phone #board-close { min-height: 44px; }
+#blocking .blocking-open { min-height: 44px; }

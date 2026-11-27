@@ -146,7 +146,9 @@
   // first two letters of one word. "Claude Code" is CC, "reporter" RE.
   function initials(name) {
     const words = String(name || "?").split(/[\s_\-./\\]+/).filter(Boolean);
-    const two = words.length > 1 ? words[0][0] + words[1][0] : (words[0] || "?").slice(0, 2);
+    // By character, not by half of one: a name with an emoji keeps it whole.
+    const first = (w) => Array.from(w)[0] || "";
+    const two = words.length > 1 ? first(words[0]) + first(words[1]) : Array.from(words[0] || "?").slice(0, 2).join("");
     return two.toUpperCase();
   }
 
@@ -387,6 +389,7 @@
     }
     // The same, in a few words, for a look that cuts the header on a phone.
     const short = [token && acts ? "Can type and act" : token ? "Can type to agents" : acts ? "Can act on the Board" : "Read only"];
+    if (acts && board && board.adapter) short.push("sends to " + board.adapter.name);
     if (starts) short.push("starts teams");
     if (state && state.helper) short.push(state.helper.stopped ? "helper stopped" : "helper on");
     standing.dataset.short = short.join(" · ");
