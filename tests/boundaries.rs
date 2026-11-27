@@ -21,6 +21,7 @@ const ENGINE: &[&str] = &[
     "config",
     "cost",
     "engine",
+    "helper",
     "kind",
     "local",
     "snapshot",

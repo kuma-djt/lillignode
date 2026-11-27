@@ -7,6 +7,7 @@ pub mod config;
 pub mod cost;
 pub mod engine;
 pub mod fit;
+pub mod helper;
 pub mod input;
 pub mod keys;
 pub mod kind;

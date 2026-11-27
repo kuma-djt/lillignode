@@ -144,6 +144,10 @@ fn status_words(agent: &AgentCopy) -> String {
     match &agent.status {
         // In capitals: with its block, the loudest thing on screen.
         Some(AgentStatus::NeedsYou(_)) => "NEEDS YOU".to_string(),
+        // A helper's guess, marked as one: never the agent's own word.
+        Some(AgentStatus::Unknown(_)) if agent.guess.is_some() => {
+            format!("Guess: {}?", agent.guess.map_or("", |g| g.word()))
+        }
         Some(reported) => reported.short(),
         None => agent.program.text(),
     }

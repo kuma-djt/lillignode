@@ -277,6 +277,18 @@ fn serve(sb: &Sandbox, port: u16, can_type: bool, can_act: bool) {
         let page = page_on_screen(&mut s, port);
         s.expect("no agents yet", "No agents yet.");
         (s, page)
+    } else if std::env::args().any(|a| a == "--helper") {
+        // The stand-in helper, and one agent that reports nothing.
+        let ext = if cfg!(windows) { ".exe" } else { "" };
+        let here = std::env::current_exe().unwrap();
+        let helper = here.with_file_name(format!("helper_standin{ext}"));
+        let named = serde_json::json!({ "command": helper, "args": ["read"] });
+        settings(sb, &format!("{{\"page\": true, \"page_port\": {port}, \"helper\": {named}}}"));
+        let mut s = Session::start(sb);
+        let page = page_on_screen(&mut s, port);
+        s.new_agent("plain");
+        s.expect("an agent that reports nothing starts", "STANDIN READY echo-plain");
+        (s, page)
     } else if can_act {
         let and_type = if can_type { ", \"page_can_type\": true" } else { "" };
         // A Board adapter, for a check that brings its own: the settings'
@@ -1198,6 +1210,9 @@ Host: localhost:{port}
     println!("K. A usage limit, with the time the agent says it resets");
     usage_limit_section(&sb, port);
 
+    println!("L. A helper's guess about an agent that says nothing");
+    helper_section(&sb, port, &standin);
+
     let _ = std::fs::remove_dir_all(&sb.root);
     println!("\nAll checks passed.");
 }
@@ -1492,6 +1507,134 @@ fn teams_section(sb: &Sandbox, port: u16) {
     let _ = std::fs::remove_file(sb.state.join(lillignode::teams::FILE));
     let _ = std::fs::remove_file(sb.state.join("workspace.json"));
     settings(sb, &format!("{{\"page\": true, \"page_port\": {port}}}"));
+}
+
+/// The page's state once the row of the agent named `name` passes
+/// `ready`, or after `secs` seconds.
+fn row_when(
+    page: &Page,
+    name: &str,
+    secs: u64,
+    ready: impl Fn(&serde_json::Value) -> bool,
+) -> serde_json::Value {
+    let until = std::time::Instant::now() + Duration::from_secs(secs);
+    loop {
+        let at = state(page, "");
+        let row =
+            at["state"]["agents"].as_array().and_then(|a| a.iter().find(|r| r["name"] == name)).cloned();
+        if let Some(row) = row.filter(|r| ready(r) || std::time::Instant::now() > until) {
+            return row;
+        }
+        if std::time::Instant::now() > until {
+            return serde_json::Value::Null;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn helper_section(sb: &Sandbox, port: u16, standin: &std::path::Path) {
+    let ext = if cfg!(windows) { ".exe" } else { "" };
+    let helper = standin.with_file_name(format!("helper_standin{ext}"));
+    let log = sb.root.join("helper-asked.log");
+    let with_helper = |mode: &str| {
+        let named = serde_json::json!({ "command": helper, "args": [mode], "env": ["HELPER_STANDIN_LOG"] });
+        settings(sb, &format!("{{\"page\": true, \"page_port\": {port}, \"helper\": {named}}}"));
+    };
+    let start = |sb: &Sandbox| {
+        for file in ["workspace.json", "workspace.previous.json"] {
+            let _ = std::fs::remove_file(sb.state.join(file));
+        }
+        let log_value = log.to_string_lossy().to_string();
+        let mut s = Session::start_with(sb, &sb.state, &[("HELPER_STANDIN_LOG", log_value.as_str())]);
+        let page = page_on_screen(&mut s, port);
+        let said = s.flat();
+        s.new_agent("plain");
+        s.expect("an agent that reports nothing starts", "STANDIN READY echo-plain");
+        (s, page, said)
+    };
+
+    // On: said at the start, with what it is shown.
+    with_helper("read");
+    let (mut s, page, said) = start(sb);
+    check(
+        "the start says the helper is on, and what it is shown",
+        said.contains("The helper is on: it is shown the screen of an agent that reports nothing"),
+        &said,
+    );
+    // The agent's last line ends with a question: the stand-in guesses waiting.
+    s.keys(b"ok?");
+    let row = row_when(&page, "plain", 8, |r| r["guess"] == "waiting");
+    check(
+        "after its text is still for two seconds, the page is given the helper's guess",
+        row["guess"] == "waiting" && row["state"] == "unknown" && row["needs_you"] == false,
+        &row.to_string(),
+    );
+    s.expect("the sidebar marks it as a guess", "Guess: waiting?");
+    let asked = std::fs::read_to_string(&log).unwrap_or_default();
+    let question = asked
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .find(|q| q["ask"].is_u64());
+    check(
+        "the helper was sent the agent's name and screen, and nothing else",
+        question.as_ref().is_some_and(|q| {
+            let keys: Vec<&String> = q.as_object().map(|o| o.keys().collect()).unwrap_or_default();
+            keys == ["agent", "ask", "screen"] && q["agent"] == "plain (work)"
+        }),
+        &asked,
+    );
+    s.raw(CTRL_Q);
+    s.keys(b"s");
+    s.expect(
+        "the status report says it is a guess, not the agent's report",
+        "That is a guess, not the agent's own report",
+    );
+    s.keys(ESC);
+    // The screen changes: the guess goes.
+    s.keys(b".");
+    let row = row_when(&page, "plain", 2, |r| r["guess"].is_null());
+    check("a changed screen ends the guess at once", row["guess"].is_null(), &row.to_string());
+    // Still again, now "ok?." ends with "." : the stand-in guesses done.
+    let row = row_when(&page, "plain", 8, |r| r["guess"] == "done");
+    check("still again, it is asked again", row["guess"] == "done", &row.to_string());
+    quit_either_way(s);
+
+    // Unsure, late, or stopped: no guess.
+    for (mode, what) in [("unsure", "an unsure helper"), ("late", "a helper later than three seconds")] {
+        with_helper(mode);
+        let (mut s, page, _) = start(sb);
+        s.keys(b"ok?");
+        let row = row_when(&page, "plain", 8, |r| !r["guess"].is_null());
+        check(
+            &format!("{what} gives no guess"),
+            row["guess"].is_null() && row["state"] == "unknown",
+            &row.to_string(),
+        );
+        quit_either_way(s);
+    }
+    with_helper("quit");
+    let (mut s, _page, _) = start(sb);
+    s.keys(b"ok?");
+    s.pump_for(Duration::from_millis(500));
+    s.raw(CTRL_Q);
+    s.keys(b"s");
+    s.expect("and the status report keeps saying it", "has stopped (it ended): no guess is shown");
+    s.keys(ESC);
+    quit_either_way(s);
+
+    // Off unless named.
+    settings(sb, &format!("{{\"page\": true, \"page_port\": {port}}}"));
+    let _ = std::fs::remove_file(&log);
+    let (mut s, page, _) = start(sb);
+    s.keys(b"ok?");
+    let row = row_when(&page, "plain", 4, |r| !r["guess"].is_null());
+    check(
+        "with no helper named, nothing is asked and no guess is shown",
+        row["guess"].is_null() && !log.exists(),
+        &row.to_string(),
+    );
+    quit_either_way(s);
+    let _ = std::fs::remove_file(sb.state.join("workspace.json"));
 }
 
 /// The page's state once the reporter's row passes `ready`, or after

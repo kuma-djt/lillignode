@@ -279,6 +279,20 @@ ESC ] 7501 ; state=blocked:limit=usage:resets=1795788000 BEL
 - **Never a guess.** No `resets`, or one before 2020 or more than 31 days ahead: "reset time not given". Past the time, Lillignode still shows what the agent said ("the time it gave passed 4 min ago") until the agent reports something else, or, for a program not known by name, until its shell's prompt comes back.
 - Lillignode does not read an agent's screen for words like "usage limit reached": that would be guessing at its state.
 
+### A helper's guess (off unless you name one)
+
+An agent that sends no status reports shows Unknown. You may name one program of your own, a **helper**, that Lillignode asks what such an agent seems to be doing:
+
+```json
+{ "helper": { "command": "my-guesser", "args": [], "env": [] } }
+```
+
+- **It is asked only about an agent whose status is Unknown and whose text has been still for 2 seconds,** once for each still screen. It is sent the agent's name and the text on its screen, and nothing else: no keys, no files, no other agent. **What it does with that text is up to the program you name;** if it sends it to an AI service, your agents' screens go there. Lillignode itself sends nothing anywhere.
+- **Its answer is shown as a guess, marked as one:** `Guess: waiting?` in the sidebar (the sign stays `?`), "a helper guesses: waiting" on the page, and the status report says it is a guess, not the agent's report. A guess never makes an agent need you and rings no bell.
+- **No guess** if it answers later than 3 seconds, says it is unsure, or says anything that cannot be read. The guess goes the moment the agent's screen changes or the agent reports.
+- It runs in the folder Lillignode saves in, with only what a program needs from your environment plus the variables named in `env`. If it ends, that is said, and nothing more is asked.
+- **The lines:** to it, `{"hello":1}` then `{"ask":7,"agent":"Claude Code (web)","screen":["…"]}`; from it, `{"answer":7,"guess":"waiting"}`, with `waiting`, `working`, `done` or `unsure`. `examples/helper_standin.rs` is a stand-in that guesses from the last line of the screen.
+
 ### Which programs, and how we know
 
 Three levels of evidence, strongest first. Everything checked by hand was on Windows 11 in Windows Terminal, in November 2026.

@@ -288,6 +288,8 @@ pub struct App<B: AgentBackend> {
     pub board_adapter: Option<crate::adapter::Link>,
     /// The program named, as said in the status report.
     board_adapter_named: Option<String>,
+    /// Whether the helper's stopping has been said.
+    helper_stop_said: bool,
     /// The last usage-limit notice, and whose: taken down when that agent
     /// leaves the limit, so it never says what is no longer true.
     limit_notice: Option<(String, String)>,
@@ -559,6 +561,7 @@ impl<B: AgentBackend> App<B> {
             board_adapter: None,
             board_adapter_named: None,
             limit_notice: None,
+            helper_stop_said: false,
             team_asked: String::new(),
             team_digest: String::new(),
             page_starts: false,
@@ -815,6 +818,22 @@ impl<B: AgentBackend> App<B> {
             .filter(|c| !c.is_control())
             .collect();
         self.board_adapter_named = Some(fit::clip(&shown, 80));
+    }
+
+    /// The helper the settings name was started, or not: said once, with
+    /// what it is shown, so nobody is surprised that an agent's screen
+    /// leaves Lillignode for it.
+    pub fn helper_started(&mut self, started: Result<(), String>) {
+        self.say_first(match started {
+            // Short: the page's address may follow it in the same rows.
+            Ok(()) => "The helper is on: it is shown the screen of an agent that reports nothing, and its \
+                       answers show as guesses."
+                .to_string(),
+            Err(why) => format!(
+                "{why} No guesses are shown; agents work as before. Put \"helper\" right in the settings \
+                 file, or take it out."
+            ),
+        });
     }
 
     /// Give the page a new address. The one before stops working at once.
@@ -2241,6 +2260,14 @@ impl<B: AgentBackend> App<B> {
     pub fn after_events(&mut self) -> bool {
         self.engine.settle();
         let began = self.say_events();
+        // The helper stopped: said once, so no one waits for guesses.
+        if let (false, Some((command, Some(why)))) = (self.helper_stop_said, self.engine.helper_state()) {
+            self.helper_stop_said = true;
+            self.say_first(format!(
+                "The helper ({}) has stopped: {why}. No guesses are shown now; agents work as before. Start                  Lillignode again to start it again.",
+                fit::clip(&command, 60)
+            ));
+        }
         began && self.config.bell
     }
 
@@ -2746,6 +2773,22 @@ impl<B: AgentBackend> App<B> {
                     out += &format!(". {}", status::why_long(why, expected));
                 }
                 out += &format!(". The sidebar shows it as {}.\n", shown.short());
+                if let (AgentStatus::Unknown(_), Some(guess)) = (&shown, self.engine.guess(e.key())) {
+                    out += &format!(
+                        "The helper your settings name guesses it is {}, from the text on its screen. That is a \
+                         guess, not the agent's own report: it ends when the screen changes or the agent \
+                         reports.\n",
+                        guess.word()
+                    );
+                }
+                if let (AgentStatus::Unknown(_), Some((command, Some(why)))) =
+                    (&shown, self.engine.helper_state())
+                {
+                    out += &format!(
+                        "The helper ({command}) has stopped ({why}): no guess is shown.
+"
+                    );
+                }
                 // Said when a part, not the program itself, is why.
                 let (waiting, own) = (e.waiting_parts(), e.own_status());
                 if let (false, Some(own)) = (waiting.is_empty(), own) {

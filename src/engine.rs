@@ -16,6 +16,7 @@ use std::time::SystemTime;
 
 use crate::agent::{AgentBackend, AgentEvent, Exit, Size, StartError};
 use crate::cost::{Cost, WhyNot};
+use crate::helper::{Answer, Guess, Helper};
 use crate::kind::AgentKind;
 use crate::snapshot::{AgentCopy, EventCopy, Published, StateCopy};
 use crate::state::{self, SavedWorkspace};
@@ -366,6 +367,11 @@ pub struct Engine<B: AgentBackend> {
     /// The kinds of agent whose status has been said not to reach
     /// Lillignode, and has not come back since.
     status_said: Vec<AgentKind>,
+    /// The advisory helper, if the settings name one, and what it has been
+    /// asked about each agent whose status is Unknown.
+    helper: Option<Helper>,
+    asking: std::collections::HashMap<AgentKey, Asking>,
+    asked_count: u64,
     /// The agents at a usage limit when last settled, with the reset time
     /// each gave, so reaching one is said once, and said again only when
     /// the time it gives changes.
@@ -400,10 +406,75 @@ impl<B: AgentBackend> Engine<B> {
                 .map_or(0, |since| since.as_nanos() as u64),
             status_said: Vec::new(),
             limited: Vec::new(),
+            helper: None,
+            asking: std::collections::HashMap::new(),
+            asked_count: 0,
             cost_said: false,
             save_failing: false,
             outbox_written: Vec::new(),
         }
+    }
+
+    /// Hands the engine the advisory helper the settings name.
+    pub fn set_helper(&mut self, helper: Helper) {
+        self.helper = Some(helper);
+    }
+
+    /// The helper's program and, once it has stopped, why.
+    pub fn helper_state(&self) -> Option<(String, Option<String>)> {
+        self.helper.as_ref().map(|h| (h.command().to_string(), h.stopped()))
+    }
+
+    /// What the helper guesses this agent is doing, if it has guessed for
+    /// the screen the agent shows now and the agent still says nothing.
+    pub fn guess(&self, agent: AgentKey) -> Option<Guess> {
+        self.asking.get(&agent).and_then(|a| a.answer.flatten())
+    }
+
+    /// Asks the helper about each agent whose own status is Unknown and
+    /// whose text has been still for `STILL_FOR`, once for each still
+    /// screen; takes the answers that came in time; and lets go of every
+    /// guess whose agent has reported or whose screen has changed.
+    fn consult_helper(&mut self, now: SystemTime, clock: std::time::Instant) {
+        let Some(helper) = &self.helper else { return };
+        let mut still: Vec<(AgentKey, SystemTime, String)> = Vec::new();
+        for e in self.ws.entries() {
+            let unknown = matches!(e.own_status(), Some(AgentStatus::Unknown(_)));
+            if let (true, Some(at)) = (unknown, e.term.text_changed_at()) {
+                still.push((e.key(), at, e.label()));
+            }
+        }
+        // Gone: reported, closed, or its screen moved on.
+        self.asking.retain(|agent, a| still.iter().any(|(k, at, _)| k == agent && *at == a.still_since));
+        for (agent, at, label) in still {
+            let quiet = now.duration_since(at).unwrap_or_default();
+            if quiet < crate::helper::STILL_FOR || self.asking.contains_key(&agent) {
+                continue;
+            }
+            let Some(e) = self.ws.entries().iter().find(|e| e.key() == agent) else { continue };
+            self.asked_count += 1;
+            helper.ask(self.asked_count, &label, &e.term.screen().contents());
+            self.asking.insert(
+                agent,
+                Asking { ask: self.asked_count, still_since: at, asked_at: clock, answer: None },
+            );
+        }
+        for a in self.asking.values_mut().filter(|a| a.answer.is_none()) {
+            a.answer = match helper.answer(a.ask) {
+                // In time: a guess, or unsure. Late: no guess.
+                Some((answer, came)) if came.duration_since(a.asked_at) <= crate::helper::ANSWER_WITHIN => {
+                    Some(match answer {
+                        Answer::Guess(guess) => Some(guess),
+                        Answer::Unsure => None,
+                    })
+                }
+                Some(_) => Some(None),
+                None if clock.duration_since(a.asked_at) > crate::helper::ANSWER_WITHIN => Some(None),
+                None => None,
+            };
+        }
+        let waiting: Vec<u64> = self.asking.values().filter(|a| a.answer.is_none()).map(|a| a.ask).collect();
+        helper.forget_all_but(&waiting);
     }
 
     /// Call after each batch of agent output and each tick. What has become
@@ -412,6 +483,7 @@ impl<B: AgentBackend> Engine<B> {
     /// unavailable is back; status is unavailable, for one kind of agent at
     /// a time; a cost could not be read; a cost warning was passed.
     pub fn settle(&mut self) {
+        self.consult_helper(SystemTime::now(), std::time::Instant::now());
         let mut said = Vec::new();
         for (agent, label) in self.ws.take_began_needing_you_each() {
             said.push(Event::BeganNeedingYou { agent, label });
@@ -540,6 +612,7 @@ impl<B: AgentBackend> Engine<B> {
                 cost: e.cost(),
                 over_cost_warning: self.ws.over_cost_warning(e),
                 start_again_cannot_help: e.start_again_cannot_help(),
+                guess: self.guess(e.key()),
             })
             .collect();
         let key_at = |index: usize| entries.get(index).map(Entry::key);
@@ -1118,6 +1191,16 @@ impl<B: AgentBackend> Engine<B> {
         self.question = Some(question);
         question
     }
+}
+
+/// One question to the helper about one agent's still screen.
+struct Asking {
+    ask: u64,
+    /// When the agent's text last changed: the screen this is about.
+    still_since: SystemTime,
+    asked_at: std::time::Instant,
+    /// None while waited for; then the guess, or None for no guess.
+    answer: Option<Option<Guess>>,
 }
 
 /// The same program: on Windows in any case, as Windows finds it.
@@ -1834,6 +1917,105 @@ mod tests {
         report(&mut e, 1, "state=blocked");
         e.settle();
         assert_eq!(e.take_events(), [began], "it began again");
+    }
+
+    /// The question the helper was last asked, as JSON.
+    fn last_question(asked: &std::sync::mpsc::Receiver<String>) -> Option<serde_json::Value> {
+        asked.try_iter().filter_map(|l| serde_json::from_str::<serde_json::Value>(&l).ok()).last()
+    }
+
+    #[test]
+    fn the_helper_is_asked_about_a_still_unknown_agent_once_and_its_guess_is_only_a_guess() {
+        use crate::helper::{Answer, Guess, Helper};
+        let mut e = engine(&["state=working"]);
+        let (helper, asked) = Helper::detached();
+        e.set_helper(helper);
+        let agent = key(&e, 0);
+        let long_ago = SystemTime::now() - std::time::Duration::from_secs(5);
+        // Reporting: never asked.
+        let _ = e.ws.focused_mut().unwrap().term.feed_at(b"working...", long_ago);
+        e.settle();
+        assert!(last_question(&asked).is_none(), "an agent that reports is not asked about");
+        // Says nothing now (Unknown), text still for long enough: asked once.
+        report(&mut e, 1, "state=pondering");
+        let _ = e.ws.focused_mut().unwrap().term.feed_at(b"\r\nAllow this?", long_ago);
+        e.settle();
+        let q = last_question(&asked).expect("asked");
+        assert_eq!(q["agent"], e.ws.entries()[0].label());
+        assert!(q["screen"].as_array().unwrap().iter().any(|l| l == "Allow this?"), "{q}");
+        let ask = q["ask"].as_u64().unwrap();
+        e.settle();
+        assert!(last_question(&asked).is_none(), "the same still screen is asked about once");
+        assert_eq!(e.guess(agent), None, "no guess before an answer");
+        // In time: a guess, in the copy; not needing you; no event.
+        e.helper.as_ref().unwrap().answered(ask, Answer::Guess(Guess::Waiting), std::time::Instant::now());
+        e.settle();
+        assert_eq!(e.guess(agent), Some(Guess::Waiting));
+        let copy = e.copy(SystemTime::now());
+        assert_eq!(copy.agents[0].guess, Some(Guess::Waiting));
+        assert!(
+            matches!(copy.agents[0].status, Some(AgentStatus::Unknown(_))),
+            "still Unknown: its own word"
+        );
+        assert_eq!(copy.agents[0].needs_you, None, "a guess never makes it need you");
+        assert!(e.take_events().iter().all(|ev| !matches!(ev, Event::BeganNeedingYou { .. })));
+        // The screen changes: the guess goes, and is not shown again.
+        let _ = e.ws.focused_mut().unwrap().term.feed_at(b"\r\nmore", SystemTime::now());
+        e.settle();
+        assert_eq!(e.guess(agent), None, "a changed screen ends the guess");
+        // Late: no guess.
+        let _ =
+            e.ws.focused_mut()
+                .unwrap()
+                .term
+                .feed_at(b"\r\nok?", SystemTime::now() - std::time::Duration::from_secs(6));
+        e.settle();
+        let ask = last_question(&asked).unwrap()["ask"].as_u64().unwrap();
+        let late =
+            std::time::Instant::now() + crate::helper::ANSWER_WITHIN + std::time::Duration::from_millis(50);
+        e.helper.as_ref().unwrap().answered(ask, Answer::Guess(Guess::Done), late);
+        e.settle();
+        assert_eq!(e.guess(agent), None, "an answer later than the limit is no guess");
+        // Unsure: no guess.
+        let _ =
+            e.ws.focused_mut()
+                .unwrap()
+                .term
+                .feed_at(b"\r\nhm", SystemTime::now() - std::time::Duration::from_secs(7));
+        e.settle();
+        let ask = last_question(&asked).unwrap()["ask"].as_u64().unwrap();
+        e.helper.as_ref().unwrap().answered(ask, Answer::Unsure, std::time::Instant::now());
+        e.settle();
+        assert_eq!(e.guess(agent), None, "unsure is no guess");
+        // A report ends a guess.
+        let _ =
+            e.ws.focused_mut()
+                .unwrap()
+                .term
+                .feed_at(b"\r\nready?", SystemTime::now() - std::time::Duration::from_secs(8));
+        e.settle();
+        let ask = last_question(&asked).unwrap()["ask"].as_u64().unwrap();
+        e.helper.as_ref().unwrap().answered(ask, Answer::Guess(Guess::Waiting), std::time::Instant::now());
+        e.settle();
+        assert_eq!(e.guess(agent), Some(Guess::Waiting));
+        report(&mut e, 1, "state=idle");
+        e.settle();
+        assert_eq!(e.guess(agent), None, "the agent's own report ends the guess");
+        // Too soon: text that changed under two seconds ago is not asked about.
+        report(&mut e, 1, "state=pondering");
+        let _ = e.ws.focused_mut().unwrap().term.feed_at(b"\r\nnow?", SystemTime::now());
+        e.settle();
+        assert!(last_question(&asked).is_none(), "not still long enough");
+        // A helper that has stopped is asked nothing.
+        e.helper.as_ref().unwrap().ended("it ended");
+        let _ =
+            e.ws.focused_mut()
+                .unwrap()
+                .term
+                .feed_at(b"\r\nlater?", SystemTime::now() - std::time::Duration::from_secs(9));
+        e.settle();
+        assert!(last_question(&asked).is_none());
+        assert_eq!(e.helper_state(), Some(("test-helper".to_string(), Some("it ended".to_string()))));
     }
 
     #[test]

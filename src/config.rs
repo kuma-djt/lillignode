@@ -162,6 +162,10 @@ pub struct Config {
     /// One outside program to start and talk to over its own pipe for the
     /// Board, in place of the Board's files. Off unless named.
     pub board_adapter: Option<BoardAdapter>,
+    /// One outside program Lillignode may ask what an agent that says
+    /// nothing seems to be doing. Its answers are shown as guesses. Off
+    /// unless named.
+    pub helper: Option<BoardAdapter>,
 }
 
 /// The program that keeps the Board: what to run, and its arguments.
@@ -209,6 +213,7 @@ impl Default for Config {
             page_can_act: false,
             page_can_start: false,
             board_adapter: None,
+            helper: None,
         }
     }
 }
@@ -249,6 +254,7 @@ struct File {
     page_can_act: Option<bool>,
     page_can_start: Option<bool>,
     board_adapter: Option<BoardAdapter>,
+    helper: Option<BoardAdapter>,
 }
 
 fn parse(text: &str) -> Result<Config, String> {
@@ -324,6 +330,12 @@ fn parse(text: &str) -> Result<Config, String> {
             return Err("give \"board_adapter\" a \"command\" to run, or take it out".to_string());
         }
         adapter => adapter,
+    };
+    config.helper = match file.helper {
+        Some(helper) if helper.command.trim().is_empty() => {
+            return Err("give \"helper\" a \"command\" to run, or take it out".to_string());
+        }
+        helper => helper,
     };
     let Some(specs) = file.menu_keys else { return Ok(config) };
     if specs.is_empty() {
@@ -404,6 +416,24 @@ mod tests {
         let mut c = parse(r#"{"menu_keys": ["alt+m", "f9", "ctrl+t", "f2"]}"#).unwrap();
         c.function_keys_first();
         assert_eq!(c.menu_keys_label(), "F9 or F2 or Alt+M or Ctrl+T");
+    }
+
+    #[test]
+    fn the_helper_is_off_unless_named_and_needs_a_program() {
+        assert_eq!(Config::default().helper, None);
+        assert_eq!(parse(r#"{"page": true}"#).unwrap().helper, None);
+        let named = parse(r#"{"helper": {"command": "guess", "args": ["--fast"], "env": ["KEY"]}}"#).unwrap();
+        assert_eq!(
+            named.helper,
+            Some(BoardAdapter {
+                command: "guess".into(),
+                args: vec!["--fast".into()],
+                env: vec!["KEY".into()]
+            })
+        );
+        assert!(!named.page, "it needs no page");
+        assert!(parse(r#"{"helper": {"command": " "}}"#).unwrap_err().contains("\"helper\""));
+        assert!(parse(r#"{"helper": {"command": "x", "screen": true}}"#).is_err());
     }
 
     #[test]

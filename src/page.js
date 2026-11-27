@@ -167,6 +167,8 @@
       if (gone < 0) return ["Usage limit", ", resets " + at + " (in " + limitSpan(Math.ceil(-gone / 60000)) + ")"];
       return ["Usage limit", ", the time it gave, " + at + ", passed " + limitSpan(Math.floor(gone / 60000)) + " ago"];
     }
+    // A helper's guess: marked as one, after what the agent itself says.
+    if (agent.guess && agent.state === "unknown") return [agent.words, " · a helper guesses: " + agent.guess];
     const age = since(agent.reported_at);
     return [agent.words, age === null ? "" : ", " + ago(age) + " ago"];
   }
@@ -263,6 +265,10 @@
     if (agent.program_note) notes.push(agent.program_note);
     // Why an agent at a usage limit is quiet, where its terminal is seen.
     if (agent.running && agent.state === "usage-limit") notes.push(stateWords(agent).join("") + ".");
+    // A helper's guess, where its terminal is seen: said to be a guess.
+    if (agent.running && agent.guess && agent.state === "unknown") {
+      notes.push("It reports nothing. A helper guesses it is " + agent.guess + ": a guess from its screen, not its own word.");
+    }
     if (!screen) notes.push("Waiting for its screen.");
     else if (screen.scrolled_back) {
       notes.push("Someone is reading this agent's history in Lillignode. This is what they see, not its live screen.");

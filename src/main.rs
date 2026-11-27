@@ -215,6 +215,18 @@ fn main() -> ExitCode {
     // reading half; this loop publishes to the other. Only when the user
     // has also asked that it may type is it handed anything else: a way to
     // put what was typed on this loop's own queue, behind the keyboard.
+    // The advisory helper, if the settings name one: started in the folder
+    // Lillignode saves in, and handed to the engine, which asks it.
+    if let Some(named) = app.config.helper.clone() {
+        let folder = page_folder.clone().unwrap_or_else(|| std::path::PathBuf::from("."));
+        match lillignode::helper::Helper::start(&named.command, &named.args, &named.env, &folder) {
+            Ok(helper) => {
+                app.engine.set_helper(helper);
+                app.helper_started(Ok(()));
+            }
+            Err(why) => app.helper_started(Err(why)),
+        }
+    }
     let publisher = app.config.page.then(snapshot::channel).and_then(|(publisher, reader)| {
         let typing = app.config.page_can_type.then(|| {
             let tx = tx.clone();

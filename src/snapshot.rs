@@ -65,6 +65,9 @@ pub struct AgentCopy {
     pub over_cost_warning: Option<u64>,
     /// It was refused, and starting it again as it is would be refused too.
     pub start_again_cannot_help: bool,
+    /// What the helper guesses it is doing, while its status is Unknown and
+    /// its screen has not changed since. A guess, never its own report.
+    pub guess: Option<crate::helper::Guess>,
 }
 
 impl AgentCopy {
