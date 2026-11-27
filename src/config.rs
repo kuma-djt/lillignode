@@ -166,6 +166,23 @@ pub struct Config {
     /// nothing seems to be doing. Its answers are shown as guesses. Off
     /// unless named.
     pub helper: Option<BoardAdapter>,
+    /// How the first screen is laid out, while the owner chooses among
+    /// three: the gnome and the large name side by side, stacked in the
+    /// middle, or the name across the top.
+    pub welcome_look: WelcomeLook,
+}
+
+/// The three ways the first screen can be laid out.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WelcomeLook {
+    /// The gnome on the left, the large name beside it, the key under the name.
+    #[default]
+    Beside,
+    /// The gnome, the large name and the key, one under another, in the middle.
+    Stacked,
+    /// Down the left: the gnome, the large name twice as wide where there is
+    /// room, then the key.
+    Wide,
 }
 
 /// The program that keeps the Board: what to run, and its arguments.
@@ -214,6 +231,7 @@ impl Default for Config {
             page_can_start: false,
             board_adapter: None,
             helper: None,
+            welcome_look: WelcomeLook::Beside,
         }
     }
 }
@@ -255,6 +273,7 @@ struct File {
     page_can_start: Option<bool>,
     board_adapter: Option<BoardAdapter>,
     helper: Option<BoardAdapter>,
+    welcome_look: Option<String>,
 }
 
 fn parse(text: &str) -> Result<Config, String> {
@@ -337,6 +356,15 @@ fn parse(text: &str) -> Result<Config, String> {
         }
         helper => helper,
     };
+    config.welcome_look = match file.welcome_look.as_deref() {
+        None | Some("beside") => WelcomeLook::Beside,
+        Some("stacked") => WelcomeLook::Stacked,
+        Some("wide") => WelcomeLook::Wide,
+        Some(_) => {
+            return Err("give \"welcome_look\" one of \"beside\", \"stacked\" or \"wide\", or take it out"
+                .to_string())
+        }
+    };
     let Some(specs) = file.menu_keys else { return Ok(config) };
     if specs.is_empty() {
         return Err(
@@ -416,6 +444,15 @@ mod tests {
         let mut c = parse(r#"{"menu_keys": ["alt+m", "f9", "ctrl+t", "f2"]}"#).unwrap();
         c.function_keys_first();
         assert_eq!(c.menu_keys_label(), "F9 or F2 or Alt+M or Ctrl+T");
+    }
+
+    #[test]
+    fn the_welcome_look_is_one_of_three_and_beside_unless_said() {
+        assert_eq!(Config::default().welcome_look, WelcomeLook::Beside);
+        assert_eq!(parse(r#"{"welcome_look": "stacked"}"#).unwrap().welcome_look, WelcomeLook::Stacked);
+        assert_eq!(parse(r#"{"welcome_look": "wide"}"#).unwrap().welcome_look, WelcomeLook::Wide);
+        assert_eq!(parse(r#"{"welcome_look": "beside"}"#).unwrap().welcome_look, WelcomeLook::Beside);
+        assert!(parse(r#"{"welcome_look": "big"}"#).unwrap_err().contains("\"welcome_look\""));
     }
 
     #[test]

@@ -23,6 +23,7 @@
 //! once for each draw. An agent's own screen is the one thing read from the
 //! engine directly, because it is the emulator's.
 
+use crate::config::WelcomeLook;
 use ratatui::backend::Backend;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
@@ -387,34 +388,200 @@ fn draw_report<B: AgentBackend>(frame: &mut Frame, area: Rect, app: &App<B>, p: 
     frame.render_widget(Paragraph::new(rows), padded(area));
 }
 
-/// No agents are open: the gnome, what Lillignode is in two sentences, and
-/// the key that starts an agent. The key comes first, so a short window
-/// cuts the pitch and never the way forward.
+/// Draws a part of the welcome screen from a row; returns the row under it.
+type DrawFrom = Box<dyn Fn(&mut Frame, u16) -> u16>;
+
+/// The key drawn on the welcome screen: its rows and columns.
+const KEY_H: u16 = look::START_KEY.len() as u16;
+const KEY_W: u16 = 7;
+
+/// No agents are open. Seen in this order, without reading: the gnome, the
+/// name drawn large, and the key that starts an agent, drawn as a key. All
+/// else is smaller and lower. Laid out one of three ways (the settings'
+/// `welcome_look`). A window too small for everything gives up the large
+/// name first, then the gnome, then the small text; never the key.
 fn draw_welcome<B: AgentBackend>(frame: &mut Frame, area: Rect, app: &App<B>, p: Palette) {
-    let gnome_width = look::GNOME.iter().map(|row| row.len()).max().unwrap_or(0) as u16;
-    let gnome_fits = area.width >= gnome_width + 30 && area.height > look::GNOME.len() as u16;
-    let text_x = if gnome_fits { area.x + 2 + gnome_width + 3 } else { area.x + 2 };
-    if gnome_fits {
-        let rows: Vec<Line> = look::GNOME
-            .iter()
-            .enumerate()
-            .map(|(i, row)| {
-                let style = if i < look::GNOME_HAT_ROWS { p.copper() } else { Style::default() };
-                Line::from(Span::styled(*row, style))
-            })
-            .collect();
+    let area = Rect::new(area.x + 2, area.y + 1, area.width.saturating_sub(4), area.height.saturating_sub(1));
+    let gnome_w = look::GNOME.iter().map(|row| row.len()).max().unwrap_or(0) as u16;
+    let gnome_h = look::GNOME.len() as u16;
+    let name_w = |wide: bool| fit::width(&look::block_name(wide)[0]) as u16;
+    let key_w = KEY_W + 3 + "start an agent".len() as u16;
+    // The small text goes at the foot of the screen; the gnome, the name and
+    // the key are set in the middle of the room above it, so the screen is
+    // used and the one action is where the eye lands.
+    let small = small_lines(app, p);
+    let small_h = wrapped_height(&small, area.width).min(area.height.saturating_sub(4));
+    let above = area.height.saturating_sub(small_h + 1);
+    let fits_tall = |h: u16| above >= h;
+    // Decide what fits, give up the large name first, then the gnome.
+    let (hero_h, draw): (u16, DrawFrom) = match app.config.welcome_look {
+        WelcomeLook::Beside => {
+            // Gnome | name over key.
+            let gnome = area.width >= gnome_w + 4 + key_w && fits_tall(gnome_h);
+            let right_x = if gnome { area.x + gnome_w + 4 } else { area.x };
+            let room = (area.x + area.width).saturating_sub(right_x);
+            let big = room >= name_w(false) && fits_tall(5 + 1 + KEY_H);
+            let stack = if big { 5 } else { 1 } + 1 + KEY_H;
+            let h = if gnome { stack.max(gnome_h) } else { stack };
+            (
+                h,
+                Box::new(move |frame: &mut Frame, y: u16| {
+                    if gnome {
+                        draw_gnome(frame, area.x, y, p);
+                    }
+                    // The name and key level with the gnome's middle.
+                    let top = y + h.saturating_sub(stack) / 2;
+                    let under = draw_name_or_word(frame, right_x, top, room, big, false, p);
+                    draw_key(frame, right_x, under + 1, p);
+                    y + h
+                }),
+            )
+        }
+        WelcomeLook::Stacked => {
+            // One column in the middle: gnome, name, key.
+            let centre = move |w: u16| area.x + area.width.saturating_sub(w) / 2;
+            let big = area.width >= name_w(false) && fits_tall(5 + 1 + KEY_H);
+            let gnome = big && fits_tall(gnome_h + 1 + 5 + 1 + KEY_H);
+            let h = if gnome { gnome_h + 1 } else { 0 } + if big { 5 } else { 1 } + 1 + KEY_H;
+            (
+                h,
+                Box::new(move |frame: &mut Frame, mut y: u16| {
+                    if gnome {
+                        draw_gnome(frame, centre(gnome_w), y, p);
+                        y += gnome_h + 1;
+                    }
+                    let w = if big { name_w(false) } else { "Lillignode".len() as u16 };
+                    let under = draw_name_or_word(frame, centre(w), y, area.width, big, false, p);
+                    draw_key(frame, centre(key_w), under + 1, p)
+                }),
+            )
+        }
+        WelcomeLook::Wide => {
+            // Down the left, read top to bottom: the gnome, the name twice
+            // as wide where there is room, then the key.
+            let wide = area.width >= name_w(true) && fits_tall(gnome_h + 1 + 5 + 1 + KEY_H);
+            let big = wide || (area.width >= name_w(false) && fits_tall(5 + 1 + KEY_H));
+            let name_h = if big { 5 } else { 1 };
+            let gnome = fits_tall(gnome_h + 1 + name_h + 1 + KEY_H) && area.width >= gnome_w;
+            let h = if gnome { gnome_h + 1 } else { 0 } + name_h + 1 + KEY_H;
+            (
+                h,
+                Box::new(move |frame: &mut Frame, mut y: u16| {
+                    if gnome {
+                        draw_gnome(frame, area.x, y, p);
+                        y += gnome_h + 1;
+                    }
+                    let under = draw_name_or_word(frame, area.x, y, area.width, big, wide, p);
+                    draw_key(frame, area.x, under + 1, p)
+                }),
+            )
+        }
+    };
+    let top = area.y + above.saturating_sub(hero_h) / 2;
+    let under = draw(frame, top);
+    // At the foot, or right under the key where the window is short.
+    let small_top = (area.y + area.height).saturating_sub(small_h).max(under + 1);
+    let room = (area.y + area.height).saturating_sub(small_top);
+    if room > 0 && area.width >= 20 {
         frame.render_widget(
-            Paragraph::new(rows),
-            Rect::new(area.x + 2, area.y + 1, gnome_width, look::GNOME.len() as u16),
+            Paragraph::new(small).wrap(Wrap { trim: false }),
+            Rect::new(area.x, small_top, area.width, room),
         );
     }
-    // In order of need: what this is, the one step to take, how it goes,
-    // the menu keys; then the rest. A short window loses the rest first.
-    let mut text = vec![Line::from(vec![
-        Span::styled("Lillignode", p.copper()),
-        Span::raw(" runs AI coding agents side by side and shows what each one is doing."),
-    ])];
-    text.extend(first_agent_lines(app, p));
+}
+
+/// How many rows `lines` take when wrapped to `width` columns, near enough
+/// to place them: a word that does not fit moves the rest down a row.
+fn wrapped_height(lines: &[Line], width: u16) -> u16 {
+    let width = usize::from(width.max(1));
+    lines
+        .iter()
+        .map(|line| {
+            let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+            let (mut rows, mut col) = (1usize, 0usize);
+            for word in text.split(' ') {
+                let w = fit::width(word);
+                if col > 0 && col + 1 + w > width {
+                    rows += 1;
+                    col = w;
+                } else {
+                    col += if col > 0 { 1 } else { 0 } + w;
+                }
+            }
+            rows as u16
+        })
+        .sum()
+}
+
+/// The gnome, its hat in copper.
+fn draw_gnome(frame: &mut Frame, x: u16, y: u16, p: Palette) {
+    let width = look::GNOME.iter().map(|row| row.len()).max().unwrap_or(0) as u16;
+    let rows: Vec<Line> = look::GNOME
+        .iter()
+        .enumerate()
+        .map(|(i, row)| {
+            Line::from(Span::styled(
+                *row,
+                if i < look::GNOME_HAT_ROWS { p.copper() } else { Style::default() },
+            ))
+        })
+        .collect();
+    let room = frame.area();
+    let height = (look::GNOME.len() as u16).min((room.y + room.height).saturating_sub(y));
+    frame.render_widget(Paragraph::new(rows), Rect::new(x, y, width, height));
+}
+
+/// The name, drawn large in copper where `big`, or as one copper word.
+/// Returns the row under it.
+fn draw_name_or_word(frame: &mut Frame, x: u16, y: u16, room: u16, big: bool, wide: bool, p: Palette) -> u16 {
+    let bold_copper = p.copper().add_modifier(Modifier::BOLD);
+    if big {
+        let rows: Vec<Line> =
+            look::block_name(wide).into_iter().map(|r| Line::from(Span::styled(r, bold_copper))).collect();
+        let width = fit::width(&look::block_name(wide)[0]) as u16;
+        frame.render_widget(Paragraph::new(rows), Rect::new(x, y, width.min(room), 5));
+        y + 5
+    } else {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled("Lillignode", bold_copper))),
+            Rect::new(x, y, room.min(10), 1),
+        );
+        y + 1
+    }
+}
+
+/// The key that starts an agent, drawn as a large key, and what it does
+/// beside its middle row. Returns the row under it.
+fn draw_key(frame: &mut Frame, x: u16, y: u16, p: Palette) -> u16 {
+    let bold = Style::default().add_modifier(Modifier::BOLD);
+    let rows: Vec<Line> = look::START_KEY
+        .iter()
+        .enumerate()
+        .map(|(i, row)| {
+            let mut spans = vec![Span::styled(*row, p.key())];
+            if i == look::START_KEY.len() / 2 {
+                spans.push(Span::raw("   "));
+                spans.push(Span::styled("start an agent", bold));
+            }
+            Line::from(spans)
+        })
+        .collect();
+    let room = frame.area();
+    let height = KEY_H.min((room.y + room.height).saturating_sub(y));
+    let width = (KEY_W + 3 + "start an agent".len() as u16).min((room.x + room.width).saturating_sub(x));
+    frame.render_widget(Paragraph::new(rows), Rect::new(x, y, width, height));
+    y + KEY_H
+}
+
+fn small_lines<B: AgentBackend>(app: &App<B>, p: Palette) -> Vec<Line<'static>> {
+    let mut text = vec![Line::from(Span::raw(
+        "Lillignode runs AI coding agents side by side and shows what each one is doing.",
+    ))];
+    text.extend(first_agent_lines(app, p).into_iter().skip_while(|l| {
+        // The key above says "start an agent"; the sentence that says the
+        // same is not said twice.
+        l.spans.iter().map(|s| s.content.as_ref()).collect::<String>().starts_with("No agents yet. Press n")
+    }));
     text.push(Line::from(Span::raw(format!("{} opens Lillignode's menu.", app.config.menu_keys_label()))));
     text.push(Line::default());
     text.push(Line::from(Span::styled(
@@ -428,11 +595,7 @@ fn draw_welcome<B: AgentBackend>(frame: &mut Frame, area: Rect, app: &App<B>, p:
             p.dim(),
         )));
     }
-    let width = (area.x + area.width).saturating_sub(text_x + 2);
-    frame.render_widget(
-        Paragraph::new(text).wrap(Wrap { trim: false }),
-        Rect::new(text_x, area.y + 1, width, area.height.saturating_sub(1)),
-    );
+    text
 }
 
 /// The one step to take, which agents are on this machine, and what `n`

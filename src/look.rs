@@ -15,9 +15,48 @@ use crate::status::AgentStatus;
 use crate::workspace::Status;
 
 /// The only characters Lillignode itself draws that are not ASCII: the rule
-/// beside the sidebar (a light box-drawing line) and the mark where text
-/// was cut. A test holds every screen Lillignode draws to this list.
-pub const NOT_ASCII: [char; 2] = ['│', '…'];
+/// beside the sidebar (a light box-drawing line), the mark where text was
+/// cut, the full block the welcome screen's large name is built from, and
+/// the light box corners and line of the key drawn under it. A test holds
+/// every screen Lillignode draws to this list.
+pub const NOT_ASCII: [char; 8] = ['│', '…', '█', '┌', '┐', '└', '┘', '─'];
+
+/// The letters of the large name on the welcome screen, five rows each,
+/// `#` for a filled cell. Only the letters of "LILLIGNODE".
+const BLOCK_LETTERS: [(char, [&str; 5]); 7] = [
+    ('L', ["#   ", "#   ", "#   ", "#   ", "####"]),
+    ('I', ["###", " # ", " # ", " # ", "###"]),
+    ('G', [" ###", "#   ", "# ##", "#  #", " ###"]),
+    ('N', ["#  #", "## #", "# ##", "#  #", "#  #"]),
+    ('O', [" ## ", "#  #", "#  #", "#  #", " ## "]),
+    ('D', ["### ", "#  #", "#  #", "#  #", "### "]),
+    ('E', ["####", "#   ", "### ", "#   ", "####"]),
+];
+
+/// The name drawn large: five rows of full blocks, one column between
+/// letters. `wide` draws each cell two columns wide, for a wide window.
+pub fn block_name(wide: bool) -> [String; 5] {
+    let mut rows: [String; 5] = Default::default();
+    for (i, letter) in "LILLIGNODE".chars().enumerate() {
+        let Some((_, glyph)) = BLOCK_LETTERS.iter().find(|(c, _)| *c == letter) else { continue };
+        for (row, cells) in rows.iter_mut().zip(glyph) {
+            if i > 0 {
+                row.push_str(if wide { "  " } else { " " });
+            }
+            for cell in cells.chars() {
+                let drawn = if cell == '#' { '█' } else { ' ' };
+                row.push(drawn);
+                if wide {
+                    row.push(drawn);
+                }
+            }
+        }
+    }
+    rows
+}
+
+/// The key a person presses to start an agent, drawn as a large key.
+pub const START_KEY: [&str; 5] = ["┌─────┐", "│     │", "│  n  │", "│     │", "└─────┘"];
 
 /// The hat every gnome mark wears.
 pub const HAT: &str = "/\\";

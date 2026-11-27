@@ -733,7 +733,7 @@ fn main() {
     println!("A. First run");
     let mut s = Session::start(&sb);
     s.expect("empty workspace explains itself", "No agents yet.");
-    s.expect("empty workspace says what to press", "Press n to start one");
+    s.expect("empty workspace says what to press", "start an agent");
     s.expect("and names the menu keys", "Ctrl+Q or F12 opens Lillignode's menu");
     s.keys(b"n");
     s.expect("n asks which agent", "Agent to start:");

@@ -89,3 +89,44 @@ jobs:
           path: lillignode-macos-arm64-untested.tar.gz
           if-no-files-found: error
           retention-days: 30
+
+  # The first screen in a real Windows Terminal window: each of its three
+  # layouts at 100, 140 and 180 columns, as pictures. Nothing is typed and
+  # no agent starts. The pictures are kept with the run.
+  welcome-pictures:
+    name: The first screen in a real Windows Terminal window
+    runs-on: windows-2025
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Use the current stable Rust
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+      - name: Release build
+        run: cargo build --release --locked
+      - name: Microsoft's pseudo-terminal files, checked
+        run: powershell -ExecutionPolicy Bypass -File scripts\package-windows.ps1 -BesideBuild
+      - name: Windows Terminal, checked against its hash
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          curl.exe -sSL -o "$env:RUNNER_TEMP\wt.zip" 'https://github.com/microsoft/terminal/releases/download/v1.25.3131.0/Microsoft.WindowsTerminal_1.25.3131.0_x64.zip'
+          $h = (Get-FileHash "$env:RUNNER_TEMP\wt.zip" -Algorithm SHA256).Hash.ToLower()
+          if ($h -ne '273d6f1502eca1b5bd95c43f5d4d7ec72cc503df340102f8659717e5bead3437') { throw "wt.zip has hash $h" }
+          Expand-Archive "$env:RUNNER_TEMP\wt.zip" "$env:RUNNER_TEMP\wt"
+      - name: The pictures
+        shell: powershell
+        run: |
+          Set-DisplayResolution -Width 1920 -Height 1080 -Force
+          $t = (Get-ChildItem "$env:RUNNER_TEMP\wt" -Recurse -Filter WindowsTerminal.exe).FullName
+          powershell -ExecutionPolicy Bypass -File scripts\welcome-pictures.ps1 -Program "$PWD\target\release\lillignode.exe" -Terminal $t -Out "$env:RUNNER_TEMP\welcome"
+      - name: Keep the pictures
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: welcome-pictures
+          path: ${{ runner.temp }}\welcome
+          retention-days: 30

@@ -5051,7 +5051,7 @@ Cost",
     fn the_first_screen_says_how_to_start_an_agent_which_are_here_and_that_no_settings_is_fine() {
         let words = |app: &App<Fake>| -> String {
             let rows = screen(app, 160, 30);
-            rows.iter().map(|r| part(r, 43, 160).trim().to_string()).collect::<Vec<_>>().join(" ")
+            rows.iter().map(|r| part(r, 30, 160).trim().to_string()).collect::<Vec<_>>().join(" ")
         };
         let mut app = app_with_claude_agents(0);
         let text = words(&app);
@@ -5088,43 +5088,75 @@ Cost",
         assert!(app.bar().starts_with("Agent to start:    (Enter alone: codex"), "{}", app.bar());
         app.on_key(press(KeyCode::Esc));
 
-        // The narrowest window: what this is, the way forward, whole.
+        // The narrowest window: the way forward, whole.
         app.found_agents = Some(vec![("claude", "Claude Code")]);
         let rows = screen(&app, crate::ui::MIN_COLS, crate::ui::MIN_ROWS);
         let text: String =
-            rows.iter().map(|r| part(r, 43, 80).trim().to_string()).collect::<Vec<_>>().join(" ");
-        assert!(text.contains("runs AI coding agents side by side"), "{text}");
-        assert!(text.contains("No agents yet. Press n to start one."), "{text}");
-        assert!(text.contains("Found on this machine: claude (Claude Code)."), "{text}");
+            rows.iter().map(|r| part(r, 30, 80).trim().to_string()).collect::<Vec<_>>().join(" ");
+        assert!(text.contains("start an agent"), "{text}");
+        assert!(rows[1].contains("No agents yet. Press n."), "{}", rows[1]);
         // The menu keys: on the bar, at all times.
         let bar = &rows[crate::ui::MIN_ROWS as usize - 1];
         assert!(bar.starts_with("Ctrl+Q or F12: menu"), "{bar}");
     }
 
     #[test]
-    fn the_welcome_screen_shows_the_gnome_the_pitch_and_the_key_to_start() {
-        let app = app_with_claude_agents(0);
-        let rows = screen(&app, 100, 20);
-        let agent_area: Vec<String> = rows.iter().map(|r| part(r, 28, 100)).collect();
-        for (i, line) in crate::look::GNOME.iter().enumerate() {
-            assert!(agent_area[1 + i].starts_with(&format!("  {line}")), "{:?}", agent_area[1 + i]);
+    fn the_welcome_screen_shows_the_gnome_then_the_name_then_the_key_in_each_look() {
+        use crate::config::WelcomeLook;
+        let mut app = app_with_claude_agents(0);
+        app.found_agents = Some(vec![("claude", "Claude Code")]);
+        // Where on the screen something first is: its row and column.
+        let find = |rows: &[String], what: &str| -> Option<(usize, usize)> {
+            rows.iter().enumerate().find_map(|(y, r)| r.find(what).map(|x| (y, r[..x].chars().count())))
+        };
+        let gnome_hat = crate::look::GNOME[0].trim();
+        let name_single = "████ ███ ████ ████ ███";
+        let name_wide = "████████  ██████  ████████";
+        for look in [WelcomeLook::Beside, WelcomeLook::Stacked, WelcomeLook::Wide] {
+            app.config.welcome_look = look;
+            for cols in [100u16, 140, 180] {
+                let rows = screen(&app, cols, 40);
+                let all = rows.join("\n");
+                let gnome =
+                    find(&rows, gnome_hat).unwrap_or_else(|| panic!("{look:?} {cols}: no gnome\n{all}"));
+                let wide = look == WelcomeLook::Wide && cols >= 140;
+                let name = find(&rows, if wide { name_wide } else { name_single })
+                    .unwrap_or_else(|| panic!("{look:?} {cols}: no large name\n{all}"));
+                let key = find(&rows, "│  n  │   start an agent")
+                    .unwrap_or_else(|| panic!("{look:?} {cols}: no key\n{all}"));
+                // Gnome, name, key: in that order, down or across.
+                match look {
+                    WelcomeLook::Beside => {
+                        assert!(gnome.1 < name.1 && name.0 < key.0, "{look:?} {cols}\n{all}")
+                    }
+                    _ => assert!(gnome.0 < name.0 && name.0 < key.0, "{look:?} {cols}\n{all}"),
+                }
+                // Everything else smaller and lower: under the key.
+                let small = find(&rows, "Lillignode runs AI coding agents side by side")
+                    .unwrap_or_else(|| panic!("{look:?} {cols}: no small text\n{all}"));
+                assert!(small.0 > key.0, "{look:?} {cols}\n{all}");
+                for line in
+                    ["Found on this machine: claude (Claude Code).", "opens Lillignode's menu.", "never asks"]
+                {
+                    assert!(all.contains(line), "{look:?} {cols}: {line}\n{all}");
+                }
+                // The room is used: the large name is not at the top row.
+                assert!(name.0 > 2 || gnome.0 > 2, "{look:?} {cols}: all of it at the top\n{all}");
+            }
+            // A narrow or short window drops the large name first and keeps the key whole.
+            let rows = screen(&app, crate::ui::MIN_COLS, crate::ui::MIN_ROWS);
+            let all = rows.join("\n");
+            assert!(!all.contains('█'), "{look:?}: the large name is dropped first\n{all}");
+            assert!(all.contains("│  n  │   start an agent"), "{look:?}: the key stays\n{all}");
+            assert!(rows[11].starts_with("Ctrl+Q or F12: menu   n new agent   q quit"), "{}", rows[11]);
+            // Short but wide: no large name, the key whole.
+            let rows = screen(&app, 140, 14);
+            let all = rows.join("\n");
+            assert!(all.contains("│  n  │   start an agent"), "{look:?}: the key stays\n{all}");
         }
-        let text = agent_area.join("\n");
-        assert!(agent_area[1].contains("Lillignode runs AI coding agents side by side"), "{text}");
-        // The text column beside the gnome, read as one.
-        let column: String =
-            rows.iter().map(|r| part(r, 43, 100).trim().to_string()).collect::<Vec<_>>().join(" ");
-        assert!(column.contains("No agents yet. Press n to start one."), "{column}");
-        assert!(column.contains("never asks for your API keys or passwords."), "{column}");
-        assert!(column.contains("Ctrl+Q or F12 opens Lillignode's menu."), "{column}");
+        // The sidebar says the way forward at every size.
+        let rows = screen(&app, 100, 20);
         assert_eq!(part(&rows[1], 0, 27), " No agents yet. Press n.");
-
-        // The narrowest window: the key to start is still whole, and first.
-        let rows = screen(&app, crate::ui::MIN_COLS, crate::ui::MIN_ROWS);
-        let text: String =
-            rows[..9].iter().map(|r| part(r, 43, 80).trim().to_string()).collect::<Vec<_>>().join(" ");
-        assert!(text.contains("No agents yet. Press n to start one."), "{text}");
-        assert!(rows[11].starts_with("Ctrl+Q or F12: menu   n new agent   q quit"), "{}", rows[11]);
     }
 
     /// A window wide enough for two agents side by side.
