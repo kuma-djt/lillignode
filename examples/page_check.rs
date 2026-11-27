@@ -1570,7 +1570,7 @@ fn helper_section(sb: &Sandbox, port: u16, standin: &std::path::Path) {
         row["guess"] == "waiting" && row["state"] == "unknown" && row["needs_you"] == false,
         &row.to_string(),
     );
-    s.expect("the sidebar marks it as a guess", "Guess: waiting?");
+    s.expect("the sidebar keeps Unknown first and marks the guess", "Unknown (waiting?)");
     let asked = std::fs::read_to_string(&log).unwrap_or_default();
     let question = asked
         .lines()
@@ -1580,7 +1580,7 @@ fn helper_section(sb: &Sandbox, port: u16, standin: &std::path::Path) {
         "the helper was sent the agent's name and screen, and nothing else",
         question.as_ref().is_some_and(|q| {
             let keys: Vec<&String> = q.as_object().map(|o| o.keys().collect()).unwrap_or_default();
-            keys == ["agent", "ask", "screen"] && q["agent"] == "plain (work)"
+            keys == ["agent", "ask", "screen"] && q["agent"] == "plain"
         }),
         &asked,
     );
@@ -1624,6 +1624,20 @@ fn helper_section(sb: &Sandbox, port: u16, standin: &std::path::Path) {
     s.raw(CTRL_Q);
     s.keys(b"s");
     s.expect("and the status report keeps saying it", "It has stopped (it ended): no guesses are shown.");
+    s.keys(ESC);
+    quit_either_way(s);
+
+    // A line longer than it may send: stopped, ended, and said so.
+    with_helper("long");
+    let (mut s, _page, _) = start(sb);
+    s.keys(b"ok?");
+    s.pump_for(Duration::from_millis(500));
+    s.raw(CTRL_Q);
+    s.keys(b"s");
+    s.expect(
+        "a helper that sends a line too long is stopped, and the status report says why",
+        "It has stopped (it sent a line longer than 16384 bytes)",
+    );
     s.keys(ESC);
     quit_either_way(s);
 

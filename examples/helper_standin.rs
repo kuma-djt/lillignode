@@ -13,6 +13,7 @@
 //!   late     as above, but four seconds after the question
 //!   quit     says nothing and ends after hello
 //!   noise    a line that is not an answer before each answer
+//!   long     a line longer than Lillignode takes, at once
 //!
 //! It writes what it was asked to the file named by HELPER_STANDIN_LOG, if
 //! set, so a check can see what left Lillignode.
@@ -34,6 +35,10 @@ fn main() {
         if said.get("hello").is_some() {
             if mode == "quit" {
                 return;
+            }
+            if mode == "long" {
+                let _ = writeln!(out, "{}", "x".repeat(20 * 1024));
+                let _ = out.flush();
             }
             continue;
         }

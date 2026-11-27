@@ -168,7 +168,10 @@
       return ["Usage limit", ", the time it gave, " + at + ", passed " + limitSpan(Math.floor(gone / 60000)) + " ago"];
     }
     // A helper's guess: marked as one, after what the agent itself says.
-    if (agent.guess && agent.state === "unknown") return [agent.words, " · a helper guesses: " + agent.guess];
+    if (agent.guess && agent.state === "unknown") {
+      const still = since(agent.text_changed_at);
+      return [agent.words, " · a helper guesses: " + agent.guess + (still === null ? "" : " (screen still " + ago(still) + ")")];
+    }
     const age = since(agent.reported_at);
     return [agent.words, age === null ? "" : ", " + ago(age) + " ago"];
   }
@@ -363,6 +366,14 @@
       standing.textContent = standing.textContent === READ_ONLY
         ? "This page can start your saved teams in Lillignode. It sends nothing else."
         : standing.textContent + " It can also start your saved teams.";
+    }
+    // A helper the settings name is sent agents' screens: said here too,
+    // since "sends nothing back" is about the page, not about the helper.
+    if (state && state.helper) {
+      const h = state.helper;
+      standing.textContent += h.stopped
+        ? " The helper you named (" + h.name + ") has stopped: no guesses are shown."
+        : " A helper you named (" + h.name + ") is sent the screen of any agent that reports nothing, and its guesses are marked as guesses.";
     }
     standing.className = token || acts || starts ? "can-type" : "";
     const key = target();

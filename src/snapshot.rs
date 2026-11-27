@@ -96,6 +96,9 @@ pub struct StateCopy {
     /// Whether cost is read at all.
     pub cost_on: bool,
     pub cost_summary: cost::Summary,
+    /// The helper the settings name, by its program's file name, and
+    /// whether it has stopped. None when no helper is named.
+    pub helper: Option<(String, bool)>,
 }
 
 impl StateCopy {
@@ -281,6 +284,7 @@ mod tests {
                 question: None,
                 cost_on: false,
                 cost_summary: cost::Summary::new(),
+                helper: None,
             },
             screens: Vec::new(),
             events: Vec::new(),

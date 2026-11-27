@@ -1037,6 +1037,9 @@ fn state_json(published: &Published, agent: Option<u64>, after: u64, tokens: Tok
         "missed": published.events_let_go.saturating_sub(after),
         "typing": tokens.0,
         "acting": tokens.1,
+        // A helper the settings name is said on the page too: it is sent
+        // agents' screens.
+        "helper": state.helper.as_ref().map(|(name, stopped)| json!({ "name": name, "stopped": stopped })),
     })
 }
 
@@ -1081,6 +1084,8 @@ fn agent_json(agent: &AgentCopy, front: bool) -> Value {
         "reported_at": agent.reported_at.map(millis),
         // A helper's guess, while there is one: shown as a guess.
         "guess": agent.guess.map(|g| g.word()),
+        // Since when the screen the guess is about has been still.
+        "text_changed_at": agent.text_changed_at.map(millis),
         // When the agent said its usage limit resets, for the page to say
         // in the reader's own time; null when it did not say.
         "resets_at": match &agent.status {
@@ -1148,6 +1153,7 @@ mod tests {
                 question: None,
                 cost_on: false,
                 cost_summary: crate::cost::Summary::new(),
+                helper: None,
             },
             screens: Vec::new(),
             events: (1..=as_of)

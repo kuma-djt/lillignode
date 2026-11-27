@@ -146,7 +146,7 @@ fn status_words(agent: &AgentCopy) -> String {
         Some(AgentStatus::NeedsYou(_)) => "NEEDS YOU".to_string(),
         // A helper's guess, marked as one: never the agent's own word.
         Some(AgentStatus::Unknown(_)) if agent.guess.is_some() => {
-            format!("Guess: {}?", agent.guess.map_or("", |g| g.word()))
+            format!("Unknown ({}?)", agent.guess.map_or("", |g| g.word()))
         }
         Some(reported) => reported.short(),
         None => agent.program.text(),

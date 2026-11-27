@@ -443,7 +443,7 @@ impl<B: AgentBackend> Engine<B> {
         for e in self.ws.entries() {
             let unknown = matches!(e.own_status(), Some(AgentStatus::Unknown(_)));
             if let (true, Some(at)) = (unknown, e.term.text_changed_at()) {
-                still.push((e.key(), at, e.label()));
+                still.push((e.key(), at, e.name()));
             }
         }
         // Gone: reported, closed, or its screen moved on.
@@ -641,6 +641,12 @@ impl<B: AgentBackend> Engine<B> {
             }),
             cost_on: self.ws.cost_on(),
             cost_summary: self.ws.cost_summary(),
+            helper: self.helper.as_ref().map(|h| {
+                let name = std::path::Path::new(h.command())
+                    .file_name()
+                    .map_or_else(|| h.command().to_string(), |n| n.to_string_lossy().to_string());
+                (name, h.stopped().is_some())
+            }),
         }
     }
 
@@ -1946,7 +1952,7 @@ mod tests {
         let _ = e.ws.focused_mut().unwrap().term.feed_at(b"\r\nAllow this?", long_ago);
         e.settle();
         let q = last_question(&asked).expect("asked");
-        assert_eq!(q["agent"], e.ws.entries()[0].label());
+        assert_eq!(q["agent"], e.ws.entries()[0].name(), "its name alone: not its folder");
         assert!(q["screen"].as_array().unwrap().iter().any(|l| l == "Allow this?"), "{q}");
         let ask = q["ask"].as_u64().unwrap();
         e.settle();

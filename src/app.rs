@@ -2790,7 +2790,12 @@ impl<B: AgentBackend> App<B> {
                 }
                 let guessed = self.engine.guess(e.key()).filter(|_| matches!(shown, AgentStatus::Unknown(_)));
                 match guessed {
-                    Some(guess) => out += &format!(". The sidebar shows it as Guess: {}?\n", guess.word()),
+                    Some(guess) => {
+                        out += &format!(
+                            ". The sidebar shows it as Unknown ({}?): the question mark marks the guess.\n",
+                            guess.word()
+                        )
+                    }
                     None => out += &format!(". The sidebar shows it as {}.\n", shown.short()),
                 }
                 if let (AgentStatus::Unknown(_), Some(guess)) = (&shown, guessed) {
@@ -2812,7 +2817,7 @@ impl<B: AgentBackend> App<B> {
                         Some(why) => {
                             format!(" It has stopped ({}): no guesses are shown.\n", fit::clip(&why, 80))
                         }
-                        None => "\n".to_string(),
+                        None => " Take \"helper\" out of the settings file to stop it.\n".to_string(),
                     };
                 }
                 // Said when a part, not the program itself, is why.
