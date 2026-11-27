@@ -43,14 +43,14 @@
 
   const READ_ONLY = "Read only. This page shows what Lillignode shows and sends nothing back.";
   const CAN_TYPE =
-    "This page can type to your agents: what you send under the terminal goes to the agent named there, " +
+    "This page can type to your agents: what you send from the message box goes to the agent named on it, " +
     "as if you had typed it in Lillignode.";
   const CAN_ACT =
     "This page can act on your Board: what you press on a card is passed to Lillignode, which adds it to " +
     "the Board's outbox.";
   const CAN_BOTH =
-    "This page can type to your agents and act on your Board. Text goes to the agent named under the " +
-    "terminal; what you press on a card goes to the Board's outbox.";
+    "This page can type to your agents and act on your Board. Text goes to the agent named on the " +
+    "message box; what you press on a card goes to the Board's outbox.";
   const NO_ANSWER =
     "No answer from Lillignode, so it is not known whether this was sent. Look at the agent's terminal " +
     "before sending it again.";
@@ -317,8 +317,8 @@
     if (acts && board && board.adapter) {
       const onward = board.adapter.name + ", ten seconds later unless you undo it.";
       standing.textContent = token
-        ? "This page can type to your agents and act on your Board. Text goes to the agent named under the " +
-          "terminal; what you press on a card goes to " + onward
+        ? "This page can type to your agents and act on your Board. Text goes to the agent named on the " +
+          "message box; what you press on a card goes to " + onward
         : "This page can act on your Board: what you press on a card is passed to Lillignode, which sends it to " + onward;
     }
     standing.className = token || acts ? "can-type" : "";
@@ -470,7 +470,7 @@
     else el("board").removeAttribute("aria-modal");
     el("board-open").setAttribute("aria-expanded", phone && boardOpen ? "true" : "false");
     const open = board ? (board.decide || []).length + (board.yours || []).length : 0;
-    el("board-open").textContent = open ? "Board (" + open + ")" : "Board";
+    el("board-open").textContent = open ? "Board: " + open + " to act on" : "Board";
     el("back-to-agents").textContent = "\u2190 All agents" + (state && state.agents.length > 1 ? " (" + state.agents.length + ")" : "");
   }
   function showAgentView() {

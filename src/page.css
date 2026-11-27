@@ -290,11 +290,23 @@ body.phone #board {
   transform: translateX(100%); transition: transform 0.22s ease-out; visibility: hidden;
 }
 body.phone.board-open #board { transform: translateX(0); visibility: visible; }
-#board-shade { position: fixed; top: var(--pinned-all, 0); right: 0; bottom: 0; left: 0; z-index: 35; background: rgba(0, 0, 0, 0.45); }
+#board-shade { position: fixed; top: var(--pinned-all, 0); right: 0; bottom: 0; left: 0; z-index: 35; background: rgba(0, 0, 0, 0.7); }
 /* Slides out before it is hidden, so the closing is seen too. */
 body.phone #board { transition: transform 0.22s ease-out, visibility 0s linear 0.22s; }
 body.phone.board-open #board { transition: transform 0.22s ease-out, visibility 0s; }
-body.phone #agents button { padding-top: 14px; padding-bottom: 14px; }
+body.phone #agents button { padding-top: 14px; padding-bottom: 14px; padding-right: 36px; position: relative; }
+/* A row opens its agent: shown by the mark at its end. */
+body.phone #agents button::after { content: "A"; position: absolute; right: 14px; top: 50%; transform: translateY(-50%); font-size: 26px; color: var(--cream-quiet); }
+/* One agent on a phone: its name, then the message box with whom it is to,
+   then the terminal. The box is never below a long screen, and never jumps
+   when the screen arrives. */
+body.phone[data-view="agent"] #middle { display: flex; flex-direction: column; }
+body.phone #back-to-agents { order: 0; align-self: flex-start; }
+body.phone #terminal-title { order: 1; }
+body.phone #typing { order: 2; margin-top: 4px; }
+body.phone #terminal-note { order: 3; }
+body.phone #first-run { order: 4; }
+body.phone #terminal { order: 5; max-height: 62vh; overflow: auto; }
 body.phone #terminal { font-size: 12px; }
 @media (prefers-reduced-motion: reduce) { body.phone #board { transition: none; } }
 
