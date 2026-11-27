@@ -189,7 +189,7 @@ mod tests {
     #[test]
     fn a_plain_program_is_named_by_its_file_without_folder_or_extension() {
         let name = |c| AgentKind::Program.name(c);
-        assert_eq!(name(r"C:\temp\lg-opts\two words\tell"), "tell");
+        assert_eq!(name(r"D:\tools\two words\tell"), "tell");
         assert_eq!(name(r"C:\tools\tell.cmd"), "tell");
         assert_eq!(name("/usr/local/bin/aider"), "aider");
         assert_eq!(name("powershell"), "powershell");

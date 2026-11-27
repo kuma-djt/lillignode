@@ -1315,7 +1315,7 @@ mod tests {
         let now = SystemTime::now();
         let mut t = claude(Instant::now());
         part(&mut t, "state=done:app=grok", now);
-        // P5: the program's own record is Done while a part is waiting.
+        // The program's own record is Done while a part is waiting.
         let title = b64("subagent: tests");
         part(&mut t, &format!("state=blocked:kind=permission:id=sub/1:title={title}"), now);
         assert_eq!(t.shown, AgentStatus::Done, "its own record stands");

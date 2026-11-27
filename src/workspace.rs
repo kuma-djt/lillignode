@@ -1245,7 +1245,7 @@ mod tests {
 
     #[test]
     fn a_program_started_from_a_full_path_is_named_by_its_file_and_a_saved_name_is_kept() {
-        let path = if cfg!(windows) { r"C:\temp\two words\tell.cmd" } else { "/tmp/two words/tell.cmd" };
+        let path = if cfg!(windows) { r"D:\tools\two words\tell.cmd" } else { "/tmp/two words/tell.cmd" };
         let mut ws = Workspace::new(Fake::default(), SIZE);
         ws.start_new(path, vec![], AgentKind::Program, root("a")).unwrap();
         ws.start_new(path, vec![], AgentKind::Program, root("a")).unwrap();

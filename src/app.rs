@@ -4148,7 +4148,7 @@ Cost",
         report(&mut app, 1, &format!("state=blocked:kind=permission:id=sub/1:title={title}"));
         assert!(app.after_events(), "the bell rings for a part as for the program");
         assert_eq!(app.needs_you_count(), 1);
-        // P5: its own record says Done, and the agent needs you.
+        // Its own record says Done while a part waits: the agent needs you.
         assert_eq!(app.engine.ws.entries()[0].own_status(), Some(AgentStatus::Done));
         assert_eq!(
             app.needs_you_notice().as_deref(),
@@ -4258,7 +4258,7 @@ Cost",
         for n in 0..70 {
             report(&mut app, 1, &format!("state=working:id=p{n}"));
         }
-        // P3 and P4 as the report words them.
+        // A part waiting, and a part not understood, as the report words them.
         report(&mut app, 1, "state=pondering:id=odd");
         report(&mut app, 1, "state=blocked:id=");
         let text = app.status_report_text();
@@ -4277,7 +4277,7 @@ Cost",
         assert!(!text.contains("(id p61)"), "{text}");
         assert!(text.contains("  and 54 more.\n"), "{text}");
         assert!(text.contains("Let go, to keep no more than 64: 8."), "{text}");
-        // P4: a part not understood leaves the program's status alone.
+        // A part not understood leaves the program's status alone.
         assert!(text.contains("Status: Needs you."), "{text}");
         assert_eq!(
             app.engine.ws.entries()[0].own_status(),
