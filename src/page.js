@@ -145,10 +145,16 @@
     // what the agent said is still all that is known.
     if (agent.state === "usage-limit") {
       if (agent.resets_at === null || agent.resets_at === undefined) return ["Usage limit", ", reset time not given"];
-      const left = -since(agent.resets_at);
-      const at = new Date(agent.resets_at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
-      if (Number.isNaN(left)) return ["Usage limit", ", resets " + at];
-      if (left > 60000) return ["Usage limit", ", resets " + at + " (in " + ago(left) + ")"];
+      const gone = since(agent.resets_at);
+      // A day or more ahead, the day is said too.
+      const far = gone !== null && -gone >= 86400000;
+      const at = new Date(agent.resets_at).toLocaleString([], far
+        ? { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }
+        : { hour: "numeric", minute: "2-digit" });
+      if (gone === null) return ["Usage limit", ", resets " + at];
+      const left = -gone;
+      // Ahead, minutes counted up, as the terminal counts them.
+      if (left > 60000) return ["Usage limit", ", resets " + at + " (in " + ago(Math.ceil(left / 60000) * 60000) + ")"];
       if (left > -60000) return ["Usage limit", ", resets about now (" + at + ")"];
       return ["Usage limit", ", said it resets at " + at + ", " + ago(-left) + " ago"];
     }
@@ -159,7 +165,6 @@
   function agentClass(agent) {
     if (!agent.running) return "gone";
     if (agent.needs_you) return "needs-you";
-    if (agent.state === "usage-limit") return "usage-limit";
     return agent.state === "working" ? "working" : "";
   }
 

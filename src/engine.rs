@@ -414,7 +414,9 @@ impl<B: AgentBackend> Engine<B> {
             .ws
             .entries()
             .iter()
-            .filter_map(|e| match e.reported() {
+            // The program's own status: a part waiting meanwhile neither
+            // hides the limit nor makes it said again.
+            .filter_map(|e| match e.own_status() {
                 Some(AgentStatus::UsageLimit(resets)) => Some((e.key(), e.label(), resets)),
                 _ => None,
             })
@@ -1841,6 +1843,15 @@ mod tests {
         e.settle();
         let again = Event::ReachedUsageLimit { agent, label, resets: None };
         assert_eq!(e.take_events(), [again], "reached again");
+        // A part that waits on the user meanwhile, then stops: the limit
+        // is neither hidden nor said a second time.
+        report(&mut e, 1, "state=blocked:id=sub:kind=question");
+        e.settle();
+        let events = e.take_events();
+        assert!(events.iter().all(|ev| !matches!(ev, Event::ReachedUsageLimit { .. })), "{events:?}");
+        report(&mut e, 1, "state=clear:id=sub");
+        e.settle();
+        assert!(e.take_events().is_empty(), "the limit was never left, so it is not said again");
     }
 
     #[test]

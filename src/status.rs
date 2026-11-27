@@ -222,7 +222,8 @@ pub fn resets_words(resets: Option<u64>, now: SystemTime) -> String {
     match resets.checked_sub(now) {
         Some(0) | None if resets + 60 > now => "resets within a minute".to_string(),
         Some(ahead) => format!("resets in {}", span(ahead)),
-        None => format!("said it resets {} ago", span(now - resets)),
+        // Past it, whole minutes gone, counted down as the page counts them.
+        None => format!("said it resets {} ago", span((now - resets) / 60 * 60)),
     }
 }
 
@@ -434,6 +435,10 @@ fn read_part(body: &[u8]) -> Option<(String, PartChange)> {
         .filter(|t| !t.is_empty());
     let state = match parts.state {
         Some("clear") => return Some((id, PartChange::Clear)),
+        // A part at a usage limit waits on time, not on the user.
+        Some("blocked" | "error") if parts.limit == Some("usage") => {
+            PartState::Said(AgentStatus::UsageLimit(reset_time(parts.resets, SystemTime::now())))
+        }
         Some("blocked") => PartState::Waiting(kind_of(parts.kind)),
         Some("working") => PartState::Said(AgentStatus::Working),
         Some("done") => PartState::Said(AgentStatus::Done),
@@ -947,7 +952,8 @@ impl Track {
 
     /// The agent's shell marked a new prompt. A program that was working or
     /// waiting when its shell came back has gone, so what it last said no
-    /// longer holds. Done, Idle and Error stay, as the format says.
+    /// longer holds: a usage limit too, which is a kind of waiting. Done,
+    /// Idle and Error stay, as the format says.
     pub fn prompt(&mut self) {
         if !self.source.may_be_a_shell() {
             return;
@@ -955,7 +961,10 @@ impl Track {
         self.source.at_prompt();
         if matches!(
             self.shown,
-            AgentStatus::Working | AgentStatus::WorkingQuiet(_) | AgentStatus::NeedsYou(_)
+            AgentStatus::Working
+                | AgentStatus::WorkingQuiet(_)
+                | AgentStatus::NeedsYou(_)
+                | AgentStatus::UsageLimit(_)
         ) {
             self.shown = AgentStatus::Unknown(Why::AtPrompt);
             // What is shown now was not reported by anything.
@@ -1094,9 +1103,11 @@ mod tests {
         is("state=blocked:limit=tokens:resets=1", AgentStatus::NeedsYou(None));
         is(&format!("state=working:limit=usage:resets={soon}"), AgentStatus::Working);
         is("state=done:limit=usage", AgentStatus::Done);
-        // A part's report keeps the part's own rules: waiting.
+        // A part at a usage limit is not waiting on the user either, and
+        // never becomes the program's own status.
         let (_, change) = read_part(b"state=blocked:id=sub:limit=usage").unwrap();
-        assert_eq!(change, PartChange::Set(PartState::Waiting(None), None));
+        assert_eq!(change, PartChange::Set(PartState::Said(AgentStatus::UsageLimit(None)), None));
+        assert!(matches!(status("state=blocked:id=sub:limit=usage"), Reading::Task));
         // Short in the sidebar; the time in the words.
         assert_eq!(AgentStatus::UsageLimit(Some(soon)).short(), "Usage limit");
         assert!(AgentStatus::UsageLimit(Some(soon)).text().starts_with("Usage limit, resets in "));
@@ -1114,6 +1125,8 @@ mod tests {
         assert_eq!(resets_words(Some(now), at(now)), "resets within a minute");
         assert_eq!(resets_words(Some(now - 30), at(now)), "resets within a minute");
         assert_eq!(resets_words(Some(now - 4 * 60), at(now)), "said it resets 4 min ago");
+        assert_eq!(resets_words(Some(now - 61), at(now)), "said it resets 1 min ago");
+        assert_eq!(resets_words(Some(now - 4 * 60 - 59), at(now)), "said it resets 4 min ago");
     }
 
     #[test]
@@ -1785,6 +1798,8 @@ mod tests {
         for (body, after) in [
             ("state=working", AgentStatus::Unknown(Why::AtPrompt)),
             ("state=blocked:kind=question", AgentStatus::Unknown(Why::AtPrompt)),
+            ("state=blocked:limit=usage", AgentStatus::Unknown(Why::AtPrompt)),
+            ("state=error:limit=usage", AgentStatus::Unknown(Why::AtPrompt)),
             ("state=done", AgentStatus::Done),
             ("state=error", AgentStatus::Error(None)),
             ("state=idle", AgentStatus::Idle),
