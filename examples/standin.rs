@@ -327,6 +327,7 @@ fn status_mode() {
                 // in 2 h 5 min, one with no time, one that said it reset 5 min ago.
                 b'L' => format!("state=blocked:app=claude-code:limit=usage:resets={}", from_now(7500)),
                 b'N' => "state=blocked:app=claude-code:limit=usage".to_string(),
+                b'D' => format!("state=blocked:app=claude-code:limit=usage:resets={}", from_now(27 * 3600)),
                 b'X' => format!("state=error:app=claude-code:limit=usage:resets={}", from_now(-300)),
                 0x04 => return,
                 _ => continue,

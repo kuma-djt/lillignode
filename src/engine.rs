@@ -54,6 +54,10 @@ pub enum Event {
     /// says the limit resets (seconds since 1970), if it gave one. Once
     /// each time it begins; no bell: it is waiting on time, not on you.
     ReachedUsageLimit { agent: AgentKey, label: String, resets: Option<u64> },
+    /// This agent was at a usage limit and has reported something else
+    /// (or its shell came back): what was said of the limit is no longer
+    /// true.
+    LeftUsageLimit { agent: AgentKey, label: String },
     /// The status of an agent of this kind, which is expected to report it,
     /// is not reaching Lillignode. Once for each kind, until it is back.
     StatusUnavailable { kind: AgentKind, why: Why },
@@ -113,6 +117,7 @@ impl Event {
             Event::ReachedUsageLimit { agent, label, .. } => {
                 ("reached-usage-limit", Some(*agent), Some(label))
             }
+            Event::LeftUsageLimit { agent, label } => ("left-usage-limit", Some(*agent), Some(label)),
             Event::StatusUnavailable { .. } => ("status-unavailable", None, None),
             Event::StatusBack { .. } => ("status-back", None, None),
             Event::CostUnreadable { agent, label } => ("cost-unreadable", Some(*agent), Some(label)),
@@ -361,9 +366,10 @@ pub struct Engine<B: AgentBackend> {
     /// The kinds of agent whose status has been said not to reach
     /// Lillignode, and has not come back since.
     status_said: Vec<AgentKind>,
-    /// The agents at a usage limit when last settled, so reaching one is
-    /// said once each time.
-    limited: Vec<AgentKey>,
+    /// The agents at a usage limit when last settled, with the reset time
+    /// each gave, so reaching one is said once, and said again only when
+    /// the time it gives changes.
+    limited: Vec<(AgentKey, Option<u64>)>,
     /// A cost that could not be read has been said in this run.
     cost_said: bool,
     /// The last save after a change failed.
@@ -422,11 +428,20 @@ impl<B: AgentBackend> Engine<B> {
             })
             .collect();
         for (agent, label, resets) in &limited {
-            if !self.limited.contains(agent) {
+            if !self.limited.contains(&(*agent, *resets)) {
                 said.push(Event::ReachedUsageLimit { agent: *agent, label: label.clone(), resets: *resets });
             }
         }
-        self.limited = limited.into_iter().map(|(agent, ..)| agent).collect();
+        // An agent no longer at a limit: said, so what was said of it can
+        // be taken down.
+        for (agent, _) in &self.limited {
+            if !limited.iter().any(|(at, ..)| at == agent) {
+                if let Some(e) = self.ws.entries().iter().find(|e| e.key() == *agent) {
+                    said.push(Event::LeftUsageLimit { agent: *agent, label: e.label() });
+                }
+            }
+        }
+        self.limited = limited.into_iter().map(|(agent, _, resets)| (agent, resets)).collect();
         let broken = |e: &Entry| match e.reported() {
             Some(AgentStatus::Unknown(why)) if why.is_breakage() => Some(why),
             _ => None,
@@ -1836,9 +1851,18 @@ mod tests {
         assert!(!e.ws.entries()[0].is_settled(), "closing it may lose what it was doing: asked first");
         e.settle();
         assert!(e.take_events().is_empty(), "still at the limit: not said again");
+        // Another reset time: said again.
+        report(&mut e, 1, &format!("state=blocked:limit=usage:resets={}", soon + 600));
+        e.settle();
+        let moved = Event::ReachedUsageLimit { agent, label: label.clone(), resets: Some(soon + 600) };
+        assert_eq!(e.take_events(), [moved]);
         report(&mut e, 1, "state=working");
         e.settle();
-        assert!(e.take_events().is_empty());
+        assert_eq!(
+            e.take_events(),
+            [Event::LeftUsageLimit { agent, label: label.clone() }],
+            "its end is said"
+        );
         report(&mut e, 1, "state=error:limit=usage");
         e.settle();
         let again = Event::ReachedUsageLimit { agent, label, resets: None };

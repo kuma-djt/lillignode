@@ -1524,7 +1524,7 @@ fn usage_limit_section(sb: &Sandbox, port: u16) {
     s.writer.flush().unwrap();
     s.expect(
         "the terminal says the agent reached a usage limit, and when it says it resets",
-        "says it has reached a usage limit (resets in 2 h 5 min)",
+        "says it has reached a usage limit and cannot work until it resets (resets in 2 h 5 min)",
     );
     s.expect("the sidebar shows it as its own state", "Usage limit");
     let at = state_when(&page, |r| r["state"] == "usage-limit");
@@ -1571,7 +1571,7 @@ fn usage_limit_section(sb: &Sandbox, port: u16) {
     .clone();
     check(
         "past the time it said, Lillignode does not decide the limit has passed",
-        r["state"] == "usage-limit" && r["words"] == "Usage limit, said it resets 5 min ago",
+        r["state"] == "usage-limit" && r["words"] == "Usage limit, the time it gave passed 5 min ago",
         &r.to_string(),
     );
     // Any other report ends it.

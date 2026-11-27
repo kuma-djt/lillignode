@@ -206,24 +206,33 @@ impl AgentStatus {
 }
 
 /// When a usage limit resets, as the agent said it, against `now`: "resets
-/// in 2 h 5 min", "said it resets 4 min ago" (Lillignode never decides on
-/// its own that the limit has passed), or "reset time not given".
+/// in 2 h 5 min", "resets in 1 d 3 h", "resets within a minute", "the time
+/// it gave passed 4 min ago" (Lillignode never decides on its own that the
+/// limit has passed), or "reset time not given". The page counts the same
+/// way (`page.js`, `limitSpan`).
 pub fn resets_words(resets: Option<u64>, now: SystemTime) -> String {
     let Some(resets) = resets else { return "reset time not given".to_string() };
     let now = now.duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_secs());
-    let span = |secs: u64| {
-        let minutes = secs.div_ceil(60);
-        match (minutes / 60, minutes % 60) {
-            (0, m) => format!("{m} min"),
-            (h, 0) => format!("{h} h"),
-            (h, m) => format!("{h} h {m} min"),
-        }
-    };
+    if resets.abs_diff(now) < 60 {
+        return "resets within a minute".to_string();
+    }
     match resets.checked_sub(now) {
-        Some(0) | None if resets + 60 > now => "resets within a minute".to_string(),
-        Some(ahead) => format!("resets in {}", span(ahead)),
-        // Past it, whole minutes gone, counted down as the page counts them.
-        None => format!("said it resets {} ago", span((now - resets) / 60 * 60)),
+        // Ahead, minutes counted up; past it, whole minutes gone.
+        Some(ahead) => format!("resets in {}", span_minutes(ahead.div_ceil(60))),
+        None => format!("the time it gave passed {} ago", span_minutes((now - resets) / 60)),
+    }
+}
+
+/// Minutes said in days, hours and minutes, the largest two that are not
+/// zero: "4 min", "2 h 5 min", "3 h", "1 d 3 h", "2 d".
+pub fn span_minutes(minutes: u64) -> String {
+    let (days, hours, mins) = (minutes / 1440, minutes / 60 % 24, minutes % 60);
+    match (days, hours, mins) {
+        (0, 0, m) => format!("{m} min"),
+        (0, h, 0) => format!("{h} h"),
+        (0, h, m) => format!("{h} h {m} min"),
+        (d, 0, _) => format!("{d} d"),
+        (d, h, _) => format!("{d} d {h} h"),
     }
 }
 
@@ -1121,12 +1130,14 @@ mod tests {
         assert_eq!(resets_words(Some(now + 2 * 3600 + 5 * 60), at(now)), "resets in 2 h 5 min");
         assert_eq!(resets_words(Some(now + 3600), at(now)), "resets in 1 h");
         assert_eq!(resets_words(Some(now + 90), at(now)), "resets in 2 min");
-        assert_eq!(resets_words(Some(now + 20), at(now)), "resets in 1 min");
+        assert_eq!(resets_words(Some(now + 20), at(now)), "resets within a minute");
         assert_eq!(resets_words(Some(now), at(now)), "resets within a minute");
         assert_eq!(resets_words(Some(now - 30), at(now)), "resets within a minute");
-        assert_eq!(resets_words(Some(now - 4 * 60), at(now)), "said it resets 4 min ago");
-        assert_eq!(resets_words(Some(now - 61), at(now)), "said it resets 1 min ago");
-        assert_eq!(resets_words(Some(now - 4 * 60 - 59), at(now)), "said it resets 4 min ago");
+        assert_eq!(resets_words(Some(now - 4 * 60), at(now)), "the time it gave passed 4 min ago");
+        assert_eq!(resets_words(Some(now - 61), at(now)), "the time it gave passed 1 min ago");
+        assert_eq!(resets_words(Some(now - 4 * 60 - 59), at(now)), "the time it gave passed 4 min ago");
+        assert_eq!(resets_words(Some(now + 27 * 3600), at(now)), "resets in 1 d 3 h");
+        assert_eq!(resets_words(Some(now + 48 * 3600), at(now)), "resets in 2 d");
     }
 
     #[test]

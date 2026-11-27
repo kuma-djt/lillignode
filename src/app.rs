@@ -288,6 +288,9 @@ pub struct App<B: AgentBackend> {
     pub board_adapter: Option<crate::adapter::Link>,
     /// The program named, as said in the status report.
     board_adapter_named: Option<String>,
+    /// The last usage-limit notice, and whose: taken down when that agent
+    /// leaves the limit, so it never says what is no longer true.
+    limit_notice: Option<(String, String)>,
     /// The team a question about a team is about.
     team_asked: String,
     /// The fingerprint of the team as the question showed it: the answer
@@ -555,6 +558,7 @@ impl<B: AgentBackend> App<B> {
             board_folder,
             board_adapter: None,
             board_adapter_named: None,
+            limit_notice: None,
             team_asked: String::new(),
             team_digest: String::new(),
             page_starts: false,
@@ -593,11 +597,28 @@ impl<B: AgentBackend> App<B> {
                     continue;
                 }
                 // Waiting on time, not on you: said, with no bell.
-                Event::ReachedUsageLimit { label, resets, .. } => format!(
-                    "{label} says it has reached a usage limit ({}). Lillignode changed nothing; the sidebar \
-                     shows it until the agent reports something else.",
-                    crate::status::resets_words(resets, std::time::SystemTime::now())
-                ),
+                Event::ReachedUsageLimit { label, resets, .. } => {
+                    let text = format!(
+                        "{label} says it has reached a usage limit and cannot work until it resets ({}). \
+                         Wait for it, or switch it to another account or plan. The sidebar shows the limit \
+                         until it says otherwise.",
+                        crate::status::resets_words(resets, std::time::SystemTime::now())
+                    );
+                    self.limit_notice = Some((label, text.clone()));
+                    text
+                }
+                // What was said of the limit is no longer true: taken down,
+                // if it is still up.
+                Event::LeftUsageLimit { label, .. } => {
+                    if let Some((who, text)) = self.limit_notice.take() {
+                        if who != label {
+                            self.limit_notice = Some((who, text));
+                        } else if self.notice.as_deref() == Some(text.as_str()) {
+                            self.notice = None;
+                        }
+                    }
+                    continue;
+                }
                 Event::StatusBack { kind } => {
                     self.take_back_unknown_notice(kind);
                     continue;
@@ -3784,6 +3805,41 @@ Cost",
         report(&mut app, 1, "state=working:app=claude-code");
         report(&mut app, 1, PERMISSION);
         assert!(!app.after_events());
+    }
+
+    #[test]
+    fn a_usage_limit_rings_no_bell_says_what_to_do_and_its_notice_goes_when_it_ends() {
+        let mut app = app_with_claude_agents(2);
+        let soon =
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() + 7500;
+        report(&mut app, 1, &format!("state=blocked:app=claude-code:limit=usage:resets={soon}"));
+        assert!(!app.after_events(), "no bell: it waits on time, not on you");
+        let said = app.notice.clone().unwrap_or_default();
+        assert!(
+            said.starts_with("Claude Code (a) says it has reached a usage limit and cannot work until it resets (resets in 2 h 5 min).")
+                && said.contains("Wait for it, or switch it to another account or plan."),
+            "{said}"
+        );
+        assert_eq!(app.needs_you_count(), 0);
+        // No time given now: said again, so nothing stale stays up.
+        report(&mut app, 1, "state=blocked:app=claude-code:limit=usage");
+        app.after_events();
+        assert!(
+            app.notice.clone().unwrap_or_default().contains("(reset time not given)"),
+            "{:?}",
+            app.notice
+        );
+        // Another agent's notice is not taken down by this one's end.
+        report(&mut app, 1, "state=idle:app=claude-code");
+        app.after_events();
+        assert_eq!(app.notice, None, "its end takes the notice down");
+        app.notice = Some("something else".into());
+        report(&mut app, 1, "state=blocked:app=claude-code:limit=usage");
+        app.after_events();
+        app.notice = Some("something else".into());
+        report(&mut app, 1, "state=idle:app=claude-code");
+        app.after_events();
+        assert_eq!(app.notice.as_deref(), Some("something else"), "a later notice is left");
     }
 
     #[test]

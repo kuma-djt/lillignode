@@ -271,12 +271,12 @@ An agent's status is what the agent says it is. Lillignode reads the status repo
 The proposal has no way to say "I have reached a usage limit" or when it resets, and no agent says it today. Lillignode reads two keys of its own beside a `blocked` or `error` report, as the proposal allows ("unknown keys must be ignored", so a terminal that does not know them shows the agent as blocked):
 
 ```
-ESC ] 7501 ; state=blocked:limit=usage:resets=1764201600 BEL
+ESC ] 7501 ; state=blocked:limit=usage:resets=1795788000 BEL
 ```
 
 - `limit=usage` marks a usage limit. `resets=` is when the agent says it resets, in whole seconds since 1970 (UTC).
 - **Shown as its own state:** `~ Usage limit` in the sidebar, not yellow and not red, with no bell; a notice says when it resets ("resets in 2 h 5 min"); the page gives the time in the reader's own time zone.
-- **Never a guess.** No `resets`, or one before 2020 or more than 31 days ahead: "reset time not given". Past the time, Lillignode still shows what the agent said ("said it resets 4 min ago") until the agent reports something else.
+- **Never a guess.** No `resets`, or one before 2020 or more than 31 days ahead: "reset time not given". Past the time, Lillignode still shows what the agent said ("the time it gave passed 4 min ago") until the agent reports something else, or, for a program not known by name, until its shell's prompt comes back.
 - Lillignode does not read an agent's screen for words like "usage limit reached": that would be guessing at its state.
 
 ### Which programs, and how we know

@@ -133,6 +133,15 @@
     return front ? front.key : state.agents.length ? state.agents[0].key : null;
   }
 
+  // Minutes as days, hours and minutes, the largest two that are not zero,
+  // as the terminal says them (status.rs, span_minutes).
+  function limitSpan(minutes) {
+    const d = Math.floor(minutes / 1440), h = Math.floor(minutes / 60) % 24, m = minutes % 60;
+    if (d === 0 && h === 0) return m + " min";
+    if (d === 0) return m === 0 ? h + " h" : h + " h " + m + " min";
+    return h === 0 ? d + " d" : d + " d " + h + " h";
+  }
+
   // What a row says after the name: the state, and how old it is.
   function stateWords(agent) {
     if (!agent.running) return [agent.words, ""];
@@ -152,11 +161,11 @@
         ? { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }
         : { hour: "numeric", minute: "2-digit" });
       if (gone === null) return ["Usage limit", ", resets " + at];
-      const left = -gone;
-      // Ahead, minutes counted up, as the terminal counts them.
-      if (left > 60000) return ["Usage limit", ", resets " + at + " (in " + ago(Math.ceil(left / 60000) * 60000) + ")"];
-      if (left > -60000) return ["Usage limit", ", resets about now (" + at + ")"];
-      return ["Usage limit", ", said it resets at " + at + ", " + ago(-left) + " ago"];
+      if (Math.abs(gone) < 60000) return ["Usage limit", ", resets within a minute (" + at + ")"];
+      // Ahead, minutes counted up; past it, whole minutes gone: as the
+      // terminal counts them (status.rs, resets_words).
+      if (gone < 0) return ["Usage limit", ", resets " + at + " (in " + limitSpan(Math.ceil(-gone / 60000)) + ")"];
+      return ["Usage limit", ", the time it gave, " + at + ", passed " + limitSpan(Math.floor(gone / 60000)) + " ago"];
     }
     const age = since(agent.reported_at);
     return [agent.words, age === null ? "" : ", " + ago(age) + " ago"];
@@ -252,6 +261,8 @@
     }
     const notes = [];
     if (agent.program_note) notes.push(agent.program_note);
+    // Why an agent at a usage limit is quiet, where its terminal is seen.
+    if (agent.running && agent.state === "usage-limit") notes.push(stateWords(agent).join("") + ".");
     if (!screen) notes.push("Waiting for its screen.");
     else if (screen.scrolled_back) {
       notes.push("Someone is reading this agent's history in Lillignode. This is what they see, not its live screen.");
