@@ -199,6 +199,23 @@ pub enum WelcomeLook {
     Wide,
 }
 
+impl Config {
+    /// The environment variables named for the Board's program and the
+    /// helper: given to those programs only, and taken out of every agent's
+    /// environment.
+    pub fn withheld_from_agents(&self) -> Vec<String> {
+        let mut names: Vec<String> = Vec::new();
+        for program in [&self.board_adapter, &self.helper].into_iter().flatten() {
+            for name in &program.env {
+                if !names.iter().any(|n| n.eq_ignore_ascii_case(name)) {
+                    names.push(name.clone());
+                }
+            }
+        }
+        names
+    }
+}
+
 /// The program that keeps the Board: what to run, and its arguments.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -493,6 +510,18 @@ mod tests {
         assert_eq!(parse(r#"{"welcome_look": "beside"}"#).unwrap().welcome_look, WelcomeLook::Beside);
         assert!(parse(r#"{"welcome_look": "big"}"#).unwrap_err().contains("\"welcome_look\""));
         assert_eq!(parse(r#"{"welcome_look": "Stacked"}"#).unwrap().welcome_look, WelcomeLook::Stacked);
+    }
+
+    #[test]
+    fn what_the_boards_program_and_the_helper_are_given_is_withheld_from_agents() {
+        assert!(Config::default().withheld_from_agents().is_empty());
+        let c = parse(
+            r#"{"page": true, "page_can_act": true,
+                "board_adapter": {"command": "a", "env": ["SERVICE_URL", "SERVICE_KEY"]},
+                "helper": {"command": "h", "env": ["service_key", "GUESS_KEY"]}}"#,
+        )
+        .unwrap();
+        assert_eq!(c.withheld_from_agents(), ["SERVICE_URL", "SERVICE_KEY", "GUESS_KEY"]);
     }
 
     #[test]

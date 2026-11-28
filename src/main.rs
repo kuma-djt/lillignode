@@ -188,7 +188,8 @@ fn main() -> ExitCode {
     };
 
     let (tx, rx) = mpsc::channel::<Msg>();
-    let backend = LocalAgents::new(tx.clone());
+    // What the Board's program and the helper are given is theirs alone.
+    let backend = LocalAgents::new(tx.clone()).withholding(config.withheld_from_agents());
     // Where the page's word is kept: beside the workspace.
     let page_folder = state_dir.as_ref().ok().cloned();
     let mut app =

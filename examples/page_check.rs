@@ -1247,13 +1247,32 @@ fn adapter_section(sb: &Sandbox, port: u16) {
     let _ = std::fs::remove_file(&outbox_file);
     let _ = std::fs::remove_file(sb.state.join(lillignode::board::SENT));
     let logged = || std::fs::read_to_string(&log).unwrap_or_default();
+    // A variable the settings name for the adapter, as a service's key
+    // would be: the adapter's alone, never an agent's.
     let named = serde_json::json!({ "page": true, "page_port": port, "page_can_act": true,
-        "board_adapter": { "command": adapter, "args": [cards, log] } });
+        "board_adapter": { "command": adapter, "args": [cards, log], "env": ["ADAPTER_STANDIN_SECRET"] } });
     settings(sb, &named.to_string());
+    let standin = here.parent().unwrap().join(format!("standin{ext}"));
+    owned::launcher(&sb.launchers, &standin, "envcheck", "env ADAPTER_STANDIN_SECRET ADAPTER_STANDIN_PROBE");
     // A variable Lillignode has and the settings do not name: it must not
     // reach the adapter.
-    let mut s = Session::start_with(sb, &sb.state, &[("ADAPTER_STANDIN_PROBE", "1")]);
+    let mut s = Session::start_with(
+        sb,
+        &sb.state,
+        &[("ADAPTER_STANDIN_PROBE", "1"), ("ADAPTER_STANDIN_SECRET", "not-for-agents")],
+    );
     let page = page_on_screen(&mut s, port);
+    s.new_agent("envcheck");
+    s.expect(
+        "an agent is not given the variable kept for the adapter, and is given the others",
+        "STANDIN ENV ADAPTER_STANDIN_SECRET=unset ADAPTER_STANDIN_PROBE=set",
+    );
+    // Closed again, so the sections after this one find the workspace as
+    // they expect it.
+    s.raw(CTRL_Q);
+    s.keys(b"x");
+    s.keys(b"y");
+    s.expect("the agent that looked is closed", "Closed envcheck");
     s.raw(CTRL_Q);
     s.keys(b"s");
     s.expect(

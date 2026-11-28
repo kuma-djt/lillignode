@@ -10,6 +10,8 @@
 //!   standin fullscreen      switch to a full-screen mode with no history
 //!   standin args ...        say the arguments it was given, each in [ ],
 //!                           as `STANDIN ARGS [a][b c]`, then echo
+//!   standin env NAME...    say whether each variable is in its environment
+//!                           (`STANDIN ENV NAME=set`), never its value, then echo
 //!   standin size            on each Enter, say what was typed and the size
 //!                           the terminal says it is: `SIZE <typed> is <c> by <r>`
 //!   standin claude ...      behave like Claude Code for conversation ids:
@@ -513,6 +515,18 @@ fn main() {
         }
         "args" => {
             say(&format!("STANDIN ARGS [{}]", args[1..].join("][")));
+            echo(|_| {});
+        }
+        // Whether each variable named is in its environment, by name only:
+        // its value is never shown.
+        "env" => {
+            let seen: Vec<String> = args[1..]
+                .iter()
+                .map(|name| {
+                    format!("{name}={}", if std::env::var_os(name).is_some() { "set" } else { "unset" })
+                })
+                .collect();
+            say(&format!("STANDIN ENV {}", seen.join(" ")));
             echo(|_| {});
         }
         "stream" => {

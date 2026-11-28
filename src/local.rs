@@ -20,12 +20,32 @@ pub struct LocalAgents<E> {
     next_id: u32,
     running: HashMap<AgentId, Running>,
     events: Sender<E>,
+    /// Environment variables no agent is given, whatever Lillignode was
+    /// started with: those the settings name for the Board's program or the
+    /// helper, which are for that program alone (a service's key, say).
+    withheld: Vec<String>,
 }
 
 impl<E: From<AgentEvent> + Send + 'static> LocalAgents<E> {
     pub fn new(events: Sender<E>) -> Self {
-        Self { next_id: 1, running: HashMap::new(), events }
+        Self { next_id: 1, running: HashMap::new(), events, withheld: Vec::new() }
     }
+
+    /// Never give an agent these environment variables.
+    pub fn withholding(mut self, names: Vec<String>) -> Self {
+        self.withheld = names;
+        self
+    }
+}
+
+/// An agent's command, with the variables it must not see taken out of the
+/// environment it would otherwise inherit from Lillignode. On Windows the
+/// names are matched without regard to case, as Windows matches them.
+fn without(mut cmd: CommandBuilder, withheld: &[String]) -> CommandBuilder {
+    for name in withheld {
+        cmd.env_remove(name);
+    }
+    cmd
 }
 
 fn pty_size(size: Size) -> PtySize {
@@ -233,7 +253,7 @@ impl<E: From<AgentEvent> + Send + 'static> AgentBackend for LocalAgents<E> {
         let failed = |e: &dyn std::fmt::Display| StartError::Failed(e.to_string());
         let pair = native_pty_system().openpty(pty_size(size)).map_err(|e| failed(&e))?;
 
-        let mut cmd = command_for(&program, &spec.args);
+        let mut cmd = without(command_for(&program, &spec.args), &self.withheld);
         cmd.cwd(&spec.folder);
         let mut child = pair.slave.spawn_command(cmd).map_err(|e| failed(&e))?;
         // The agent holds its own end now; keeping ours open would stop the
@@ -358,6 +378,37 @@ mod tests {
         let cmd = command_for(Path::new(r"C:\tools\codex.exe"), &[]);
         assert_eq!(cmd.get_argv().len(), 1);
         assert!(cmd.get_env(LAUNCHER_VARIABLE).is_none());
+    }
+
+    #[test]
+    fn an_agent_is_never_given_a_variable_the_settings_keep_for_another_program() {
+        // A variable in Lillignode's own environment, as a key set in the
+        // window Lillignode was started from would be.
+        let name = format!("LILLIGNODE_TEST_SECRET_{}", std::process::id());
+        std::env::set_var(&name, "not-for-agents");
+        let plain = command_for(Path::new("standin"), &[]);
+        assert_eq!(
+            plain.get_env(&name).and_then(|v| v.to_str()),
+            Some("not-for-agents"),
+            "inherited unless withheld"
+        );
+        let other = format!("LILLIGNODE_TEST_URL_{}", std::process::id());
+        std::env::set_var(&other, "https://example.invalid");
+        let withheld = vec![name.clone(), other.clone(), "LILLIGNODE_TEST_NOT_SET".to_string()];
+        let cmd = without(command_for(Path::new("standin"), &[]), &withheld);
+        assert!(cmd.get_env(&name).is_none() && cmd.get_env(&other).is_none());
+        // The rest of the environment is left as it was.
+        assert!(cmd.get_env("PATH").is_some() || cmd.get_env("Path").is_some());
+        // A launcher goes through the interpreter: withheld there too.
+        let cmd = without(command_for(Path::new("C:/npm/claude.cmd"), &[]), &withheld);
+        assert!(cmd.get_env(&name).is_none());
+        // On Windows a name in other letters is the same variable.
+        if cfg!(windows) {
+            let cmd = without(command_for(Path::new("standin"), &[]), &[name.to_lowercase()]);
+            assert!(cmd.get_env(&name).is_none());
+        }
+        std::env::remove_var(&name);
+        std::env::remove_var(&other);
     }
 
     #[test]
