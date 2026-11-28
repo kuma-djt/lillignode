@@ -307,6 +307,18 @@ An agent that sends no status reports shows Unknown. You may name one program of
 - It runs in the folder Lillignode saves in, with only what a program needs from your environment plus the variables named in `env`. If it ends, that is said, and nothing more is asked.
 - **The lines:** to it, `{"hello":1}` then `{"ask":7,"agent":"Claude Code (web)","screen":["…"]}`; from it, `{"answer":7,"guess":"waiting"}`, with `waiting`, `working`, `done` or `unsure`. `examples/helper_standin.rs` is a stand-in that guesses from the last line of the screen.
 
+#### A small model on your own machine as the helper
+
+Any program that speaks those lines can be the helper, including a small language model you run yourself, on this machine, with no service behind it. Point `"helper"` at the program that runs it, with full paths:
+
+```json
+{ "helper": { "command": "C:/Python311/python.exe", "args": ["C:/models/waiting/waiting_gnome.py"], "env": [] } }
+```
+
+- **It must answer within 3 seconds,** or its answer is not shown. A model on the CPU that is asked only about the last part of a screen can; check yours: Lillignode's status report says when the helper is late or has stopped.
+- **It is sent the screen of any agent that reports nothing.** A model that runs on this machine keeps it here; one that calls a service sends it there.
+- **Its guesses are guesses,** marked as such, never a reason to ring or to show an agent as needing you. In a trial of one such small model against recorded screens, it was right about a question waiting on screen and about an agent busy working, and too often said "waiting?" about an idle prompt. Not part of the download: you bring the program and the model.
+
 ### Which programs, and how we know
 
 Three levels of evidence, strongest first. Everything checked by hand was on Windows 11 in Windows Terminal, in November 2026.
