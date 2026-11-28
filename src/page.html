@@ -11,11 +11,16 @@
 <body>
 <header>
   <h1>Lillignode</h1>
-  <p id="standing" data-short="Read only">Read only. This page shows what Lillignode shows and sends nothing back.</p>
-  <p id="contact">Waiting to hear from Lillignode.</p>
-  <!-- At phone width only: the Board slides in from the right. -->
-  <button type="button" id="board-open" class="phone-only" aria-controls="board" aria-expanded="false">Board</button>
+  <p id="contact"><span class="dot" aria-hidden="true"></span><span id="contact-words">Waiting to hear from Lillignode.</span></p>
+  <button type="button" id="board-count" hidden></button>
+  <button type="button" id="about-open" aria-controls="about" aria-expanded="false" title="What this page can do">?<span class="sr"> What this page can do</span></button>
 </header>
+
+<!-- What this page can do: shown once, on the first visit, then behind "?". -->
+<section id="about" hidden aria-label="What this page can do">
+  <p id="standing">Read only. This page shows what Lillignode shows and sends nothing back.</p>
+  <button type="button" id="about-close">Got it</button>
+</section>
 
 <section id="blocking" hidden>
   <h2 id="blocking-title">Blocking now</h2>
@@ -71,11 +76,8 @@
 
   <section id="board" aria-labelledby="board-title">
     <h2 id="board-title">Board</h2>
-    <button type="button" id="board-close" class="phone-only">Close the Board</button>
     <p id="board-note" class="quiet">Reading the Board.</p>
     <p id="board-said" role="status" hidden></p>
-    <!-- Where an adapter keeps the Board: what came of each action sent to it. -->
-    <ul id="board-sent-on" hidden></ul>
     <section id="board-decide" hidden>
       <h3>Decide</h3>
       <ul id="board-decide-list"></ul>
@@ -91,8 +93,11 @@
     <p id="board-not-read" class="quiet" hidden></p>
   </section>
 </main>
-<!-- At phone width, behind the open Board: a tap here closes it. -->
-<div id="board-shade" class="phone-only" hidden></div>
+<!-- At phone width only: the two views, and how many cards wait on the Board. -->
+<nav id="tabs" class="phone-only" aria-label="Agents or Board">
+  <button type="button" id="tab-agents" aria-pressed="true">Agents</button>
+  <button type="button" id="tab-board" aria-pressed="false">Board<span class="badge" hidden></span></button>
+</nav>
 
 <!-- Said aloud to a screen reader only when who is waiting, or contact, changes: not every second. -->
 <p id="announce" role="status" aria-live="assertive"></p>

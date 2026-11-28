@@ -118,7 +118,7 @@ pub fn depth(asked: Colors, var: impl Fn(&str) -> Option<String>, windows: bool)
 pub enum Tone {
     /// Ordinary text.
     Plain,
-    /// Working: the brightest ordinary text.
+    /// Working: teal, the page's colour for it, and bold.
     Strong,
     /// Needs you. The one meaning of yellow.
     NeedsYou,
@@ -167,7 +167,7 @@ impl Palette {
     pub fn tone(self, tone: Tone) -> Style {
         match tone {
             Tone::Plain => Style::default(),
-            Tone::Strong => Style::default().add_modifier(Modifier::BOLD),
+            Tone::Strong => self.fg((0x4F, 0xB3, 0xA5), 73, Some(Color::Cyan)).add_modifier(Modifier::BOLD),
             Tone::NeedsYou => self.needs_you_text(),
             Tone::Good => self.fg((0x8F, 0xBF, 0x6A), 107, Some(Color::Green)),
             Tone::Dim => self.dim(),

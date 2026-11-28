@@ -1498,7 +1498,7 @@ fn teams_section(sb: &Sandbox, port: u16) {
     let (outcome, words) = start_team(&page, &token, &run, "web", &print);
     check(
         "a start from the page while the window is asking is refused",
-        outcome == "refused" && words.contains("asking something"),
+        outcome == "refused" && words.contains("asking for a team's name. Finish it or press Esc there"),
         &words,
     );
     s.expect("and the name being typed is still there", "Team: we");

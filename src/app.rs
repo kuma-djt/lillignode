@@ -1435,13 +1435,8 @@ impl<B: AgentBackend> App<B> {
         if !self.config.page_can_start {
             return (TypedOutcome::Refused, "This page cannot start teams. Nothing was started.".to_string());
         }
-        if !matches!(self.mode, Mode::Normal) {
-            return (
-                TypedOutcome::Refused,
-                "Lillignode's window is asking something or being typed in. Nothing was started. Try again \
-                 once it is answered."
-                    .to_string(),
-            );
+        if let Some(busy) = self.window_busy() {
+            return (TypedOutcome::Refused, format!("{busy} Nothing was started."));
         }
         if run != self.engine.run().to_string() {
             return (
@@ -1686,6 +1681,40 @@ impl<B: AgentBackend> App<B> {
             Refused::AgentStopped => format!("{label} is not running, so nothing was sent to it."),
             Refused::TooFewAgents(_) | Refused::TwoDoNotFit => self.view_refusal(why),
         }
+    }
+
+    /// What Lillignode's own window is doing, when it is not simply showing
+    /// an agent, and how to close it there: said when the page is refused
+    /// because of it. None while it shows an agent.
+    pub fn window_busy(&self) -> Option<String> {
+        let then = "then press it here again.";
+        Some(match &self.mode {
+            Mode::Normal => return None,
+            Mode::StatusReport => {
+                format!(
+                    "Lillignode's window is showing a status report. Press any key there to close it, {then}"
+                )
+            }
+            Mode::Menu => format!("Lillignode's menu is open. Press Esc there to close it, {then}"),
+            Mode::History => {
+                format!(
+                    "Lillignode's window is showing an agent's history. Press Esc there to go back, {then}"
+                )
+            }
+            Mode::NewAgent(_) => {
+                format!("Lillignode's window is asking which agent to start. Finish it or press Esc there, {then}")
+            }
+            Mode::TeamName(_) => {
+                format!(
+                    "Lillignode's window is asking for a team's name. Finish it or press Esc there, {then}"
+                )
+            }
+            Mode::Confirm(_) => {
+                format!(
+                    "Lillignode's window is asking a question on its bottom line. Answer it there, {then}"
+                )
+            }
+        })
     }
 
     /// The size of the window Lillignode last acted on.
@@ -3506,8 +3535,16 @@ mod tests {
         // Lillignode's window asking something: the page waits its turn.
         app.mode = Mode::TeamName("we".into());
         let (outcome, words) = app.start_team_from_page(&run, "web", &shown);
-        assert!(outcome == TypedOutcome::Refused && words.contains("asking something"), "{words}");
+        assert!(outcome == TypedOutcome::Refused && words.contains("asking for a team's name"), "{words}");
         assert!(matches!(&app.mode, Mode::TeamName(typed) if typed == "we"), "the typing is left as it was");
+        // The status report open: said so, and how to close it.
+        app.mode = Mode::StatusReport;
+        let (_, words) = app.start_team_from_page(&run, "web", &shown);
+        assert_eq!(
+            words,
+            "Lillignode's window is showing a status report. Press any key there to close it, then press it here \
+             again. Nothing was started."
+        );
         app.mode = Mode::Normal;
         let (outcome, words) = app.start_team_from_page(&run, "web", &shown);
         assert!(outcome == TypedOutcome::Sent && words.contains("Already open"), "{words}");

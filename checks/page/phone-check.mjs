@@ -185,8 +185,10 @@ try {
   check("each agent is listed with its state and age", rows !== null && /Needs you/.test(rows) && /Unknown|Idle/.test(rows) && /ago|waiting/.test(rows), rows);
   check("no terminal is shown on the list", !(await evaluate(visible("#terminal"))));
   check("the Board is not shown until asked for", !(await evaluate(visible("#board"))));
-  const boardButton = await until(text("#board-open"), (t) => /^Board: \d+ to act on$/.test(t || ""), 8000);
-  check("a Board button in the header says how many cards there are to act on", /^Board: \d+ to act on$/.test(boardButton || ""), boardButton);
+  const badge = await until(text("#tab-board"), (t) => /Board\s*\d+/.test(t || ""), 8000);
+  check("the Board's tab at the bottom says how many cards there are to act on", /Board\s*\d+/.test(badge || ""), badge);
+  const count = await evaluate(text("#board-count"));
+  check("and so does the header", /^\d+ to act on$/.test(count || ""), count);
   const blocked = await evaluate(text("#blocking"));
   check("who is blocking is on top", blocked !== null && blocked.includes("reporter") && blocked.includes("needs you"), blocked);
   const mark = await evaluate(`getComputedStyle(document.querySelector("#agents li button"), "::after").content`);
@@ -203,7 +205,8 @@ try {
   check("with the message box", await evaluate(visible("#typing-text")));
   const boxTop = await evaluate(top("#typing-text"));
   const termTop = await evaluate(top("#terminal"));
-  check("the message box, and whom it is to, come before the terminal, in sight", boxTop < termTop && boxTop < 844, `box ${boxTop}, terminal ${termTop}`);
+  check("like a chat: the terminal above, the message box at the bottom, in sight", termTop < boxTop && boxTop < 844, `box ${boxTop}, terminal ${termTop}`);
+  check("no tabs inside an agent", !(await evaluate(visible("#tabs"))));
   check("and a way back to all agents", ((await evaluate(text("#back-to-agents"))) || "").startsWith("\u2190 All agents"));
   check("the list is not shown behind it", !(await evaluate(visible("#agents"))));
   await picture("02-phone-agent");
@@ -235,26 +238,22 @@ try {
   check("the All agents button: the list again", (await evaluate(visible("#agents"))) && !(await evaluate(visible("#terminal"))));
   await sleep(1000);
 
-  console.log("C. The Board slides in from the right");
-  await tap("#board-open");
+  console.log("C. The Board's tab");
+  await tap("#tab-board");
   await sleep(700);
   check("the Board is shown", await evaluate(visible("#board")));
   const cards = await evaluate(text("#board"));
   check("with its cards", cards !== null && cards.includes("Decide"), cards);
-  const left = await evaluate(`document.getElementById("board").getBoundingClientRect().left`);
-  check("over the right of the screen, leaving a strip to tap", left > 0 && left < 100, String(left));
+  check("and not the agents", !(await evaluate(visible("#agents"))));
   const blockTop = await evaluate(`document.getElementById("blocking").getBoundingClientRect().bottom`);
   const boardTop = await evaluate(`document.getElementById("board").getBoundingClientRect().top`);
-  check("who is blocking is still in sight above the open Board", boardTop >= blockTop - 1, `blocking ends ${blockTop}, Board starts ${boardTop}`);
+  check("who is blocking is still in sight above the Board", boardTop >= blockTop - 1, `blocking ends ${blockTop}, Board starts ${boardTop}`);
+  check("the Board's tab is the one pressed", (await evaluate(`document.getElementById("tab-board").getAttribute("aria-pressed")`)) === "true");
   await picture("03-phone-board");
-  check(
-    "while it is open, nothing behind it takes keys, the header included",
-    await evaluate(`["middle", "agents-column", "blocking"].every((id) => document.getElementById(id).inert) && document.querySelector("header").inert`),
-  );
   await sleep(1500);
-  await evaluate(`document.getElementById("board-shade").click()`);
+  await tap("#tab-agents");
   await sleep(700);
-  check("a tap beside it closes it", !(await evaluate(visible("#board"))));
+  check("the Agents tab: the list again", (await evaluate(visible("#agents"))) && !(await evaluate(visible("#board"))));
 
   console.log("D. A tap on who is blocking opens that agent");
   await sleep(1000);
@@ -265,7 +264,7 @@ try {
 
   console.log("E. At desktop width: as before");
   await width(1400, 900);
-  check("no phone controls", !(await evaluate(visible("#board-open"))) && !(await evaluate(visible("#back-to-agents"))));
+  check("no phone controls", !(await evaluate(visible("#tabs"))) && !(await evaluate(visible("#back-to-agents"))));
   check("agents, terminal and Board side by side", (await evaluate(visible("#agents"))) && (await evaluate(visible("#terminal"))) && (await evaluate(visible("#board"))));
   await picture("05-desktop");
   check("nothing is wider than the screen", !(await evaluate("document.documentElement.scrollWidth > window.innerWidth + 1")));

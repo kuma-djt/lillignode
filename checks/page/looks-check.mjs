@@ -218,16 +218,16 @@ try {
     }
     await width(390, 844);
     await sleep(500);
-    const standing = await evaluate(`getComputedStyle(document.getElementById("standing"), "::after").content`);
-    check(`${look}: at phone width the header says it in a few words`, /^"(Can |Read only)/.test(standing || ""), standing);
-    const phoneButtons = await evaluate(tall("#board-open, #agents li button"));
-    check(`${look}: on a phone the Board button and the rows are at least 44 pixels tall`, phoneButtons.length > 0 && Math.min(...phoneButtons) >= 44, JSON.stringify(phoneButtons));
+    const headerHeight = await evaluate(`Math.round(document.querySelector("header").getBoundingClientRect().height)`);
+    check(`${look}: at phone width the header is one short row`, headerHeight <= 64, String(headerHeight));
+    const phoneButtons = await evaluate(tall("#tabs button, #agents li button"));
+    check(`${look}: on a phone the tabs and the rows are at least 44 pixels tall`, phoneButtons.length > 2 && Math.min(...phoneButtons) >= 44, JSON.stringify(phoneButtons));
     const firstRow = await evaluate(`document.querySelector("#agents li").getBoundingClientRect().top`);
     check(`${look}: an agent shows above the fold on a phone`, firstRow < 844 * 0.6, String(firstRow));
     check(`${look}: nothing is wider than the phone`, !(await evaluate("document.documentElement.scrollWidth > window.innerWidth + 1")));
     n += 1;
     await picture(`${String(n).padStart(2, "0")}-${look}-phone`);
-    await evaluate(`document.getElementById("board-open").click()`);
+    await evaluate(`document.getElementById("tab-board").click()`);
     await sleep(700);
     n += 1;
     await picture(`${String(n).padStart(2, "0")}-${look}-phone-board`);

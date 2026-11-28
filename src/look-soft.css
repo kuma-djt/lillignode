@@ -49,14 +49,10 @@ header { padding: 14px 20px; gap: 6px 24px; }
 #blocking { border-radius: 0 0 14px 14px; }
 .team-row { padding: 12px 14px; }
 
-/* A phone: the header says in a few words what this page can do, so the
-   agents show above the fold. */
 body.phone header { padding: 10px 14px; }
-body.phone #standing { font-size: 0; }
-body.phone #standing::after { content: attr(data-short); font-size: 14px; }
 body.phone #agents button { min-height: 72px; padding-right: 40px; }
 body.phone #agents button::after { right: 16px; }
 
 /* The phone's own controls are touch-sized too. */
-body.phone #board-open, body.phone #back-to-agents, body.phone #board-close { min-height: 44px; }
+body.phone #back-to-agents, #tabs button, #about button { min-height: 44px; }
 #blocking .blocking-open { min-height: 44px; }

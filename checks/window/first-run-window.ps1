@@ -154,10 +154,10 @@ try {
     $env:PATH = $basePath
     Open-Lillignode "$Out\state-a"
     $s = Wait-Text 'No agents yet' 40
-    $s = Wait-Text 'none Lillignode knows was found here' 10
+    $s = Wait-Text 'No agents yet. Press n to start any program' 10
     Save-Look 'first-screen-no-agent-found'
-    Step 'the first screen says what Lillignode is and how to start the first agent' ($s.Contains('runs AI coding agents side by side') -and $s.Contains('Or press n to start any other program')) 'looked for both'
-    Step 'with no known agent on the path, it says so' $s.Contains('none Lillignode knows was found here') ''
+    Step 'the first screen says what Lillignode is and how to start the first agent' ($s.Contains('runs AI coding agents side by side') -and $s.Contains('to start any program by its name')) 'looked for both'
+    Step 'with no known agent on the path, it says so' $s.Contains('No agents yet. Press n to start any program') ''
     Step 'with no settings file, it says none is needed' $s.Contains('No settings file') ''
     Close-Lillignode
 

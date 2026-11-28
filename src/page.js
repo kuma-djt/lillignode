@@ -81,6 +81,7 @@
   let sending = false;
   let asking = null;       // the send the reader is being asked about: its agent and text
   let drawn = null;        // the screen now drawn in the terminal
+  let saidFor = null;      // the agent what is said under the box is about
 
   // The 16 colours a terminal names, in the order terminals number them.
   const NAMED = [
@@ -322,34 +323,41 @@
     terminal.replaceChildren(...lines);
   }
 
+  // One dot and a few words in the header; the whole sentence when contact
+  // is lost, since then it matters most.
+  const contactWords = el("contact-words");
   function drawContact() {
     document.body.classList.toggle("stale", lostAt !== null);
+    contact.title = "";
     if (movedOn) {
       contact.className = "lost";
-      contact.textContent =
+      contactWords.textContent =
         "This page's address was replaced with a new one, so this page has stopped and will not change again. " +
         "Open the address Lillignode shows now: its menu key, then s.";
       return;
     }
     if (lostAt !== null) {
       contact.className = "lost";
-      contact.textContent = everHeard
+      contactWords.textContent = everHeard
         ? "Lost contact with Lillignode at " + clock(lostAt) + ". What is below is as it was then, and may be wrong now. Trying again."
         : "Cannot reach Lillignode. Nothing is shown. Trying again.";
       return;
     }
     if (heardAt === null) {
       contact.className = "";
-      contact.textContent = "Waiting to hear from Lillignode.";
+      contactWords.textContent = "Waiting to hear from Lillignode.";
       return;
     }
     const quiet = Date.now() - heardAt;
     if (quiet >= LATE_MS) {
       contact.className = "late";
-      contact.textContent = "No word from Lillignode for " + ago(quiet) + ". What is below may be out of date.";
+      contactWords.textContent = "No word for " + ago(quiet);
+      contact.title = "No word from Lillignode for " + ago(quiet) + ". What is shown may be out of date.";
     } else {
-      contact.className = "";
-      contact.textContent = "Last heard from Lillignode " + ago(quiet) + " ago.";
+      contact.className = "live";
+      // "Last heard" is left out at phone width, where the dot says it.
+      contactWords.replaceChildren(text("span", "long", "Last heard "), ago(quiet) + " ago");
+      contact.title = "Last heard from Lillignode " + ago(quiet) + " ago.";
     }
   }
 
@@ -406,6 +414,8 @@
     typingSend.disabled =
       sending || asking !== null || lostAt !== null || movedOn || typingText.value === "";
     typingAsk.hidden = asking === null;
+    // What came of a send is said under that agent's box only.
+    typingSaid.hidden = saidFor !== null && saidFor !== key;
   }
 
   function said(outcome, words) {
@@ -421,6 +431,7 @@
     if (!state || !state.typing || agent === null || (text === "") !== enter || sending) return;
     sending = true;
     asking = null;
+    saidFor = agent;
     said("", "Sending.");
     drawTyping();
     fetch("send", {
@@ -496,6 +507,30 @@
     drawTyping();
   });
 
+  // What the page can do, said once on the first visit and after that
+  // behind "?". Remembered in this browser only; where it cannot be, it is
+  // shown once each time the page is opened.
+  const about = el("about");
+  const aboutOpen = el("about-open");
+  const SEEN = "lillignode.about.seen";
+  let seen = false;
+  try {
+    seen = localStorage.getItem(SEEN) === "1";
+  } catch {}
+  function setAbout(open) {
+    about.hidden = !open;
+    aboutOpen.setAttribute("aria-expanded", open ? "true" : "false");
+    if (!open) {
+      seen = true;
+      try {
+        localStorage.setItem(SEEN, "1");
+      } catch {}
+    }
+  }
+  aboutOpen.addEventListener("click", () => setAbout(about.hidden));
+  el("about-close").addEventListener("click", () => setAbout(false));
+  setAbout(!seen);
+
   function draw() {
     drawContact();
     drawBlocking();
@@ -506,12 +541,18 @@
     say();
   }
 
-  // At phone width the page is one thing at a time: the list of agents, or
-  // one agent's terminal; the Board slides in over either. Same page, same
+  // At phone width the page is one thing at a time: the list of agents,
+  // one agent (its terminal, with the message box at the bottom like a
+  // chat), or the Board. Tabs at the bottom switch between the list and the
+  // Board; the Board's tab carries how many cards wait. Same page, same
   // data: only what is shown changes.
   const phoneWidth = window.matchMedia("(max-width: 760px)");
   let phoneView = "list";
-  let boardOpen = false;
+  const boardCount = el("board-count");
+  const tabBadge = document.querySelector("#tab-board .badge");
+  function toAct() {
+    return board ? (board.decide || []).length + (board.yours || []).length : 0;
+  }
   function drawPhone() {
     const phone = phoneWidth.matches;
     const agent = state && state.agents.find((s) => s.key === shownKey());
@@ -522,27 +563,23 @@
     }
     document.body.classList.toggle("phone", phone);
     document.body.dataset.view = phone ? phoneView : "";
-    document.body.classList.toggle("board-open", phone && boardOpen);
     // The header, and who is blocking under it, are pinned at the top: their
-    // heights, from the layout (not where they happen to be scrolled to), so
-    // the strip sits below the header and the Board opens below both.
+    // heights, from the layout, so the strip sits below the header.
     const header = document.querySelector("header");
     const headerHeight = phone ? Math.round(header.offsetHeight) : 0;
     const blockingHeight = phone && !blocking.hidden ? Math.round(blocking.offsetHeight) : 0;
     const root = document.documentElement.style;
     root.setProperty("--pinned-header", headerHeight + "px");
     root.setProperty("--pinned-all", headerHeight + blockingHeight + "px");
-    el("board-shade").hidden = !(phone && boardOpen);
-    // While the Board is open it is the only thing that takes the keyboard.
-    for (const behind of [document.querySelector("main > #agents-column"), el("middle"), blocking, header]) {
-      if (behind) behind.inert = phone && boardOpen;
-    }
-    el("board").setAttribute("role", phone ? "dialog" : "region");
-    if (phone) el("board").setAttribute("aria-modal", boardOpen ? "true" : "false");
-    else el("board").removeAttribute("aria-modal");
-    el("board-open").setAttribute("aria-expanded", phone && boardOpen ? "true" : "false");
-    const open = board ? (board.decide || []).length + (board.yours || []).length : 0;
-    el("board-open").textContent = open ? "Board: " + open + " to act on" : "Board";
+    root.setProperty("--typing-height", phone && phoneView === "agent" && !typing.hidden ? Math.round(typing.offsetHeight) + "px" : "0px");
+    const open = toAct();
+    boardCount.hidden = open === 0;
+    boardCount.textContent = open + " to act on";
+    tabBadge.hidden = open === 0;
+    tabBadge.textContent = String(open);
+    el("tab-board").setAttribute("aria-label", open ? "Board, " + open + " to act on" : "Board");
+    el("tab-agents").setAttribute("aria-pressed", phoneView !== "board" ? "true" : "false");
+    el("tab-board").setAttribute("aria-pressed", phoneView === "board" ? "true" : "false");
     el("back-to-agents").textContent = "\u2190 All agents" + (state && state.agents.length > 1 ? " (" + state.agents.length + ")" : "");
   }
   function showAgentView() {
@@ -550,37 +587,36 @@
     if (phoneView !== "agent") history.pushState({ lillignode: "agent" }, "");
     phoneView = "agent";
     drawPhone();
-    window.scrollTo(0, 0);
+    window.scrollTo(0, document.body.scrollHeight);
   }
   function showList() {
     phoneView = "list";
     drawPhone();
     window.scrollTo(0, 0);
   }
-  function setBoard(open) {
-    boardOpen = open;
+  function showBoard() {
+    if (history.state && history.state.lillignode === "agent") history.replaceState(null, "");
+    phoneView = "board";
     drawPhone();
-    if (open) el("board-close").focus();
-    else el("board-open").focus();
+    window.scrollTo(0, 0);
   }
-  el("board-open").addEventListener("click", () => setBoard(!boardOpen));
-  el("board-close").addEventListener("click", () => setBoard(false));
-  el("board-shade").addEventListener("click", () => setBoard(false));
+  el("tab-agents").addEventListener("click", showList);
+  el("tab-board").addEventListener("click", showBoard);
+  // The count in the header: on a phone the Board's tab; wider, the Board
+  // itself, brought into view.
+  boardCount.addEventListener("click", () => {
+    if (phoneWidth.matches) return showBoard();
+    const first = document.querySelector("#board li");
+    el("board").scrollIntoView({ block: "start" });
+    if (first) first.focus();
+  });
   el("back-to-agents").addEventListener("click", () => {
     if (history.state && history.state.lillignode === "agent") history.back();
     else showList();
   });
   // The phone's own Back takes the agent's terminal back to the list.
   window.addEventListener("popstate", () => showList());
-  document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape" && boardOpen) setBoard(false);
-  });
-  // From phone width to wider: the Board is a column again, not a drawer,
-  // and nothing waits to open by itself when the width comes back.
-  phoneWidth.addEventListener("change", () => {
-    if (!phoneWidth.matches) boardOpen = false;
-    drawPhone();
-  });
+  phoneWidth.addEventListener("change", () => drawPhone());
   window.addEventListener("resize", () => drawPhone());
   // A reload while an agent was open starts at the list, with no entry left
   // over for Back to land on.
@@ -769,16 +805,10 @@
           revising = null;
           noteDraft = "";
         }
-        boardSaid.hidden = false;
-        boardSaid.textContent = heard.words;
-        // Where a program keeps the Board, the card itself says what became
-        // of it from here; the sentence would soon be out of date.
-        if (board && board.adapter) {
-          const said = heard.words;
-          setTimeout(() => {
-            if (boardSaid.textContent === said) boardSaid.hidden = true;
-          }, UNDO_MS + 1000);
-        }
+        // What came of it is said on the card itself; only a refusal by
+        // Lillignode, which leaves the card as it was, is said here.
+        boardSaid.hidden = heard.outcome === "sent";
+        boardSaid.textContent = heard.outcome === "sent" ? "" : heard.words;
         readBoard();
         drawBoard();
       })
@@ -802,9 +832,9 @@
     const gone = " It leaves this list when " + keeper + " closes it.";
     const state = onward ? onward.state : "earlier";
     const said = !keeper
-      ? "Sent, waiting: " + did + "."
+      ? (undoable(card) ? did + ": written to the outbox. Undo takes it back." : "Sent, waiting: " + did + ".")
       : {
-          held: "Held: " + did + " goes to " + keeper + " in " + left + " s.",
+          held: did + ": goes to " + keeper + " when the count ends.",
           sent: "Sent to " + keeper + ": " + did + ". Waiting for its answer.",
           late: "No answer from " + keeper + " yet: " + did + ".",
           taken: "Taken by " + keeper + ": " + did + "." + gone,
@@ -813,14 +843,58 @@
         }[state] || "Sent to " + keeper + ": " + did + ".";
     const line = text("p", "card-sent", said);
     if (canAct() && undoable(card)) {
-      line.append(" ", button("Undo", "undo", () => act(card, card.sent.action, "", true)));
+      line.append(" ", button("Undo (" + left + " s)", "undo", () => act(card, card.sent.action, "", true)));
     }
     return line;
   }
 
+  // The newest thing the Board's keeper said of an action on this card,
+  // when it was a refusal (or the action never went), not yet dismissed.
+  const dismissed = new Map();
+  function refusalOf(card) {
+    if (!board || !board.adapter || card.sent) return null;
+    const mine = (board.adapter.actions || []).filter((a) => a.card === card.id);
+    const last = mine[mine.length - 1];
+    if (!last || (last.state !== "refused" && last.state !== "not-sent")) return null;
+    const key = mine.length + "|" + last.words;
+    return dismissed.get(card.id) === key ? null : { ...last, key };
+  }
+  // On the card: that it was refused, why in the keeper's own words, and
+  // what to do now.
+  function refusalBox(card, refusal) {
+    const keeper = board.adapter.name;
+    const box = text("div", "card-refused", "");
+    box.setAttribute("role", "status");
+    const lead = "Refused by " + keeper + ": ";
+    const why = refusal.state === "refused" && refusal.words.startsWith(lead) ? refusal.words.slice(lead.length) : refusal.words;
+    const did = word(ACTION_WORDS, refusal.action) || refusal.action;
+    box.append(text("strong", "", refusal.state === "refused" ? "Refused by " + keeper : did + " was not sent"));
+    box.append(text("p", "card-refused-why", why));
+    box.append(text("p", "card-help", "Try again, open it on " + keeper + ", or dismiss this."));
+    const row = text("div", "card-actions", "");
+    row.append(
+      button("Try again", "main", () => {
+        dismissed.set(card.id, refusal.key);
+        if (refusal.action === "revise") {
+          revising = card.id;
+          noteDraft = "";
+          drawBoard();
+        } else {
+          act(card, refusal.action, "", false);
+        }
+      }),
+      button("Dismiss", "", () => {
+        dismissed.set(card.id, refusal.key);
+        drawBoard();
+      }),
+    );
+    box.append(row);
+    return box;
+  }
+
   function decideCard(card) {
     const li = document.createElement("li");
-    li.className = "card " + (Object.hasOwn(KIND_WORDS, card.kind) ? card.kind : "") + (card.sent ? " waiting" : "");
+    li.className = "card " + (Object.hasOwn(KIND_WORDS, card.kind) ? card.kind : "") + (card.sent ? " waiting" : "") + (undoable(card) ? " held" : "");
     li.dataset.id = card.id;
     li.append(text("strong", "card-title", card.title));
     if (card.recommendation) {
@@ -832,8 +906,11 @@
     meta.append(text("span", "card-kind", word(KIND_WORDS, card.kind) + (card.tier === "next" ? ", next" : "")));
     meta.append(" · " + metaWords(card, false));
     li.append(meta);
+    const refusal = refusalOf(card);
     if (card.sent) {
       li.append(sentLine(card));
+    } else if (refusal && revising !== card.id) {
+      li.append(refusalBox(card, refusal));
     } else if (canAct() && revising === card.id) {
       const row = text("div", "card-actions", "");
       const note = document.createElement("input");
@@ -919,14 +996,18 @@
   function listRow(card, action, words) {
     const li = document.createElement("li");
     li.dataset.id = card.id;
-    if (card.sent) li.className = "waiting";
+    li.className = ((card.sent ? "waiting" : "") + (undoable(card) ? " held" : "")).trim();
     li.append(text("span", "card-title", card.title));
     const foot = text("div", "card-foot", "");
     foot.append(text("span", "card-meta", metaWords(card, false) + (card.tier === "next" && action === "done" ? " · next" : "")));
+    const refusal = refusalOf(card);
     if (card.sent) foot.append(sentLine(card));
-    else if (card.hub_only) foot.append(text("span", "card-hub", HUB));
+    else if (refusal) {
+      // said under the row, below
+    } else if (card.hub_only) foot.append(text("span", "card-hub", HUB));
     else if (canAct() && (card.actions || []).includes(action)) foot.append(button(words, "", () => act(card, action, "", false)));
     li.append(foot);
+    if (refusal) li.append(refusalBox(card, refusal));
     openable(li, card);
     return li;
   }
@@ -939,7 +1020,7 @@
     const now = [...board.decide, ...board.yours, ...board.know]
       .filter(undoable)
       .map((c) => c.id + ":" + Math.ceil((UNDO_MS - (Date.now() - c.sent.at)) / 1000));
-    const from = JSON.stringify([board, canAct(), now, revising, actingNow, lostAt !== null, movedOn, [...opened]]);
+    const from = JSON.stringify([board, canAct(), now, revising, actingNow, lostAt !== null, movedOn, [...opened], [...dismissed]]);
     if (from === boardDrawn) return;
     boardDrawn = from;
     // When the cards themselves last changed: what each says and where it
@@ -991,12 +1072,7 @@
       li.append(text("p", "reporting-line", r.line || "(nothing said)"));
       return li;
     }));
-    const actions = adapter ? adapter.actions || [] : [];
-    el("board-sent-on").hidden = actions.length === 0;
-    el("board-sent-on").replaceChildren(...actions.slice(-5).reverse().map((a) => {
-      const did = word(ACTION_WORDS, a.action) || a.action;
-      return text("li", "sent-on sent-on-" + a.state, did + " on “" + a.title + "”: " + a.words);
-    }));
+    // What came of each action is said on its card, not in a list here.
     const quiet = adapter && adapter.board_quiet_secs !== null && adapter.board_quiet_secs >= 15
       ? "The Board was last heard from " + adapter.name + " " + ago(adapter.board_quiet_secs * 1000) + " ago" +
         (adapter.board_quiet_secs >= 60 ? "; nothing on it can be acted on until it is heard from again." : ".")
@@ -1044,6 +1120,17 @@
     }
     return n;
   }
+  // What a team's agent runs, with its program by name, not its whole
+  // path; the whole of it is kept for a pointer resting on it.
+  function shortRuns(runs) {
+    const quoted = runs.startsWith('"');
+    const end = quoted ? runs.indexOf('"', 1) : runs.indexOf(" ");
+    const program = quoted ? runs.slice(1, end < 0 ? undefined : end) : runs.slice(0, end < 0 ? undefined : end);
+    const rest = end < 0 ? "" : runs.slice(end + (quoted ? 1 : 0));
+    return program.split(/[\\/]/).pop() + rest;
+  }
+  // How long a team's "Started" stays under it.
+  const STARTED_MS = 8000;
   function drawTeams() {
     const section = el("teams");
     const list = teams ? teams.teams || [] : [];
@@ -1073,8 +1160,14 @@
       agents.className = "team-agents";
       for (const agent of team.agents) {
         const line = text("li", "team-agent", "");
-        line.append(text("code", "team-runs", agent.runs));
-        if (agent.folder) line.append(text("span", "quiet", " in the folder " + agent.folder));
+        const runs = text("code", "team-runs", shortRuns(agent.runs));
+        runs.title = agent.runs;
+        line.append(runs);
+        if (agent.folder) {
+          const folder = text("span", "quiet", " in the folder " + agent.folder);
+          if (agent.folder_path) folder.title = agent.folder_path;
+          line.append(folder);
+        }
         agents.append(line);
       }
       li.append(head, agents);
@@ -1100,7 +1193,10 @@
         li.append(ask);
       }
       const said = teamSaid.get(team.name);
-      if (said) {
+      // A start that went through is said for a few seconds, then the team
+      // is as it was; a refusal stays until the next press.
+      if (said && said.ok && Date.now() - said.at.getTime() > STARTED_MS) teamSaid.delete(team.name);
+      else if (said) {
         const line = text("p", "team-said", said.words + " (" + clock(said.at) + ")");
         line.setAttribute("role", "status");
         li.append(line);
@@ -1115,7 +1211,7 @@
     startingNow = true;
     askingFor = null;
     drawTeams();
-    const say = (words) => teamSaid.set(team.name, { words, at: new Date() });
+    const say = (words, ok = false) => teamSaid.set(team.name, { words, at: new Date(), ok });
     fetch("start", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1123,7 +1219,7 @@
       signal: AbortSignal.timeout(15000),
     })
       .then((answer) => (answer.ok ? answer.json() : answer.text().then((words) => ({ outcome: "refused", words }))))
-      .then((heard) => say(heard.words))
+      .then((heard) => say(heard.words, heard.outcome === "sent"))
       .catch(() => say("No answer from Lillignode, so it is not known whether the team was started. Look at the agents before pressing it again."))
       .finally(() => {
         startingNow = false;

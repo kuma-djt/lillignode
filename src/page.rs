@@ -756,6 +756,7 @@ fn answer(stream: &TcpStream, serving: &Serving) -> std::io::Result<()> {
                             "label": a.label(),
                             "runs": a.runs(),
                             "folder": a.folder.file_name().map(|f| f.to_string_lossy().to_string()),
+                            "folder_path": a.folder.display().to_string(),
                         })).collect::<Vec<_>>(),
                     })).collect::<Vec<_>>(),
                     "problem": null,
@@ -2098,9 +2099,9 @@ mod tests {
         assert!(!page.to_ascii_lowercase().contains("access-control-allow"), "no other site may read it");
         assert!(get(address, "/page.js").contains("EventSource"));
         assert!(get(address, "/page.css").contains("#14202B"));
-        // Orange means an agent needs you, and nothing else: every rule
-        // that uses it is the strip's or the row's of an agent that needs
-        // you. The old copper is gone.
+        // Orange means an agent needs you, and one thing more, asked for by
+        // name: the count of cards to act on in the phone's Board tab. Every
+        // rule that uses it is one of those. The old copper is gone.
         assert!(CSS.contains("--orange: #E39A55;"));
         for gone in ["copper", "C17B3E", "c17b3e"] {
             assert!(!CSS.contains(gone) && !JS.contains(gone), "{gone}");
@@ -2110,7 +2111,9 @@ mod tests {
             if body.contains("var(--orange)") {
                 let selector = selector.rsplit("*/").next().unwrap().trim();
                 assert!(
-                    selector == "#blocking" || selector.starts_with("#agents li.needs-you "),
+                    selector == "#blocking"
+                        || selector == "#tabs .badge"
+                        || selector.starts_with("#agents li.needs-you "),
                     "orange used for {selector:?}"
                 );
             }

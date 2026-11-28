@@ -45,6 +45,8 @@ jobs:
         run: node checks/page/guess-check.mjs out/guess
       - name: The three looks
         run: node checks/page/looks-check.mjs out/looks
+      - name: The design pass
+        run: node checks/page/design-check.mjs out/design
       - name: Keep the pictures
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
