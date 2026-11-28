@@ -263,7 +263,7 @@ fn main() -> ExitCode {
             lillignode::config::PageLook::Cards => Some("cards"),
             lillignode::config::PageLook::Bold => Some("bold"),
         };
-        let ways = page::Ways { typing, acting, adapter, starting, look };
+        let ways = page::Ways { typing, acting, adapter, starting, look, notify: app.config.page_notify };
         match page::serve(reader, app.config.page_port, page_folder.as_deref(), ways) {
             Ok(served) => {
                 app.page_serving(served);

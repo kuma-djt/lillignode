@@ -212,6 +212,13 @@ Instead of the two files, Lillignode can start one program of your choosing and 
 - **An old Board is not acted on.** If no Board has come from the program for a minute, the page says how long ago it last did, and nothing on it can be acted on until one comes.
 - **Nothing goes to the outbox file instead.** If the program cannot be started, says nothing for ten seconds, speaks another version of the pipe, or stops, the Board says so and nothing can be acted on until Lillignode is started again. It is not started again by itself.
 
+### A notification when an agent needs you (off unless you ask)
+
+Add `"page_notify": true` beside `"page": true` and the page offers, once, to notify you. If you turn it on (your browser asks too), the page shows one notification, with a sound, when an agent comes to need you, naming it: "reporter (work) needs you". Clicking it brings the page forward with that agent open.
+
+- **One for each wait.** No second one while the agent still waits; a new wait is a new one. A wait that began before the page was opened is not notified.
+- **Only while the page is open,** in a tab of its own. Nothing is sent anywhere: the notification is your browser's, made by the page on this machine. To stop them: your browser's settings for the page's address, or take `"page_notify"` out.
+
 ### Saved teams
 
 A team is a named set of agents: each one's program, kind, options and folder. The menu key, then `t`, asks for a name:

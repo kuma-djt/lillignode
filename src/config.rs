@@ -159,6 +159,12 @@ pub struct Config {
     /// Let the page start a saved team. Off unless the user asks, apart
     /// from `page`: starting agents is more than typing to them.
     pub page_can_start: bool,
+    /// The page may offer a notification, with a sound, when an agent comes
+    /// to need you. Off unless `"page_notify": true`.
+    pub page_notify: bool,
+    /// What a settings file with a mistake in it names for another
+    /// program: withheld from agents all the same.
+    pub withheld_anyway: Vec<String>,
     /// One outside program to start and talk to over its own pipe for the
     /// Board, in place of the Board's files. Off unless named.
     pub board_adapter: Option<BoardAdapter>,
@@ -205,11 +211,10 @@ impl Config {
     /// environment.
     pub fn withheld_from_agents(&self) -> Vec<String> {
         let mut names: Vec<String> = Vec::new();
-        for program in [&self.board_adapter, &self.helper].into_iter().flatten() {
-            for name in &program.env {
-                if !names.iter().any(|n| n.eq_ignore_ascii_case(name)) {
-                    names.push(name.clone());
-                }
+        let named = [&self.board_adapter, &self.helper].into_iter().flatten().flat_map(|p| p.env.iter());
+        for name in named.chain(self.withheld_anyway.iter()) {
+            if !names.iter().any(|n| n.eq_ignore_ascii_case(name)) {
+                names.push(name.clone());
             }
         }
         names
@@ -260,6 +265,8 @@ impl Default for Config {
             page_can_type: false,
             page_can_act: false,
             page_can_start: false,
+            page_notify: false,
+            withheld_anyway: Vec::new(),
             board_adapter: None,
             helper: None,
             welcome_look: WelcomeLook::Wide,
@@ -303,6 +310,7 @@ struct File {
     page_can_type: Option<bool>,
     page_can_act: Option<bool>,
     page_can_start: Option<bool>,
+    page_notify: Option<bool>,
     board_adapter: Option<BoardAdapter>,
     helper: Option<BoardAdapter>,
     welcome_look: Option<String>,
@@ -365,6 +373,12 @@ fn parse(text: &str) -> Result<Config, String> {
             return Err("add \"page\": true, or take out \"page_can_act\", which needs it".to_string());
         }
         can => can.unwrap_or(false),
+    };
+    config.page_notify = match file.page_notify {
+        Some(true) if !config.page => {
+            return Err("add \"page\": true, or take out \"page_notify\", which needs it".to_string());
+        }
+        on => on.unwrap_or(false),
     };
     config.page_can_start = match file.page_can_start {
         // Said, so the user does not look for buttons that are not there.
@@ -441,13 +455,18 @@ fn json_fix(e: &serde_json::Error) -> String {
 /// lack of room keeps the fix (`App::notice_parts`).
 pub fn load(dir: &Path) -> (Config, Option<String>) {
     let path = dir.join(FILE);
-    let config = Config::default();
+    let mut config = Config::default();
     let fix = match std::fs::read_to_string(&path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return (config, None),
         Err(e) => format!("make it readable ({e})"),
         Ok(text) => match parse(&text) {
             Ok(config) => return (config, None),
-            Err(fix) => fix,
+            Err(fix) => {
+                // Even a file with a mistake in it keeps what it names for
+                // another program from the agents: withholding fails closed.
+                config.withheld_anyway = named_env(&text).unwrap_or_default();
+                fix
+            }
         },
     };
     let problem = format!(
@@ -457,6 +476,20 @@ pub fn load(dir: &Path) -> (Config, Option<String>) {
         path.display()
     );
     (config, Some(problem))
+}
+
+/// The variables a settings file names for the Board's program or the
+/// helper, read from the file as it is, whether or not the rest of it is
+/// right. None if it is not JSON at all.
+fn named_env(text: &str) -> Option<Vec<String>> {
+    let value: serde_json::Value = serde_json::from_str(text).ok()?;
+    let mut names = Vec::new();
+    for program in ["board_adapter", "helper"] {
+        for name in value[program]["env"].as_array().into_iter().flatten().filter_map(|n| n.as_str()) {
+            names.push(name.to_string());
+        }
+    }
+    Some(names)
 }
 
 #[cfg(test)]
@@ -510,6 +543,29 @@ mod tests {
         assert_eq!(parse(r#"{"welcome_look": "beside"}"#).unwrap().welcome_look, WelcomeLook::Beside);
         assert!(parse(r#"{"welcome_look": "big"}"#).unwrap_err().contains("\"welcome_look\""));
         assert_eq!(parse(r#"{"welcome_look": "Stacked"}"#).unwrap().welcome_look, WelcomeLook::Stacked);
+    }
+
+    #[test]
+    fn the_page_notifies_only_when_asked_and_only_with_the_page() {
+        assert!(!Config::default().page_notify);
+        assert!(parse(r#"{"page": true, "page_notify": true}"#).unwrap().page_notify);
+        assert!(parse(r#"{"page_notify": true}"#).unwrap_err().contains("\"page_notify\""));
+    }
+
+    #[test]
+    fn a_settings_file_with_a_mistake_still_withholds_what_it_names() {
+        let dir = std::env::temp_dir().join(format!("lillignode-withheld-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // page_can_act without page: a mistake, so nothing else is used.
+        std::fs::write(
+            dir.join(FILE),
+            r#"{"page_can_act": true, "board_adapter": {"command": "a", "env": ["SERVICE_URL", "SERVICE_KEY"]}}"#,
+        )
+        .unwrap();
+        let (config, problem) = load(&dir);
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(problem.is_some() && config.board_adapter.is_none());
+        assert_eq!(config.withheld_from_agents(), ["SERVICE_URL", "SERVICE_KEY"]);
     }
 
     #[test]

@@ -179,11 +179,14 @@ pub struct Ways {
     pub adapter: Option<crate::adapter::Link>,
     /// The page's look, by name ("soft", "cards", "bold"), if one is chosen.
     pub look: Option<&'static str>,
+    /// Whether the page may offer to notify its reader when an agent comes
+    /// to need them.
+    pub notify: bool,
 }
 
 impl From<Option<Typing>> for Ways {
     fn from(typing: Option<Typing>) -> Self {
-        Ways { typing, acting: None, adapter: None, starting: None, look: None }
+        Ways { typing, acting: None, adapter: None, starting: None, look: None, notify: false }
     }
 }
 
@@ -370,6 +373,7 @@ struct Serving {
     adapter: Option<crate::adapter::Link>,
     starting: Option<Starting>,
     look: Option<&'static str>,
+    notify: bool,
 }
 
 impl Serving {
@@ -396,7 +400,7 @@ pub fn serve(
     folder: Option<&Path>,
     ways: impl Into<Ways>,
 ) -> Result<Served, String> {
-    let Ways { typing, acting, adapter, starting, look } = ways.into();
+    let Ways { typing, acting, adapter, starting, look, notify } = ways.into();
     let sends = typing.is_some() || acting.is_some() || starting.is_some();
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, port)).map_err(|e| e.to_string())?;
     let address = listener.local_addr().map_err(|e| e.to_string())?;
@@ -426,6 +430,7 @@ pub fn serve(
         adapter,
         starting,
         look,
+        notify,
     });
     let open = Arc::new(AtomicUsize::new(0));
     let accept = move || {
@@ -739,7 +744,14 @@ fn answer(stream: &TcpStream, serving: &Serving) -> std::io::Result<()> {
                 }
             }
             let tokens = serving.tokens(token);
-            state_once(stream, latest.map(|(_, published)| published), agent, &request.query, tokens)
+            state_once(
+                stream,
+                latest.map(|(_, published)| published),
+                agent,
+                &request.query,
+                tokens,
+                serving.notify,
+            )
         }
         "stream" => stream_states(stream, serving, &word, &request.query),
         // The saved teams, read again at each request, and, where the
@@ -952,6 +964,7 @@ fn state_once(
     agent: Option<u64>,
     query: &str,
     tokens: Tokens,
+    notify: bool,
 ) -> std::io::Result<()> {
     {
         match published {
@@ -959,7 +972,7 @@ fn state_once(
                 let after = after_in(query, &published);
                 let body = json!({
                     "at": millis(published.state.taken_at),
-                    "state": state_json(&published, agent, after, tokens),
+                    "state": state_json(&published, agent, after, tokens, notify),
                 });
                 send(stream, "200 OK", "application/json", &body.to_string())
             }
@@ -996,7 +1009,7 @@ fn stream_states(mut stream: &TcpStream, serving: &Serving, word: &str, query: &
                 count = newer;
                 let at = millis(published.state.taken_at);
                 let from = after.unwrap_or_else(|| after_in(query, &published));
-                let mut state = state_json(&published, agent, from, tokens);
+                let mut state = state_json(&published, agent, from, tokens, serving.notify);
                 after = Some(from.max(published.state.as_of));
                 // Events are sent once. Apart from them, has anything
                 // changed since the last state sent?
@@ -1033,7 +1046,7 @@ fn millis(time: SystemTime) -> u64 {
 /// The state as the page reads it: every agent, the screen of `agent`, and
 /// the events numbered after `after`. Where the page may type, or act on
 /// a card, the token what it sends must carry.
-fn state_json(published: &Published, agent: Option<u64>, after: u64, tokens: Tokens) -> Value {
+fn state_json(published: &Published, agent: Option<u64>, after: u64, tokens: Tokens, notify: bool) -> Value {
     let state = &published.state;
     let agents: Vec<Value> = state.agents.iter().map(|a| agent_json(a, state.front == Some(a.key))).collect();
     let screen = published
@@ -1060,6 +1073,9 @@ fn state_json(published: &Published, agent: Option<u64>, after: u64, tokens: Tok
         // A helper the settings name is said on the page too: it is sent
         // agents' screens.
         "helper": state.helper.as_ref().map(|(name, stopped)| json!({ "name": name, "stopped": stopped })),
+        // The page may offer its reader a notification when an agent comes
+        // to need them: only where the settings say so.
+        "notify": notify,
     })
 }
 
@@ -1703,7 +1719,14 @@ mod tests {
             reader,
             0,
             None,
-            Ways { typing: None, acting: Some(acting), adapter: None, starting: None, look: None },
+            Ways {
+                typing: None,
+                acting: Some(acting),
+                adapter: None,
+                starting: None,
+                look: None,
+                notify: false,
+            },
         )
         .unwrap();
         assert!(served.can_act && !served.can_type);
@@ -1866,7 +1889,7 @@ mod tests {
                     reader,
                     0,
                     Some(&folder),
-                    Ways { typing: None, acting, adapter: None, starting: None, look: None },
+                    Ways { typing: None, acting, adapter: None, starting: None, look: None, notify: false },
                 )
                 .unwrap(),
             )

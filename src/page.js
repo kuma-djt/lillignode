@@ -531,6 +531,85 @@
   el("about-close").addEventListener("click", () => setAbout(false));
   setAbout(!seen);
 
+  // A notification when an agent comes to need the reader: only where the
+  // settings say "page_notify", only after the reader turned it on, which
+  // the page offers once, and never more than one for one wait. Waits that
+  // began before the page was opened are not notified. Clicking it opens
+  // that agent.
+  const notifyOffer = el("notify-offer");
+  const ASKED = "lillignode.notify.asked";
+  let notifyAsked = false;
+  try {
+    notifyAsked = localStorage.getItem(ASKED) === "1";
+  } catch {}
+  const canNotify = typeof Notification === "function";
+  const notified = new Set();
+  let notifySeeded = false;
+  let sound = null;
+  function chime() {
+    try {
+      if (!sound) sound = new AudioContext();
+      if (sound.state === "suspended") sound.resume();
+      const now = sound.currentTime;
+      for (const [hz, at] of [[880, 0], [660, 0.18]]) {
+        const tone = sound.createOscillator();
+        const level = sound.createGain();
+        tone.frequency.value = hz;
+        level.gain.setValueAtTime(0.12, now + at);
+        level.gain.exponentialRampToValueAtTime(0.001, now + at + 0.16);
+        tone.connect(level).connect(sound.destination);
+        tone.start(now + at);
+        tone.stop(now + at + 0.17);
+      }
+    } catch {}
+  }
+  function askedNotify() {
+    notifyAsked = true;
+    try {
+      localStorage.setItem(ASKED, "1");
+    } catch {}
+  }
+  el("notify-on").addEventListener("click", () => {
+    askedNotify();
+    // The sound is made ready now, while the reader is pressing something:
+    // a browser lets a page play one only after that.
+    try {
+      if (!sound) sound = new AudioContext();
+    } catch {}
+    if (canNotify) Notification.requestPermission().then(drawNotify, drawNotify);
+    drawNotify();
+  });
+  el("notify-later").addEventListener("click", () => {
+    askedNotify();
+    drawNotify();
+  });
+  function drawNotify() {
+    const on = !!(state && state.notify) && !movedOn;
+    notifyOffer.hidden = !on || notifyAsked || !canNotify || Notification.permission !== "default";
+    if (!on || !state) return;
+    const waiting = state.agents.filter((a) => a.running && a.needs_you);
+    const waitOf = (a) => state.run + ":" + a.key + ":" + a.needs_you_since;
+    const allowed = canNotify && Notification.permission === "granted" && lostAt === null;
+    for (const agent of waiting) {
+      const wait = waitOf(agent);
+      if (notified.has(wait)) continue;
+      notified.add(wait);
+      if (!notifySeeded || !allowed) continue;
+      const shown = new Notification(agent.label + " needs you", {
+        body: agent.needs ? "It needs you: " + agent.needs + "." : "It is waiting for you.",
+        tag: "lillignode-" + agent.key,
+        silent: false,
+      });
+      shown.onclick = () => {
+        window.focus();
+        choose(agent.key);
+        shown.close();
+      };
+      chime();
+    }
+    notifySeeded = true;
+  }
+
   function draw() {
     drawContact();
     drawBlocking();
@@ -538,6 +617,7 @@
     drawPhone();
     drawTerminal();
     drawTyping();
+    drawNotify();
     say();
   }
 

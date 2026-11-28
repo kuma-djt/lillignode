@@ -70,6 +70,18 @@ header {
   padding: 10px 16px; background: var(--navy-raised); border-bottom: 1px solid var(--rule);
 }
 #about[hidden] { display: none; }
+#notify-offer {
+  display: flex; align-items: center; gap: 12px;
+  padding: 10px 16px; background: var(--navy-raised); border-bottom: 1px solid var(--rule);
+}
+#notify-offer[hidden] { display: none; }
+#notify-words { flex: 1; font-size: 14px; }
+#notify-offer button {
+  flex: none; font: inherit; font-weight: 700; cursor: pointer; border-radius: 3px; padding: 6px 14px;
+  background: none; color: var(--cream); border: 1px solid var(--cream-quiet);
+}
+#notify-offer #notify-on { background: var(--cream); color: var(--navy); border-color: var(--cream); }
+#notify-offer button:focus-visible { outline: 2px solid var(--cream); outline-offset: 2px; }
 #standing { flex: 1; font-size: 14px; color: var(--cream); }
 #about-close {
   flex: none; font: inherit; font-weight: 700; cursor: pointer;
