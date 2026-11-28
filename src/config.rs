@@ -175,12 +175,13 @@ pub struct Config {
     pub page_look: PageLook,
 }
 
-/// The page's looks: the same page, styled four ways.
+/// The page's looks: the same page, styled four ways. "Cards" unless the
+/// settings name another.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum PageLook {
-    #[default]
     Plain,
     Soft,
+    #[default]
     Cards,
     Bold,
 }
@@ -189,12 +190,12 @@ pub enum PageLook {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum WelcomeLook {
     /// The gnome on the left, the large name beside it, the key under the name.
-    #[default]
     Beside,
     /// The gnome, the large name and the key, one under another, in the middle.
     Stacked,
     /// Down the left: the gnome, the large name twice as wide where there is
-    /// room, then the key.
+    /// room, then the key. The first screen unless the settings name another.
+    #[default]
     Wide,
 }
 
@@ -244,8 +245,8 @@ impl Default for Config {
             page_can_start: false,
             board_adapter: None,
             helper: None,
-            welcome_look: WelcomeLook::Beside,
-            page_look: PageLook::Plain,
+            welcome_look: WelcomeLook::Wide,
+            page_look: PageLook::Cards,
         }
     }
 }
@@ -373,18 +374,18 @@ fn parse(text: &str) -> Result<Config, String> {
     };
     // In any case: "Stacked" is meant as "stacked".
     config.welcome_look = match file.welcome_look.as_deref().map(str::to_lowercase).as_deref() {
-        None | Some("beside") => WelcomeLook::Beside,
+        Some("beside") => WelcomeLook::Beside,
         Some("stacked") => WelcomeLook::Stacked,
-        Some("wide") => WelcomeLook::Wide,
+        None | Some("wide") => WelcomeLook::Wide,
         Some(_) => {
             return Err("give \"welcome_look\" one of \"beside\", \"stacked\" or \"wide\", or take it out"
                 .to_string())
         }
     };
     config.page_look = match file.page_look.as_deref() {
-        None | Some("plain") => PageLook::Plain,
+        Some("plain") => PageLook::Plain,
         Some("soft") => PageLook::Soft,
-        Some("cards") => PageLook::Cards,
+        None | Some("cards") => PageLook::Cards,
         Some("bold") => PageLook::Bold,
         Some(_) => {
             return Err(
@@ -475,15 +476,18 @@ mod tests {
     }
 
     #[test]
-    fn the_page_look_is_plain_unless_said() {
-        assert_eq!(Config::default().page_look, PageLook::Plain);
-        assert_eq!(parse(r#"{"page_look": "cards"}"#).unwrap().page_look, PageLook::Cards);
+    fn the_page_look_is_cards_unless_said() {
+        assert_eq!(Config::default().page_look, PageLook::Cards);
+        assert_eq!(parse("{}").unwrap().page_look, PageLook::Cards);
+        assert_eq!(parse(r#"{"page_look": "plain"}"#).unwrap().page_look, PageLook::Plain);
+        assert_eq!(parse(r#"{"page_look": "soft"}"#).unwrap().page_look, PageLook::Soft);
         assert!(parse(r#"{"page_look": "neon"}"#).unwrap_err().contains("\"page_look\""));
     }
 
     #[test]
-    fn the_welcome_look_is_one_of_three_and_beside_unless_said() {
-        assert_eq!(Config::default().welcome_look, WelcomeLook::Beside);
+    fn the_welcome_look_is_one_of_three_and_wide_unless_said() {
+        assert_eq!(Config::default().welcome_look, WelcomeLook::Wide);
+        assert_eq!(parse("{}").unwrap().welcome_look, WelcomeLook::Wide);
         assert_eq!(parse(r#"{"welcome_look": "stacked"}"#).unwrap().welcome_look, WelcomeLook::Stacked);
         assert_eq!(parse(r#"{"welcome_look": "wide"}"#).unwrap().welcome_look, WelcomeLook::Wide);
         assert_eq!(parse(r#"{"welcome_look": "beside"}"#).unwrap().welcome_look, WelcomeLook::Beside);

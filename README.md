@@ -254,9 +254,9 @@ And to let it act on the cards of its Board, which is off unless you ask whateve
 
 If the colours come out wrong, add `"colors"` with `"full"`, `"256"`, `"16"` or `"none"`. Setting the `NO_COLOR` environment variable also switches colour off.
 
-The first screen, before any agent is open, can be laid out three ways while one is chosen: `"welcome_look"` with `"beside"` (the gnome on the left, the name drawn large beside it, the key under the name; the default), `"stacked"` (the three one under another, in the middle) or `"wide"` (down the left, the name twice as wide where there is room). A window too small for all of it drops the large name first and always keeps the key.
+The first screen, before any agent is open, is laid out `"wide"`: down the left, the gnome, the name drawn large (twice as wide where there is room), then the key that starts an agent. `"welcome_look"` can name another layout: `"beside"` (the gnome on the left, the name beside it, the key under the name) or `"stacked"` (the three one under another, in the middle). A window too small for all of it drops the large name first and always keeps the key.
 
-The page can be given one of three looks while one is chosen: `"page_look"` with `"soft"`, `"cards"` or `"bold"`. Each changes only how the page looks (spacing, type, card shapes, a picture slot with each agent's initials, larger buttons, a shorter header on a phone); the colours keep their meanings. Without it, or with `"plain"`, the page is as before.
+The page's look is `"cards"`: each agent a card with a round picture slot holding its initials, its state as a badge, touch-sized buttons, and on a phone a header cut to a few words. `"page_look"` can name another: `"soft"`, `"bold"`, or `"plain"` (the page as it was in 0.2). Each changes only how the page looks; the colours keep their meanings.
 
 All are optional, and a change takes effect the next time Lillignode is started. `billing` does nothing without `cost`, and `cost_warning_tokens` without it is reported as a mistake; so is `page_port`, `page_can_type`, `page_can_act`, `page_can_start` or `board_adapter` without `page`. A Lillignode older than the page does not know `"page"` and treats it as a mistake in the file.
 
