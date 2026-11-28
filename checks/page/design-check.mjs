@@ -195,7 +195,7 @@ try {
   await width(1400, 900);
   await send("Page.navigate", { url: ready[1] });
   await until(cardText("c5"), (t) => t !== null, 20000);
-  await until(`document.getElementById("agents").innerText`, (t) => /Needs you/i.test(t || ""), 20000);
+  await until(`(document.getElementById("agents") || {}).innerText`, (t) => /Needs you/i.test(t || ""), 20000);
   await sleep(800);
   await shot("desktop-first-visit");
   check("the first visit shows what the page can do, as a note", await evaluate(visible("#about")));
@@ -279,7 +279,7 @@ try {
   console.log("2. A phone");
   await width(390, 844);
   await send("Page.navigate", { url: ready[1] });
-  await until(`document.getElementById("agents").innerText`, (t) => (t || "").length > 10, 20000);
+  await until(`(document.getElementById("agents") || {}).innerText`, (t) => (t || "").length > 10, 20000);
   await sleep(1500);
   await shot("phone-agents");
   const phoneHeader = await evaluate(`Math.round(document.querySelector("header").getBoundingClientRect().height)`);

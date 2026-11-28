@@ -199,9 +199,9 @@ try {
   startServing(null);
   let ready = await line(/READY (http:\/\/127\.0\.0\.1:\d+\/[a-z0-9]{16}\/)/);
   await send("Page.navigate", { url: ready[1] });
-  await until(`document.getElementById("agents").innerText`, (t) => /reporter/.test(t || ""), 20000);
+  await until(`(document.getElementById("agents") || {}).innerText`, (t) => /reporter/.test(t || ""), 20000);
   await tell("key p", /DONE key/);
-  await until(`document.getElementById("agents").innerText`, (t) => /Needs you/i.test(t || ""), 20000);
+  await until(`(document.getElementById("agents") || {}).innerText`, (t) => /Needs you/i.test(t || ""), 20000);
   await sleep(1500);
   check("no offer to notify", !(await evaluate(visible("#notify-offer"))));
   check("and nothing is shown", (await evaluate(shownCount)) === 0);
@@ -211,21 +211,21 @@ try {
   startServing('"page_notify": true');
   ready = await line(/READY (http:\/\/127\.0\.0\.1:\d+\/[a-z0-9]{16}\/)/);
   await send("Page.navigate", { url: ready[1] });
-  await until(`document.getElementById("agents").innerText`, (t) => /reporter/.test(t || ""), 20000);
+  await until(`(document.getElementById("agents") || {}).innerText`, (t) => /reporter/.test(t || ""), 20000);
   await sleep(800);
   check("the page offers to notify", await evaluate(visible("#notify-offer")));
   check("in words that say what for", /when an agent comes to need you/.test((await evaluate(text("#notify-offer"))) || ""));
   await picture("01-the-offer");
   await evaluate(`document.getElementById("notify-later").click()`);
   await send("Page.reload");
-  await until(`document.getElementById("agents").innerText`, (t) => /reporter/.test(t || ""), 20000);
+  await until(`(document.getElementById("agents") || {}).innerText`, (t) => /reporter/.test(t || ""), 20000);
   await sleep(800);
   check("Not now: not offered again", !(await evaluate(visible("#notify-offer"))));
   // Offered again only in a browser that was never asked: forget the
   // answer, as a new browser would have none.
   await evaluate(`localStorage.removeItem("lillignode.notify.asked")`);
   await send("Page.reload");
-  await until(`document.getElementById("agents").innerText`, (t) => /reporter/.test(t || ""), 20000);
+  await until(`(document.getElementById("agents") || {}).innerText`, (t) => /reporter/.test(t || ""), 20000);
   await sleep(800);
 
   console.log("3. Turned on: one notification for one wait");

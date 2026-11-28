@@ -6,18 +6,20 @@ The name is said "Lilli-node": the g is silent, as in gnome.
 
 ![Four Claude Code agents: one working, one waiting for you, two idle](assets/screenshot.png)
 
-**Status: v0.2, rough.** Built and tested on Windows 11. It builds and passes its automated checks on Linux and macOS; nobody has run an agent in it on either. Expect sharp edges.
+**Status: v0.3, rough.** Built and tested on Windows 11. It builds and passes its automated checks on Linux and macOS; nobody has run an agent in it on either. Expect sharp edges.
 
-## What v0.2 does
+## What v0.3 does
 
 - **Several Claude Code agents in one window.** Each has its own folder and its own screen. One agent is in front and takes your typing; the sidebar lists the rest.
 - **Hop between them.** Press the menu key (Ctrl+Q or F12), then Tab.
-- **See what each one is doing.** The sidebar shows Starting, Working, Needs you, Done, Idle or Error, as the agent itself reports it. Claude Code and Codex CLI report; so can any other program (see [Status](#status)). When Lillignode cannot tell, it says Unknown. It never guesses.
+- **See what each one is doing.** The sidebar shows Starting, Working, Needs you, Done, Idle or Error, as the agent itself reports it. Claude Code and Codex CLI report; so can any other program (see [Status](#status)). When Lillignode cannot tell, it says Unknown. It never guesses at a status itself; a helper you name may offer a guess, shown as one (see [A helper's guess](#a-helpers-guess-off-unless-you-name-one)).
 - **Two side by side, when you want.** Menu key, then `v`: the agent in front on the left, the next one beside it, each half the width. `v` again goes back to one. See [Two side by side](#two-side-by-side).
 - **Come back to where you were.** Quit and start again: the same agents reopen in the same folders, and Claude Code continues each conversation. Any other agent, Codex included, is started again and begins a new conversation; Lillignode says which.
 - **Read back what scrolled away.** The last 5,000 lines per agent, with Shift+PgUp.
 - **Paste safely.** A multi-line paste reaches the agent as one paste, never as a string of Enter presses. Control characters are left out, and you are told when they were (in Windows Terminal the terminal removes them first, so you are not told: see Known limits). Where a paste has to be sent as typed keys, its tabs are sent as spaces.
 - **Run any other command-line agent too.** If it reports its status in the open format, the sidebar shows it. If it does not, it runs all the same and its status shows Unknown.
+- **Saved teams.** Save the agents open now under a name and start them again by it (menu key, then `t`).
+- **A page, if you switch it on.** Every agent's status and terminal in a browser on this machine; and, each only if you also switch it on, typing to an agent, a Board of things to decide that you can act on, starting a saved team, and a notification when an agent needs you. Everything about the page is off in a plain download. See [The page](#the-page-off-by-default-and-read-only-unless-you-say-otherwise).
 - **Cost, if you switch it on.** Experimental and off by default. See [Cost](#cost-experimental-off-by-default).
 
 ## The look
@@ -72,6 +74,8 @@ Inside Lillignode, press `n` to start an agent: Enter for Claude Code, then its 
 | s | its status report (and its cost, if switched on). When it is longer than the window, PgUp, PgDn, Up, Down and Home move through it. While a part of the agent is waiting, `d` there stops showing it |
 | PgUp | read back its history |
 | v | two agents side by side, or back to one |
+| t | a saved team: a new name saves the agents open now, a saved name starts it (each asks first) |
+| w | while the page is on: give it a new address (asks first) |
 
 ```
 lillignode --where     where your workspace and settings are kept
@@ -188,7 +192,7 @@ Add `"page_can_act": true` beside `"page": true` and cards get buttons: **Approv
 - **You act on what you saw.** If the card with that id says something else by the time your press arrives, it is refused and you are told to read it again. A press in the moment the Board changes under the pointer is not taken.
 - **Who can act.** Only the page itself, on the same terms as typing: under the word, from `127.0.0.1`, with a token the page is given with its data; a link, a form, or another web site cannot. As with typing, the address is new each time Lillignode starts while this is on.
 - **Picking lines up.** Whatever reads the outbox takes the whole file, by renaming it, and reads that; it never edits the outbox in place. Undo does the same, so a line is never in two places.
-- **Lillignode keeps its own record.** It remembers every line it wrote to the outbox while it runs, and whatever picks the outbox up asks Lillignode which lines are yours. The file alone is never taken as your word: any program running as you, an agent among them, can write a line to it.
+- **Lillignode keeps its own record.** It remembers every line it wrote to the outbox while it runs. Nothing outside Lillignode can ask it yet which lines are yours, so the file alone must never be taken as your word: any program running as you, an agent among them, can write a line to it. (A program that keeps the Board, below, is sent only actions Lillignode itself wrote.)
 - **An agent running as you can do what you can do on this machine.** That includes reading the page's address, writing to the outbox, and anything else your account can do. The page keeps out other web sites and other people; it cannot keep out your own agents. Give an agent only the work you would do yourself.
 - **The outbox and the record of what waits are yours alone.** Lillignode makes both so that no other account on the machine can read or write them, on Windows as elsewhere, and refuses to act through either if someone else could.
 - **Not yet checked by a person.** Checked by script and in a browser with no window. Nothing picks the outbox up yet.
@@ -205,7 +209,7 @@ Instead of the two files, Lillignode can start one program of your choosing and 
 
 - **Off unless named.** Without `board_adapter`, the files are used as above. Lillignode's status report (the menu key, then `s`) names the program while one is set.
 - **Only what you name reaches it.** It is given its path, its temporary folder and your user folders, the environment variables listed in `env`, and nothing else of Lillignode's environment. It runs as you, in the folder Lillignode saves in. Give `command` as a full path.
-- **What you name for it is its alone.** The variables listed in `env` (a service's address and key, say) are taken out of every agent's environment, even though Lillignode was started with them: an agent never sees them. The same holds for the helper's `env`.
+- **What you name for it is its alone.** The variables listed in `env` (a service's address and key, say) are taken out of every agent's environment, even though Lillignode was started with them, and even if the settings file has a mistake in it: an agent is never handed them. The same holds for the helper's `env`. Only if the settings file cannot be read at all is nothing withheld, and the notice says so. An agent runs as you, so this keeps the key from being handed to it, not from a program that goes looking in Lillignode's own environment.
 - **What it sends** (one JSON object a line on its output): `{"hello": 1, "name": "…"}`, then `{"cards": [ … ]}` (the whole Board, each card as in `board.json`) as often as it likes, and, if it has them, `{"reporting": [ {"agent": "…", "line": "…", "at": "…"} ]}`: agents that run elsewhere and report through it, each with its newest line. The page lists those under "Reporting through" and the name it gave, apart from Lillignode's own agents. `{"problem": "…"}` is shown under the Board until the next Board arrives.
 - **What it is sent** (on its input): `{"hello": 1}`, then each action as `{"id": "a1", "action": { …the line that would have gone to the outbox… }}`. It answers `{"took": "a1"}`, `{"refused": "a1", "why": "…"}`, or `{"unsure": "a1", "why": "…"}` when it cannot tell whether the service has it. Each is shown on its card. A refusal says so on the card, in the program's own words, with Try again and Dismiss; one it took, or is unsure of, waits.
 - **Sent only after ten seconds.** An action is held for the ten seconds Undo lasts and sent only if it was not undone. Only actions Lillignode wrote on your press are ever held, so only those are ever sent. Only once it is really sent is the card kept as waiting; if Lillignode quits or the program stops inside the ten seconds, it is not sent and nothing says it was.
@@ -275,7 +279,7 @@ The first screen, before any agent is open, is laid out `"wide"`: down the left,
 
 The page's look is `"cards"`: each agent a card with a round picture slot holding its initials, its state as a badge, and touch-sized buttons. `"page_look"` can name another: `"soft"`, `"bold"`, or `"plain"` (the page as it was in 0.2). Each changes only how the page looks; the colours keep their meanings.
 
-All are optional, and a change takes effect the next time Lillignode is started. `billing` does nothing without `cost`, and `cost_warning_tokens` without it is reported as a mistake; so is `page_port`, `page_can_type`, `page_can_act`, `page_can_start` or `board_adapter` without `page`. A Lillignode older than the page does not know `"page"` and treats it as a mistake in the file.
+All are optional, and a change takes effect the next time Lillignode is started. `billing` does nothing without `cost`, and `cost_warning_tokens` without it is reported as a mistake; so is `page_port`, `page_can_type`, `page_can_act`, `page_can_start`, `page_notify` or `board_adapter` without `page`. `helper` does not need the page. A Lillignode older than the page does not know `"page"` and treats it as a mistake in the file.
 
 **The file is strict.** One mistake in it and none of it is used: every setting is at its default until it is fixed. Lillignode never changes the file. It tells you when it starts, beginning with how to fix it ("To fix your settings file: ...") and naming the line and column where it can.
 
@@ -378,7 +382,7 @@ What to watch for:
 - **Signed out, Codex reports nothing** (seen with 0.169.0). Its row shows Unknown after 15 seconds, and a notice says so. The same notice appears if Codex is silent for any other reason.
 - **History.** Codex draws on a full-screen display, which leaves Lillignode no history to keep. Scroll with Codex's own keys.
 
-## Known limits in 0.2
+## Known limits in 0.3
 
 These are known and not yet fixed. Please do not report them as security problems.
 
@@ -388,7 +392,6 @@ These are known and not yet fixed. Please do not report them as security problem
 - **Codex** asks permission only when started with `-a on-request`. On at least one of its own set-up screens it reports Idle while it waits for an answer. It reports Done for a turn that failed.
 - **Grok Build** is silent unless its own status setting is on.
 - **Claude Code 2.1.325** sends no report at its "do you trust this folder" question, so the row does not say it is waiting. 2.1.329 does report there.
-- **A helper agent waiting inside a program** is not shown yet. The format lets a program report each helper separately; Lillignode counts those reports and does not show them yet.
 - **Gemini CLI and Cursor's CLI** sent no status reports in the versions tried (Gemini CLI 0.68.0, Cursor's CLI build of 2026-11-13, each started once by script). They show Unknown.
 - **Cost** has not been compared with Claude Code's own `/usage`. Trust `/usage`.
 - **Pasting on Windows.** Windows Terminal hands a paste to Lillignode as ordinary key presses, so Lillignode cannot always tell a paste from typing. In our checks Windows Terminal itself removed Ctrl+D and Esc from pasted text, so Lillignode never saw them and says nothing about them. Text with a tab or a line break in it that arrives in one go is taken as a paste, and its tabs are sent as spaces. A paste that is only a tab is still taken as the Tab key, and typing that arrives all at once with a Tab or Enter in it (over a slow remote link, say) is taken as a paste.
@@ -412,7 +415,12 @@ These are known and not yet fixed. Please do not report them as security problem
 - It saves which agents are open, their folders, and their conversation ids. It never saves what an agent printed.
 - Only if you switch cost on, it reads Claude Code's own record of each conversation it started, read-only, and keeps only the token counts and the model name.
 - It does not change Claude Code's settings.
-- Only if you switch the page on, it listens on this machine (127.0.0.1) and shows agents' status and screens to a browser here that has its address. It opens no port otherwise. It then keeps one small file of its own, the word in that address. Only if you also switch typing on can anything be sent to an agent from the page.
+- Only if you switch the page on, it listens on this machine (127.0.0.1) and shows agents' status and screens to a browser here that has its address. It opens no port otherwise. While the page only shows, it keeps one small file of its own, the word in that address; while it can type, act or start teams, the word is new each start and kept nowhere. Only if you also switch typing on can text be sent to an agent from the page, and only with starting on can the page start a saved team.
+- It keeps `teams.json` beside the workspace once you save a team; with acting on, the Board's outbox (`board-outbox.jsonl`) and what waits (`board-sent.json`), both readable by you alone.
+- It reads pictures from a `faces` folder beside the workspace only if you make one.
+- Only if you name them, it starts a program that keeps the Board and a helper; the helper is sent the screen of any agent that reports nothing. Each is given only the environment variables you list, and those are taken out of every agent's environment.
+- **A team's commands are shown on the page in full,** with their folders, to anyone with its address: do not put a key in a team's arguments.
+- **"Press Enter in …" on the page presses Enter at whatever the agent shows,** a permission question included, where it takes the highlighted choice.
 
 ## Checking your changes
 
@@ -430,7 +438,7 @@ The last three drive the real program against a stand-in agent: the first takes 
 
 ## How it is built
 
-Most of Lillignode's code is written by an AI coding agent, Claude Code, directed by a person. Every change passes the checks above and independent reviews. A release that adds features is checked by hand by a person against real agents; a patch release says in its notes what was checked and how. What has not been checked yet is listed under [Known limits in 0.2](#known-limits-in-02).
+Most of Lillignode's code is written by an AI coding agent, Claude Code, directed by a person. Every change passes the checks above and independent reviews. A release that adds features is checked by hand by a person against real agents; a patch release says in its notes what was checked and how. What has not been checked yet is listed under [Known limits in 0.3](#known-limits-in-03).
 
 ## Licence
 

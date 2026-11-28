@@ -172,12 +172,11 @@ pub struct Config {
     /// nothing seems to be doing. Its answers are shown as guesses. Off
     /// unless named.
     pub helper: Option<BoardAdapter>,
-    /// How the first screen is laid out, while the owner chooses among
-    /// three: the gnome and the large name side by side, stacked in the
-    /// middle, or the name across the top.
+    /// How the first screen is laid out: "wide" (down the left) unless the
+    /// settings name "beside" or "stacked".
     pub welcome_look: WelcomeLook,
-    /// How the page looks, while the owner chooses among three: the page
-    /// as it was ("plain", the default), or one of three finished looks.
+    /// How the page looks: "cards" unless the settings name "soft", "bold"
+    /// or "plain" (the page as it was in 0.2).
     pub page_look: PageLook,
 }
 
@@ -213,7 +212,8 @@ impl Config {
         let mut names: Vec<String> = Vec::new();
         let named = [&self.board_adapter, &self.helper].into_iter().flatten().flat_map(|p| p.env.iter());
         for name in named.chain(self.withheld_anyway.iter()) {
-            if !names.iter().any(|n| n.eq_ignore_ascii_case(name)) {
+            let same = |n: &String| if cfg!(windows) { n.eq_ignore_ascii_case(name) } else { n == name };
+            if !names.iter().any(same) {
                 names.push(name.clone());
             }
         }
@@ -458,7 +458,10 @@ pub fn load(dir: &Path) -> (Config, Option<String>) {
     let mut config = Config::default();
     let fix = match std::fs::read_to_string(&path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return (config, None),
-        Err(e) => format!("make it readable ({e})"),
+        Err(e) => format!(
+            "make it readable ({e}). Until then no environment variable is kept from agents, as none can be \
+             read from it"
+        ),
         Ok(text) => match parse(&text) {
             Ok(config) => return (config, None),
             Err(fix) => {
@@ -482,7 +485,9 @@ pub fn load(dir: &Path) -> (Config, Option<String>) {
 /// helper, read from the file as it is, whether or not the rest of it is
 /// right. None if it is not JSON at all.
 fn named_env(text: &str) -> Option<Vec<String>> {
-    let value: serde_json::Value = serde_json::from_str(text).ok()?;
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
+        return Some(env_lists_in(text));
+    };
     let mut names = Vec::new();
     for program in ["board_adapter", "helper"] {
         for name in value[program]["env"].as_array().into_iter().flatten().filter_map(|n| n.as_str()) {
@@ -490,6 +495,24 @@ fn named_env(text: &str) -> Option<Vec<String>> {
         }
     }
     Some(names)
+}
+
+/// In a file that is not JSON at all: every quoted name in a list that
+/// follows `"env"`, so a stray comma does not hand agents a key.
+fn env_lists_in(text: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    for (at, _) in text.match_indices("\"env\"") {
+        let rest = &text[at + 5..];
+        let Some(open) = rest.find('[') else { continue };
+        let Some(close) = rest[open..].find(']') else { continue };
+        for piece in rest[open + 1..open + close].split(',') {
+            let name = piece.trim().trim_matches('"').trim();
+            if !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                names.push(name.to_string());
+            }
+        }
+    }
+    names
 }
 
 #[cfg(test)]
@@ -550,6 +573,13 @@ mod tests {
         assert!(!Config::default().page_notify);
         assert!(parse(r#"{"page": true, "page_notify": true}"#).unwrap().page_notify);
         assert!(parse(r#"{"page_notify": true}"#).unwrap_err().contains("\"page_notify\""));
+    }
+
+    #[test]
+    fn a_settings_file_that_is_not_json_still_withholds_what_it_lists() {
+        let text = r#"{ "board_adapter": { "command": "a", "env": ["SERVICE_URL", "SERVICE_KEY"], }, }"#;
+        assert!(serde_json::from_str::<serde_json::Value>(text).is_err());
+        assert_eq!(named_env(text).unwrap(), ["SERVICE_URL", "SERVICE_KEY"]);
     }
 
     #[test]
