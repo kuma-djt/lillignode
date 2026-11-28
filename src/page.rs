@@ -222,9 +222,10 @@ fn look_css(name: Option<&str>) -> &'static str {
     name.and_then(|n| LOOKS.iter().find(|(look, _)| *look == n)).map_or("", |(_, css)| css)
 }
 
-/// What the browser may do with the page: load its own style and script,
-/// listen to its own address, and nothing else.
-const POLICY: &str = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; \
+/// What the browser may do with the page: load its own style, script and
+/// pictures (agents' faces), listen to its own address, and nothing else.
+const POLICY: &str =
+    "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; \
                       base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
 /// The letters a word is made of: no 0, 1, l or o, which are easily
@@ -374,6 +375,8 @@ struct Serving {
     starting: Option<Starting>,
     look: Option<&'static str>,
     notify: bool,
+    /// Agents' pictures, from the `faces` folder beside the workspace.
+    faces: Mutex<crate::faces::Faces>,
 }
 
 impl Serving {
@@ -431,6 +434,7 @@ pub fn serve(
         starting,
         look,
         notify,
+        faces: Mutex::new(crate::faces::Faces::beside(folder)),
     });
     let open = Arc::new(AtomicUsize::new(0));
     let accept = move || {
@@ -664,6 +668,15 @@ fn send(mut stream: &TcpStream, status: &str, kind: &str, body: &str) -> std::io
     stream.flush()
 }
 
+/// A picture: its bytes as they are, said to be what they are (every head
+/// already tells the browser not to guess).
+fn send_bytes(mut stream: &TcpStream, kind: &str, body: &[u8]) -> std::io::Result<()> {
+    let head = head("200 OK", kind);
+    stream.write_all(format!("{head}Content-Length: {}\r\n\r\n", body.len()).as_bytes())?;
+    stream.write_all(body)?;
+    stream.flush()
+}
+
 fn refuse(stream: &TcpStream, status: &str, why: &str) -> std::io::Result<()> {
     send(stream, status, "text/plain; charset=utf-8", why)
 }
@@ -725,6 +738,14 @@ fn answer(stream: &TcpStream, serving: &Serving) -> std::io::Result<()> {
         "page.css" => send(stream, "200 OK", "text/css; charset=utf-8", CSS),
         "page.js" => send(stream, "200 OK", "text/javascript; charset=utf-8", JS),
         "look.css" => send(stream, "200 OK", "text/css; charset=utf-8", look_css(serving.look)),
+        // An agent's picture, by the name the data gave the page.
+        face if face.starts_with("face/") => {
+            let found = serving.faces.lock().unwrap_or_else(|p| p.into_inner()).get(&face["face/".len()..]);
+            match found {
+                Some(face) => send_bytes(stream, face.kind, &face.bytes),
+                None => refuse(stream, "404 Not Found", "No such picture."),
+            }
+        }
         "state" => {
             // A screen is copied only while a reader shows it: say so, and
             // give the engine a moment to publish a copy that has it.
@@ -751,6 +772,7 @@ fn answer(stream: &TcpStream, serving: &Serving) -> std::io::Result<()> {
                 &request.query,
                 tokens,
                 serving.notify,
+                &serving.faces,
             )
         }
         "stream" => stream_states(stream, serving, &word, &request.query),
@@ -965,6 +987,7 @@ fn state_once(
     query: &str,
     tokens: Tokens,
     notify: bool,
+    faces: &Mutex<crate::faces::Faces>,
 ) -> std::io::Result<()> {
     {
         match published {
@@ -972,7 +995,7 @@ fn state_once(
                 let after = after_in(query, &published);
                 let body = json!({
                     "at": millis(published.state.taken_at),
-                    "state": state_json(&published, agent, after, tokens, notify),
+                    "state": state_json(&published, agent, after, tokens, notify, faces),
                 });
                 send(stream, "200 OK", "application/json", &body.to_string())
             }
@@ -1009,7 +1032,7 @@ fn stream_states(mut stream: &TcpStream, serving: &Serving, word: &str, query: &
                 count = newer;
                 let at = millis(published.state.taken_at);
                 let from = after.unwrap_or_else(|| after_in(query, &published));
-                let mut state = state_json(&published, agent, from, tokens, serving.notify);
+                let mut state = state_json(&published, agent, from, tokens, serving.notify, &serving.faces);
                 after = Some(from.max(published.state.as_of));
                 // Events are sent once. Apart from them, has anything
                 // changed since the last state sent?
@@ -1046,9 +1069,27 @@ fn millis(time: SystemTime) -> u64 {
 /// The state as the page reads it: every agent, the screen of `agent`, and
 /// the events numbered after `after`. Where the page may type, or act on
 /// a card, the token what it sends must carry.
-fn state_json(published: &Published, agent: Option<u64>, after: u64, tokens: Tokens, notify: bool) -> Value {
+fn state_json(
+    published: &Published,
+    agent: Option<u64>,
+    after: u64,
+    tokens: Tokens,
+    notify: bool,
+    faces: &Mutex<crate::faces::Faces>,
+) -> Value {
     let state = &published.state;
-    let agents: Vec<Value> = state.agents.iter().map(|a| agent_json(a, state.front == Some(a.key))).collect();
+    let mut faces = faces.lock().unwrap_or_else(|p| p.into_inner());
+    faces.refresh();
+    let agents: Vec<Value> = state
+        .agents
+        .iter()
+        .map(|a| {
+            let mut one = agent_json(a, state.front == Some(a.key));
+            one["face"] = json!(faces.for_agent(&a.name, a.kind.saved_word()));
+            one
+        })
+        .collect();
+    drop(faces);
     let screen = published
         .screens
         .iter()

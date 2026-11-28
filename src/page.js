@@ -230,8 +230,16 @@
         agentsList.append(li);
       }
       li.dataset.key = String(agent.key);
-      // The initials a look may show in a round picture slot.
+      // The initials a look may show in a round picture slot, or the
+      // agent's own picture where the user has put one in the faces folder.
       li.firstChild.dataset.initials = initials(agent.name);
+      if (agent.face) {
+        li.firstChild.dataset.face = agent.face;
+        li.firstChild.style.setProperty("--face", 'url("face/' + encodeURIComponent(agent.face) + '")');
+      } else if (li.firstChild.dataset.face) {
+        delete li.firstChild.dataset.face;
+        li.firstChild.style.removeProperty("--face");
+      }
       li.className = agentClass(agent);
       const button = li.firstChild;
       button.setAttribute("aria-pressed", agent.key === shown ? "true" : "false");

@@ -212,6 +212,13 @@ Instead of the two files, Lillignode can start one program of your choosing and 
 - **An old Board is not acted on.** If no Board has come from the program for a minute, the page says how long ago it last did, and nothing on it can be acted on until one comes.
 - **Nothing goes to the outbox file instead.** If the program cannot be started, says nothing for ten seconds, speaks another version of the pipe, or stops, the Board says so and nothing can be acted on until Lillignode is started again. It is not started again by itself.
 
+### Agents' faces (off until you make the folder)
+
+Make a folder `faces` beside your workspace (`lillignode --where` says where) and put a picture in it named after an agent's name or its kind: `bartlebey.png` for an agent you named Bartlebey, `claude-code.png` for every Claude Code. The page shows it in that agent's round slot; an agent with no picture keeps its initials.
+
+- **PNG, JPEG or WebP, at most 512 KB each,** whose first bytes say they are what their name says; anything else in the folder is left alone. A name is matched in lower case, with spaces as hyphens.
+- **Read from the folder only:** never fetched from the web, and the page may show pictures from its own address only. The folder is read when the page first asks and again when what is in it changes.
+
 ### A notification when an agent needs you (off unless you ask)
 
 Add `"page_notify": true` beside `"page": true` and the page offers, once, to notify you. If you turn it on (your browser asks too), the page shows one notification, with a sound, when an agent comes to need you, naming it: "reporter (work) needs you". Clicking it brings the page forward with that agent open.

@@ -87,6 +87,14 @@ header {
   flex: none; font: inherit; font-weight: 700; cursor: pointer;
   background: var(--cream); color: var(--navy); border: 0; border-radius: 3px; padding: 6px 16px;
 }
+/* An agent's own picture, where the user put one in the faces folder: it
+   takes the place of the initials in a look's round slot. */
+#agents li > button[data-face]::before {
+  content: "" !important;
+  background-image: var(--face) !important;
+  background-size: cover !important;
+  background-position: center !important;
+}
 /* Read by a screen reader, not shown. */
 .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 /* Lost contact: the loudest thing on the page, in the page's own colours

@@ -6,6 +6,7 @@ pub mod board;
 pub mod config;
 pub mod cost;
 pub mod engine;
+pub mod faces;
 pub mod fit;
 pub mod helper;
 pub mod input;

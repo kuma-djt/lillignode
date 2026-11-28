@@ -321,9 +321,18 @@ fn serve(sb: &Sandbox, port: u16, can_type: bool, can_act: bool) {
         s.new_agent("reporter");
         s.expect("a reporting stand-in starts", "STANDIN READY status");
         // A third agent, for a check that shows several states at once.
-        if std::env::var("PAGE_CHECK_THIRD").is_ok() {
-            s.new_agent("reporter");
-            s.expect("a second reporting stand-in starts", "STANDIN READY status");
+        // `PAGE_CHECK_THIRD=whole`: one that takes pastes whole, so the
+        // three have three names.
+        match std::env::var("PAGE_CHECK_THIRD").as_deref() {
+            Ok("whole") => {
+                s.new_agent("whole");
+                s.expect("a third stand-in starts", "STANDIN READY echo");
+            }
+            Ok(_) => {
+                s.new_agent("reporter");
+                s.expect("a second reporting stand-in starts", "STANDIN READY status");
+            }
+            Err(_) => {}
         }
         (s, page)
     } else {
@@ -384,6 +393,14 @@ fn serve(sb: &Sandbox, port: u16, can_type: bool, can_act: bool) {
                 println!("DONE pickup");
             }
             // A saved team of the two stand-ins, each in a folder of its own.
+            // Two pictures in the faces folder: for "plain" and "reporter".
+            ("faces", _) => {
+                let faces = sb.state.join(lillignode::faces::FOLDER);
+                std::fs::create_dir_all(&faces).unwrap();
+                std::fs::write(faces.join("plain.png"), include_bytes!("faces/plain.png")).unwrap();
+                std::fs::write(faces.join("reporter.png"), include_bytes!("faces/reporter.png")).unwrap();
+                println!("DONE faces");
+            }
             ("teams", _) => {
                 let (a, b) = (sb.root.join("web-api"), sb.root.join("web-docs"));
                 std::fs::create_dir_all(&a).unwrap();
