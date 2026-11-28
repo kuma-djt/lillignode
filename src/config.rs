@@ -607,7 +607,12 @@ mod tests {
                 "helper": {"command": "h", "env": ["service_key", "GUESS_KEY"]}}"#,
         )
         .unwrap();
-        assert_eq!(c.withheld_from_agents(), ["SERVICE_URL", "SERVICE_KEY", "GUESS_KEY"]);
+        // Windows matches names whatever their case; other systems do not.
+        if cfg!(windows) {
+            assert_eq!(c.withheld_from_agents(), ["SERVICE_URL", "SERVICE_KEY", "GUESS_KEY"]);
+        } else {
+            assert_eq!(c.withheld_from_agents(), ["SERVICE_URL", "SERVICE_KEY", "service_key", "GUESS_KEY"]);
+        }
     }
 
     #[test]
