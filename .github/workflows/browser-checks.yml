@@ -1,0 +1,102 @@
+# The page in a browser with no window, and the terminal in a real Windows
+# Terminal window, against stand-ins only. Pictures are kept for 14 days.
+name: Browser and window checks
+
+on:
+  push:
+    branches-ignore: [main]
+    paths: ['src/**', 'examples/**', 'checks/**', 'Cargo.*', '.github/workflows/browser-checks.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  page:
+    name: The page in a browser (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+      - name: Use the current stable Rust
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+      - name: Build
+        run: cargo build --release --all-targets --locked
+      - name: Nothing open
+        run: node checks/page/first-run-check.mjs out/first-run
+      - name: Phone width
+        run: node checks/page/phone-check.mjs out/phone
+      - name: Saved teams
+        run: node checks/page/teams-check.mjs out/teams
+      - name: A usage limit
+        run: node checks/page/usage-check.mjs out/usage
+      - name: A helper's guess
+        run: node checks/page/guess-check.mjs out/guess
+      - name: The three looks
+        run: node checks/page/looks-check.mjs out/looks
+      - name: Keep the pictures
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: page-${{ matrix.os }}
+          path: out
+          retention-days: 14
+
+  window:
+    name: The terminal in a real Windows Terminal window
+    runs-on: windows-2025
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Use the current stable Rust
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+      - name: Build
+        run: cargo build --release --all-targets --locked
+      - name: Microsoft's pseudo-terminal files, and Windows Terminal, each checked against its hash
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          powershell -ExecutionPolicy Bypass -File scripts\package-windows.ps1 -BesideBuild
+          New-Item -ItemType Directory -Force C:\rig\lg | Out-Null
+          curl.exe -sSL -o C:\rig\wt.zip 'https://github.com/microsoft/terminal/releases/download/v1.25.3131.0/Microsoft.WindowsTerminal_1.25.3131.0_x64.zip'
+          $h = (Get-FileHash C:\rig\wt.zip -Algorithm SHA256).Hash.ToLower()
+          if ($h -ne '273d6f1502eca1b5bd95c43f5d4d7ec72cc503df340102f8659717e5bead3437') { throw "wt.zip has hash $h" }
+          Expand-Archive C:\rig\wt.zip C:\rig\wt
+          Copy-Item target\release\lillignode.exe, target\release\conpty.dll, target\release\OpenConsole.exe, target\release\examples\standin.exe, target\release\examples\helper_standin.exe C:\rig\lg
+      - name: Each check in its own window
+        shell: powershell
+        run: |
+          Set-DisplayResolution -Width 1920 -Height 1080 -Force
+          $t = (Get-ChildItem C:\rig\wt -Recurse -Filter WindowsTerminal.exe).FullName
+          $failed = $false
+          powershell -ExecutionPolicy Bypass -File checks\window\first-run-window.ps1 -Seat ci -Program C:\rig\lg\lillignode.exe -Terminal $t -Out C:\rig\out\first-run
+          if ($LASTEXITCODE -ne 0) { $failed = $true }
+          powershell -ExecutionPolicy Bypass -File checks\window\teams-window.ps1 -Seat ci -Program C:\rig\lg\lillignode.exe -Terminal $t -Out C:\rig\out\teams
+          if ($LASTEXITCODE -ne 0) { $failed = $true }
+          powershell -ExecutionPolicy Bypass -File checks\window\usage-window.ps1 -Seat ci -Program C:\rig\lg\lillignode.exe -Standin C:\rig\lg\standin.exe -Terminal $t -Out C:\rig\out\usage
+          if ($LASTEXITCODE -ne 0) { $failed = $true }
+          powershell -ExecutionPolicy Bypass -File checks\window\guess-window.ps1 -Seat ci -Program C:\rig\lg\lillignode.exe -Standin C:\rig\lg\standin.exe -Helper C:\rig\lg\helper_standin.exe -Terminal $t -Out C:\rig\out\guess
+          if ($LASTEXITCODE -ne 0) { $failed = $true }
+          if ($failed) { exit 1 }
+      - name: Keep what was seen
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: window
+          path: C:\rig\out
+          retention-days: 14
