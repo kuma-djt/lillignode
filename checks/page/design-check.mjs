@@ -217,9 +217,10 @@ try {
   console.log("4. Undo counts down, and the card is dimmed until it is sent");
   await evaluate(press('#board li[data-id="c1"]', "/^Approve$/"));
   await sleep(2200);
-  const undo = await evaluate(`(() => { const li = document.querySelector('#board li[data-id="c1"]'); const b = li && [...li.querySelectorAll("button")].find((x) => /Undo/.test(x.textContent)); return { button: b ? b.textContent.trim() : null, opacity: li ? Number(getComputedStyle(li).opacity) : 1 }; })()`);
+  const undo = await evaluate(`(() => { const li = document.querySelector('#board li[data-id="c1"]'); const b = li && [...li.querySelectorAll("button")].find((x) => /Undo/.test(x.textContent)); const seen = (e) => { let o = 1; for (; e && e !== document.body; e = e.parentElement) o *= Number(getComputedStyle(e).opacity); return o; }; return { button: b ? b.textContent.trim() : null, title: li ? seen(li.querySelector(".card-title")) : 1, undo: b ? seen(b) : 0, count: (document.getElementById("board-count") || {}).textContent }; })()`);
   check("the Undo button counts down", /^Undo \(\d+ s\)$/.test(undo.button || ""), JSON.stringify(undo));
-  check("the card is dimmed while it can be undone", undo.opacity < 0.9, JSON.stringify(undo));
+  check("the card is dimmed while it can be undone, its Undo button not", undo.title < 0.9 && undo.undo === 1, JSON.stringify(undo));
+  check("the count no longer counts it", undo.count === "5 to act on", JSON.stringify(undo));
   await shot("desktop-undo-counting-down");
   await until(cardText("c1"), (t) => t === null || /Taken by/.test(t), 20000);
 
@@ -299,6 +300,9 @@ try {
     chat.terminalTop < chat.boxTop && chat.boxBottom >= 840 && chat.boxBottom <= 845,
     JSON.stringify(chat),
   );
+  // Its first line can be seen: nothing pinned covers it.
+  const firstLine = await evaluate(`(() => { const l = document.querySelector("#terminal > span"); if (!l) return "no line"; const r = l.getBoundingClientRect(); const e = document.elementFromPoint(r.left + 4, r.top + r.height / 2); return e && e.closest("#terminal") ? "seen" : (e ? e.tagName + "#" + e.id : "nothing"); })()`);
+  check("and the terminal's first line is in sight, not under a bar", firstLine === "seen", firstLine);
   await evaluate(`document.getElementById("back-to-agents").click()`);
   await sleep(500);
   await evaluate(`(document.getElementById("tab-board") || document.getElementById("board-open")).click()`);

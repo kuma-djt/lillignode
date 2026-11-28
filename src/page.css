@@ -272,8 +272,9 @@ li.gone .agent-name { color: var(--cream-quiet); }
 .card-sent { font-size: 12px; font-weight: 600; }
 /* Pressed, and still undoable: dimmed until it is sent. The Undo button
    stays bright, counting down. */
-#board li.held { opacity: 0.55; transition: opacity 0.2s; }
-#board li.held:hover, #board li.held:focus-within { opacity: 0.8; }
+#board li.held > :not(.card-sent):not(.card-foot), #board li.held .card-foot > .card-meta { opacity: 0.5; transition: opacity 0.2s; }
+#board li.held .card-sent { color: var(--cream-quiet); }
+#board li.held { border-style: dashed; }
 #board button.undo { margin-left: 6px; }
 /* The Board's keeper refused it: said on the card, with what to do now. */
 .card-refused {
@@ -293,8 +294,8 @@ li.gone .agent-name { color: var(--cream-quiet); }
 /* The saved teams, under the agents. */
 #teams { margin-top: 14px; border-top: 1px solid var(--rule); }
 .team-row { padding: 6px 14px 8px; border-top: 1px solid var(--rule); }
-.team-head { display: flex; align-items: center; gap: 10px; }
-.team-name { font-weight: 600; flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.team-head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; }
+.team-name { font-weight: 600; flex: 1 1 6em; min-width: 6em; overflow-wrap: anywhere; }
 .team-start { padding: 4px 12px; font-weight: 600; background: transparent; color: var(--cream); border: 1px solid var(--cream-quiet); border-radius: 3px; }
 .team-agents { list-style: none; padding: 2px 0 0; margin: 0; font-size: 12px; }
 .team-agent { padding: 1px 0; overflow-wrap: anywhere; }
@@ -327,7 +328,10 @@ body.phone main > section { overflow: visible; }
 body.phone .phone-only:not([hidden]) { display: block; }
 body.phone header { position: sticky; top: 0; z-index: 30; background: var(--navy); flex-wrap: nowrap; gap: 10px; padding: 8px 12px; }
 body.phone h1 { font-size: 17px; }
+#contact .short { display: none; }
 body.phone #contact .long { display: none; }
+body.phone #contact .short { display: inline; }
+body.phone[data-view="list"] #board-count, body.phone[data-view="board"] #board-count { display: none; }
 body.phone #contact { white-space: nowrap; }
 body.phone #contact.lost, body.phone #contact.late { white-space: normal; }
 /* Pinned under the header, never behind it. */
@@ -377,6 +381,9 @@ body.phone[data-view="agent"] #tabs { display: none; }
 body.phone[data-view="agent"] { padding-bottom: var(--typing-height, 0); }
 body.phone[data-view="agent"] #middle { display: flex; flex-direction: column; }
 body.phone #terminal { font-size: 12px; margin: 0 8px 8px; }
+body.phone[data-view="agent"] #terminal {
+  flex: none; height: calc(100dvh - var(--pinned-all, 0px) - var(--typing-height, 0px) - 96px); min-height: 160px; overflow: auto;
+}
 body.phone[data-view="agent"] #typing:not([hidden]) {
   position: fixed; left: 0; right: 0; bottom: 0; z-index: 30; margin: 0;
   padding: 8px 10px calc(8px + env(safe-area-inset-bottom, 0)); background: var(--navy); border-top: 1px solid var(--rule);

@@ -356,7 +356,7 @@
     } else {
       contact.className = "live";
       // "Last heard" is left out at phone width, where the dot says it.
-      contactWords.replaceChildren(text("span", "long", "Last heard "), ago(quiet) + " ago");
+      contactWords.replaceChildren(text("span", "long", "Last heard "), text("span", "short", "Heard "), ago(quiet) + " ago");
       contact.title = "Last heard from Lillignode " + ago(quiet) + " ago.";
     }
   }
@@ -551,7 +551,7 @@
   const boardCount = el("board-count");
   const tabBadge = document.querySelector("#tab-board .badge");
   function toAct() {
-    return board ? (board.decide || []).length + (board.yours || []).length : 0;
+    return board ? [...(board.decide || []), ...(board.yours || [])].filter((c) => !c.sent).length : 0;
   }
   function drawPhone() {
     const phone = phoneWidth.matches;
@@ -587,7 +587,7 @@
     if (phoneView !== "agent") history.pushState({ lillignode: "agent" }, "");
     phoneView = "agent";
     drawPhone();
-    window.scrollTo(0, document.body.scrollHeight);
+    window.scrollTo(0, 0);
   }
   function showList() {
     phoneView = "list";
@@ -870,10 +870,14 @@
     const did = word(ACTION_WORDS, refusal.action) || refusal.action;
     box.append(text("strong", "", refusal.state === "refused" ? "Refused by " + keeper : did + " was not sent"));
     box.append(text("p", "card-refused-why", why));
-    box.append(text("p", "card-help", "Try again, open it on " + keeper + ", or dismiss this."));
+    box.append(text("p", "card-help", "Dismiss this, try again, or open it on " + keeper + " yourself."));
     const row = text("div", "card-actions", "");
     row.append(
-      button("Try again", "main", () => {
+      button("Dismiss", "main", () => {
+        dismissed.set(card.id, refusal.key);
+        drawBoard();
+      }),
+      button("Try again", "", () => {
         dismissed.set(card.id, refusal.key);
         if (refusal.action === "revise") {
           revising = card.id;
@@ -882,10 +886,6 @@
         } else {
           act(card, refusal.action, "", false);
         }
-      }),
-      button("Dismiss", "", () => {
-        dismissed.set(card.id, refusal.key);
-        drawBoard();
       }),
     );
     box.append(row);
@@ -1141,9 +1141,7 @@
       const head = text("div", "team-head", "");
       head.append(text("span", "team-name", team.name));
       const running = runningOf(team);
-      head.append(text("span", "team-running quiet", running === team.agents.length
-        ? "running"
-        : running + " of " + team.agents.length + " running"));
+      head.append(text("span", "team-running quiet", running + " of " + team.agents.length + " running"));
       const off = startingNow || lostAt !== null || movedOn;
       if (teams.starting && askingFor !== team.name) {
         const b = document.createElement("button");

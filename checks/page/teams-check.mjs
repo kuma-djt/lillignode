@@ -229,7 +229,9 @@ try {
   const gone = await until(saidOf("docs"), (t) => (t || "").includes("Not started"), 15000);
   check("a team whose folder is gone says so, by name, under that team", (gone || "").includes("Not started: plain (gone): its folder"), gone);
   const webStill = await evaluate(saidOf("web"));
-  check("and what the other team's start came to stays under that team", (webStill || "").startsWith('Started the team "web"'), webStill);
+  // A start that went through is said for a few seconds, then goes, so
+  // the team is as it was; it is never said under another team.
+  check("what the other team's start came to is under that team, or gone after its few seconds", webStill === null || (webStill || "").startsWith('Started the team "web"'), webStill);
   await picture("04-folder-gone");
   await filmed;
 
